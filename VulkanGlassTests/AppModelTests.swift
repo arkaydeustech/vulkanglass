@@ -3,6 +3,114 @@ import XCTest
 
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testConnectGitHubFallsBackToPATWhenCLIIsRejected() async {
+        let dependencies = AppModelDependencies(
+            githubCLIStatus: { _ in GitHubCLIStatus(executablePath: "/usr/local/bin/gh", token: "cli") },
+            githubUser: { token in
+                if token == "cli" { throw GitHubError.api("CLI rejected") }
+                return GitHubUser(login: "pat-user", name: nil, avatarURL: "")
+            },
+            githubRepos: { _ in [] },
+            loadKeychainToken: { "pat" },
+            saveKeychainToken: { _ in }
+        )
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+
+        await model.connectGitHub()
+
+        XCTAssertEqual(model.githubAuthSource, .personalAccessToken)
+        XCTAssertEqual(model.githubUser?.login, "pat-user")
+        XCTAssertEqual(model.gitCredential, .personalAccessToken("pat"))
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testNewerGitHubConnectionWinsWhenCLISettingChanges() async throws {
+        let dependencies = AppModelDependencies(
+            githubCLIStatus: { includeToken in
+                if includeToken {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    return GitHubCLIStatus(executablePath: "/usr/local/bin/gh", token: "cli")
+                }
+                return GitHubCLIStatus(executablePath: "/usr/local/bin/gh", token: nil)
+            },
+            githubUser: { token in GitHubUser(login: token, name: nil, avatarURL: "") },
+            githubRepos: { _ in [] },
+            loadKeychainToken: { "pat" },
+            saveKeychainToken: { _ in }
+        )
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+
+        let staleConnection = Task { await model.connectGitHub() }
+        try await Task.sleep(for: .milliseconds(20))
+        model.settings.useGitHubCLI = false
+        await model.connectGitHub()
+        await staleConnection.value
+
+        XCTAssertEqual(model.githubAuthSource, .personalAccessToken)
+        XCTAssertEqual(model.githubUser?.login, "pat")
+        XCTAssertEqual(model.gitCredential, .personalAccessToken("pat"))
+    }
+
+    func testConnectGitHubClearsStateWhenAllCandidatesFail() async {
+        final class State {
+            var shouldFail = false
+        }
+        let state = State()
+        let dependencies = AppModelDependencies(
+            githubCLIStatus: { _ in GitHubCLIStatus(executablePath: nil, token: nil) },
+            githubUser: { token in
+                if state.shouldFail { throw GitHubError.api("Rejected") }
+                return GitHubUser(login: token, name: nil, avatarURL: "")
+            },
+            githubRepos: { _ in [] },
+            loadKeychainToken: { "pat" },
+            saveKeychainToken: { _ in }
+        )
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        await model.connectGitHub()
+        XCTAssertNotNil(model.githubUser)
+
+        state.shouldFail = true
+        await model.connectGitHub()
+
+        XCTAssertNil(model.githubUser)
+        XCTAssertTrue(model.githubRepos.isEmpty)
+        XCTAssertNil(model.githubAuthSource)
+        XCTAssertNil(model.token)
+        XCTAssertEqual(model.errorMessage, "Rejected")
+    }
+
+    func testSaveTokenValidatesPATBeforePersistingEvenWhenCLIIsValid() async {
+        final class Store {
+            var saved: [String] = []
+        }
+        let store = Store()
+        let dependencies = AppModelDependencies(
+            githubCLIStatus: { _ in GitHubCLIStatus(executablePath: "/usr/local/bin/gh", token: "cli") },
+            githubUser: { token in
+                if token == "invalid" { throw GitHubError.api("Invalid PAT") }
+                return GitHubUser(login: token, name: nil, avatarURL: "")
+            },
+            githubRepos: { token in
+                if token == "invalid" { throw GitHubError.api("Invalid PAT") }
+                return []
+            },
+            loadKeychainToken: { store.saved.last },
+            saveKeychainToken: { store.saved.append($0) }
+        )
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+
+        await model.saveToken("invalid")
+        XCTAssertTrue(store.saved.isEmpty)
+        XCTAssertEqual(model.errorMessage, "Invalid PAT")
+
+        await model.saveToken("valid-pat")
+        XCTAssertEqual(store.saved, ["valid-pat"])
+        XCTAssertEqual(model.githubAuthSource, .gitHubCLI)
+        XCTAssertEqual(model.gitCredential, .gitHubCLI(executablePath: "/usr/local/bin/gh"))
+        XCTAssertNil(model.errorMessage)
+    }
+
     func testAutosavePersistsTheEditedTabAfterSwitching() async throws {
         let root = try temporaryDirectory()
         let a = root.appendingPathComponent("A.md")
@@ -69,6 +177,139 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.tabs[0].content, "remote clean")
         XCTAssertEqual(model.tabs[1].content, "local edit")
         XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testOpeningMissingVaultStaysOnWelcomeAndForgetsRecent() async {
+        let original = SettingsStore.load()
+        defer { SettingsStore.save(original) }
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SampleVault-\(UUID().uuidString)")
+        var settings = AppSettings.default()
+        settings.recentVaults = [
+            RecentVault(name: "SampleVault", path: missing.path, remote: nil, lastOpened: 0),
+            RecentVault(name: "KeepMe", path: "/tmp/keep-me", remote: nil, lastOpened: 0)
+        ]
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+
+        await model.openVault(path: missing.path)
+
+        XCTAssertNil(model.vault)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertFalse(model.inWorkspace)
+        XCTAssertNil(model.busyMessage)
+        XCTAssertEqual(model.errorMessage, FileServiceError.missingVault(missing.lastPathComponent).localizedDescription)
+        XCTAssertEqual(model.settings.recentVaults.map(\.name), ["KeepMe"])
+    }
+
+    func testOpeningExistingFolderEntersWorkspace() async throws {
+        let original = SettingsStore.load()
+        defer { SettingsStore.save(original) }
+        let root = try temporaryDirectory()
+        try "# Welcome".write(to: root.appendingPathComponent("Welcome.md"), atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+
+        await model.openVault(path: root.path)
+
+        XCTAssertEqual(model.vault?.path, root.path)
+        XCTAssertTrue(model.inWorkspace)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.tabs.first?.title, "Welcome")
+    }
+
+    func testRenameUpdatesOpenTabAndPreservesDirtyContent() async throws {
+        let original = SettingsStore.load()
+        defer { SettingsStore.save(original) }
+        let root = try temporaryDirectory()
+        let source = root.appendingPathComponent("Untitled.md")
+        try "draft".write(to: source, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = [
+            NoteTab(path: source.path, title: "Untitled", content: "edited", originalContent: "draft", isStandalone: false)
+        ]
+        model.activeTabID = source.path
+
+        await model.renameNote(path: source.path, newName: "Hello")
+
+        let dest = FileService.canonicalURL(root.appendingPathComponent("Hello.md"))
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(
+            model.activeTabID.map { FileService.canonicalURL(URL(fileURLWithPath: $0)).path },
+            dest.path
+        )
+        XCTAssertEqual(model.tabs.first?.title, "Hello")
+        XCTAssertEqual(
+            model.tabs.first.map { FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path },
+            dest.path
+        )
+        XCTAssertEqual(try FileService.read(dest), "edited")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    func testRenameStandaloneFileRetargetsTheOpenTab() async throws {
+        let root = try temporaryDirectory()
+        let source = root.appendingPathComponent("Solo.md")
+        try "body".write(to: source, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = [NoteTab(path: source.path, title: "Solo", content: "body", originalContent: "body", isStandalone: true)]
+        model.activeTabID = source.path
+
+        await model.renameNote(path: source.path, newName: "Renamed")
+
+        let destination = root.appendingPathComponent("Renamed.md")
+        XCTAssertEqual(model.activeTabID, destination.path)
+        XCTAssertEqual(model.tabs.first?.path, destination.path)
+        XCTAssertEqual(model.tabs.first?.title, "Renamed")
+        XCTAssertEqual(try FileService.read(destination), "body")
+    }
+
+    func testRenameCollisionPublishesErrorAndKeepsOriginalTab() async throws {
+        let root = try temporaryDirectory()
+        let source = root.appendingPathComponent("Source.md")
+        let taken = root.appendingPathComponent("Taken.md")
+        try "source".write(to: source, atomically: true, encoding: .utf8)
+        try "taken".write(to: taken, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = [NoteTab(path: source.path, title: "Source", content: "source", originalContent: "source", isStandalone: true)]
+        model.activeTabID = source.path
+
+        await model.renameNote(path: source.path, newName: "Taken")
+
+        XCTAssertEqual(model.activeTabID, source.path)
+        XCTAssertEqual(model.tabs.first?.path, source.path)
+        XCTAssertEqual(model.errorMessage, FileServiceError.nameTaken("Taken.md").localizedDescription)
+        XCTAssertEqual(try FileService.read(source), "source")
+    }
+
+    func testRenameStopsWhenDirtyTabCannotBeSaved() async {
+        let source = "/dev/null/Unsaved.md"
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = [NoteTab(path: source, title: "Unsaved", content: "new", originalContent: "old", isStandalone: true)]
+        model.activeTabID = source
+
+        await model.renameNote(path: source, newName: "Renamed")
+
+        XCTAssertEqual(model.activeTabID, source)
+        XCTAssertEqual(model.tabs.first?.path, source)
+        XCTAssertTrue(model.tabs.first?.dirty == true)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testRenameIgnoresEmptyAndUnchangedNames() async throws {
+        let root = try temporaryDirectory()
+        let source = root.appendingPathComponent("Same.md")
+        try "body".write(to: source, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = [NoteTab(path: source.path, title: "Same", content: "body", originalContent: "body", isStandalone: true)]
+
+        await model.renameNote(path: source.path, newName: "   ")
+        await model.renameNote(path: source.path, newName: "Same.md")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(model.tabs.first?.path, source.path)
+        XCTAssertNil(model.errorMessage)
     }
 
     private func temporaryDirectory() throws -> URL {

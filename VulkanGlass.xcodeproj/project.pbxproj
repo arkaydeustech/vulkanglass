@@ -10,6 +10,7 @@
 		535F4DB428F2E12CA628E56D /* EditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */; };
 		FD609980C11A43562D1188D7 /* FileExplorerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AEE9ECEC806892403B21D3D /* FileExplorerView.swift */; };
 		51EB17D15ED38BC20EF2AB9F /* FileService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0625A934CA994BD43ED5E83 /* FileService.swift */; };
+		9D38774F83C4777B23289DB7 /* GitHubCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17B56885DFF9E899ADA3E5B1 /* GitHubCLIService.swift */; };
 		DC271D14F28A860A8AB93D33 /* GitHubService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E1F67874442B55D0C583834 /* GitHubService.swift */; };
 		6AEDEAA304D32442A2813C2F /* GitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A8FE378C36995E8B5194EC /* GitService.swift */; };
 		2F33E1A2E4D02D735E23674E /* GraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61AAAB7316018B1C2E97B10B /* GraphView.swift */; };
@@ -25,8 +26,10 @@
 		010A1717B1853D0CE9EC0F84 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 911DAA6D3C2457F595D32DC5 /* Theme.swift */; };
 		6EC36D9CED9AA09F619136FA /* VulkanGlassApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E88E7EC49D83A8C22E7C8C06 /* VulkanGlassApp.swift */; };
 		CF42D3A8DFC1BC74723E57BD /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8D41BB89E6CDA35129B68AF /* WelcomeView.swift */; };
+		8F9C42C1465AF470CC488684 /* WikiLinkSuggest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AB16AB53B5209C8353D89CD /* WikiLinkSuggest.swift */; };
 		6DE92AC11366DCEBCC3EAF78 /* WorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D48A4662A5933F034B907FE /* WorkspaceView.swift */; };
 		3C642F51BDE57C04ED72BD8F /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */; };
+		4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */; };
 		0008B1898EB1B9ACA79DC4A6 /* GitServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E091D111CB3836061C3D76 /* GitServiceTests.swift */; };
 		73429833E75444B2B54E8F58 /* GraphAndFileServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */; };
 		9B2AF4F97D758C0C68D2545A /* ParserAndMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */; };
@@ -53,6 +56,7 @@
 				8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */,
 				4AEE9ECEC806892403B21D3D /* FileExplorerView.swift */,
 				A0625A934CA994BD43ED5E83 /* FileService.swift */,
+				17B56885DFF9E899ADA3E5B1 /* GitHubCLIService.swift */,
 				0E1F67874442B55D0C583834 /* GitHubService.swift */,
 				60A8FE378C36995E8B5194EC /* GitService.swift */,
 				61AAAB7316018B1C2E97B10B /* GraphView.swift */,
@@ -68,6 +72,7 @@
 				911DAA6D3C2457F595D32DC5 /* Theme.swift */,
 				E88E7EC49D83A8C22E7C8C06 /* VulkanGlassApp.swift */,
 				D8D41BB89E6CDA35129B68AF /* WelcomeView.swift */,
+				1AB16AB53B5209C8353D89CD /* WikiLinkSuggest.swift */,
 				0D48A4662A5933F034B907FE /* WorkspaceView.swift */,
 				D76BE393AED47506E6EA937A /* Info.plist */,
 				8250F8227BCC59E0B9D94661 /* VulkanGlass.entitlements */,
@@ -80,6 +85,7 @@
 			isa = PBXGroup;
 			children = (
 				88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */,
+				7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */,
 				E5E091D111CB3836061C3D76 /* GitServiceTests.swift */,
 				64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */,
 				4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */,
@@ -110,6 +116,7 @@
 		8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
 		4AEE9ECEC806892403B21D3D /* FileExplorerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerView.swift; sourceTree = "<group>"; };
 		A0625A934CA994BD43ED5E83 /* FileService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileService.swift; sourceTree = "<group>"; };
+		17B56885DFF9E899ADA3E5B1 /* GitHubCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCLIService.swift; sourceTree = "<group>"; };
 		0E1F67874442B55D0C583834 /* GitHubService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubService.swift; sourceTree = "<group>"; };
 		60A8FE378C36995E8B5194EC /* GitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitService.swift; sourceTree = "<group>"; };
 		61AAAB7316018B1C2E97B10B /* GraphView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphView.swift; sourceTree = "<group>"; };
@@ -125,8 +132,10 @@
 		911DAA6D3C2457F595D32DC5 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		E88E7EC49D83A8C22E7C8C06 /* VulkanGlassApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VulkanGlassApp.swift; sourceTree = "<group>"; };
 		D8D41BB89E6CDA35129B68AF /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
+		1AB16AB53B5209C8353D89CD /* WikiLinkSuggest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WikiLinkSuggest.swift; sourceTree = "<group>"; };
 		0D48A4662A5933F034B907FE /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
 		88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
+		7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCLIServiceTests.swift; sourceTree = "<group>"; };
 		E5E091D111CB3836061C3D76 /* GitServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitServiceTests.swift; sourceTree = "<group>"; };
 		64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphAndFileServiceTests.swift; sourceTree = "<group>"; };
 		4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParserAndMarkdownTests.swift; sourceTree = "<group>"; };
@@ -144,6 +153,7 @@
 				535F4DB428F2E12CA628E56D /* EditorView.swift in Sources */,
 				FD609980C11A43562D1188D7 /* FileExplorerView.swift in Sources */,
 				51EB17D15ED38BC20EF2AB9F /* FileService.swift in Sources */,
+				9D38774F83C4777B23289DB7 /* GitHubCLIService.swift in Sources */,
 				DC271D14F28A860A8AB93D33 /* GitHubService.swift in Sources */,
 				6AEDEAA304D32442A2813C2F /* GitService.swift in Sources */,
 				2F33E1A2E4D02D735E23674E /* GraphView.swift in Sources */,
@@ -159,6 +169,7 @@
 				010A1717B1853D0CE9EC0F84 /* Theme.swift in Sources */,
 				6EC36D9CED9AA09F619136FA /* VulkanGlassApp.swift in Sources */,
 				CF42D3A8DFC1BC74723E57BD /* WelcomeView.swift in Sources */,
+				8F9C42C1465AF470CC488684 /* WikiLinkSuggest.swift in Sources */,
 				6DE92AC11366DCEBCC3EAF78 /* WorkspaceView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -168,6 +179,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3C642F51BDE57C04ED72BD8F /* AppModelTests.swift in Sources */,
+				4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */,
 				0008B1898EB1B9ACA79DC4A6 /* GitServiceTests.swift in Sources */,
 				73429833E75444B2B54E8F58 /* GraphAndFileServiceTests.swift in Sources */,
 				9B2AF4F97D758C0C68D2545A /* ParserAndMarkdownTests.swift in Sources */,

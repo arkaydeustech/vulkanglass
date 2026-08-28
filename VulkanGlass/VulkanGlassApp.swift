@@ -29,6 +29,7 @@ struct VulkanGlassApp: App {
         }
         .defaultSize(width: 1320, height: 860)
         .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New note") { Task { await model.newNote() } }

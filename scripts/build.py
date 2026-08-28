@@ -42,7 +42,14 @@ def main() -> None:
         sys.exit("Built app not found")
     app = max(apps, key=lambda p: p.stat().st_mtime)
     print(f"Launching {app}")
-    subprocess.check_call(["open", str(app)])
+    # Launch Services reuses a running copy of the same bundle ID; quit it first.
+    subprocess.run(
+        ["osascript", "-e", 'tell application "Vulkan Glass" to quit'],
+        check=False,
+        capture_output=True,
+    )
+    subprocess.run(["killall", "VulkanGlass"], check=False, capture_output=True)
+    subprocess.check_call(["open", "-n", str(app)])
 
 
 if __name__ == "__main__":

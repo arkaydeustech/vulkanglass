@@ -152,22 +152,31 @@ struct SettingsSheet: View {
             Text("Settings").font(.title2.weight(.semibold))
             Group {
                 Text("GITHUB").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                Text("Vaults are GitHub repositories. Create a personal access token with repo scope. It is stored in the macOS Keychain.")
+                Text(githubHelpText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(model.githubUser.map { "Signed in as \($0.login)" } ?? "Not connected")
+                Toggle("Use GitHub CLI when installed", isOn: Bindable(model).settings.useGitHubCLI)
+                    .onChange(of: model.settings.useGitHubCLI) { _, _ in
+                        SettingsStore.save(model.settings)
+                        Task { await model.connectGitHub() }
+                    }
+                Text(connectionStatus)
                     .foregroundStyle(VGTheme.textAccent)
+                Text("A personal access token with repo scope is stored in the macOS Keychain and used if GitHub CLI is unavailable or turned off.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
                     SecureField("ghp_…", text: $token)
                     Button("Save") {
                         Task {
                             await model.saveToken(token)
                             token = ""
-                            message = model.errorMessage ?? "GitHub connected."
+                            message = saveMessage
                         }
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(VGTheme.accent)
+                    .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 if let message { Text(message).font(.caption) }
             }
@@ -192,7 +201,40 @@ struct SettingsSheet: View {
             Button("Done") { model.settingsOpen = false }
         }
         .padding(24)
-        .frame(width: 520, height: 420)
+        .frame(width: 520, height: 500)
+        .task { await model.connectGitHub() }
+    }
+
+    private var githubHelpText: String {
+        if model.githubCLIStatus.isInstalled {
+            return "GitHub CLI detected. Vulkan Glass signs in with it automatically when you are logged in (gh auth login)."
+        }
+        return "GitHub CLI was not found. Install gh (https://cli.github.com), or paste a personal access token with repo scope."
+    }
+
+    private var connectionStatus: String {
+        if let user = model.githubUser {
+            switch model.githubAuthSource {
+            case .gitHubCLI:
+                return "Signed in as \(user.login) via GitHub CLI"
+            case .personalAccessToken:
+                return "Signed in as \(user.login) with a personal access token"
+            case nil:
+                return "Signed in as \(user.login)"
+            }
+        }
+        if model.settings.useGitHubCLI, model.githubCLIStatus.isInstalled, !model.githubCLIStatus.isAuthenticated {
+            return "GitHub CLI is not logged in. Run gh auth login, or paste a token."
+        }
+        return "Not connected"
+    }
+
+    private var saveMessage: String {
+        if let error = model.errorMessage { return error }
+        if model.githubAuthSource == .gitHubCLI {
+            return "Token saved as a fallback. Using GitHub CLI."
+        }
+        return "GitHub connected."
     }
 }
 

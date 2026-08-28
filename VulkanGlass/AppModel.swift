@@ -3,6 +3,24 @@ import Foundation
 import Observation
 import UniformTypeIdentifiers
 
+struct AppModelDependencies {
+    var githubCLIStatus: (Bool) async -> GitHubCLIStatus
+    var githubUser: (String) async throws -> GitHubUser
+    var githubRepos: (String) async throws -> [GitHubRepo]
+    var loadKeychainToken: () -> String?
+    var saveKeychainToken: (String) throws -> Void
+
+    static let live = AppModelDependencies(
+        githubCLIStatus: { includeToken in
+            await Task.detached { GitHubCLIService.status(includeToken: includeToken) }.value
+        },
+        githubUser: { try await GitHubService.user(token: $0) },
+        githubRepos: { try await GitHubService.repos(token: $0) },
+        loadKeychainToken: { KeychainService.load() },
+        saveKeychainToken: { try KeychainService.save(token: $0) }
+    )
+}
+
 /// Central application state for vaults, tabs, and GitHub sync.
 @MainActor
 @Observable
@@ -30,10 +48,26 @@ final class AppModel {
     var createOpen = false
     var errorMessage: String?
     var busyMessage: String?
+    var githubCLIStatus = GitHubCLIStatus()
+    var githubAuthSource: GitHubAuthSource?
 
     var inWorkspace: Bool { vault != nil || !tabs.isEmpty }
     var dark: Bool { settings.darkMode }
-    var token: String? { KeychainService.load() }
+    var token: String? { activeToken }
+    var gitCredential: GitCredential? {
+        guard let activeToken, let githubAuthSource else { return nil }
+        switch githubAuthSource {
+        case .gitHubCLI:
+            guard let executablePath = githubCLIStatus.executablePath else { return nil }
+            return .gitHubCLI(executablePath: executablePath)
+        case .personalAccessToken:
+            return .personalAccessToken(activeToken)
+        }
+    }
+
+    private var activeToken: String?
+    private let dependencies: AppModelDependencies
+    private var githubConnectionGeneration = 0
 
     var activeTab: NoteTab? { tabs.first { $0.id == activeTabID } }
     var wordCount: Int { Markdown.wordCount(activeTab?.content ?? "") }
@@ -41,23 +75,21 @@ final class AppModel {
     private var saveTasks: [String: Task<Void, Never>] = [:]
     private var syncTask: Task<Void, Never>?
 
-    init(settings: AppSettings? = nil, bootstrapOnLaunch: Bool = true) {
+    init(
+        settings: AppSettings? = nil,
+        bootstrapOnLaunch: Bool = true,
+        dependencies: AppModelDependencies = .live
+    ) {
         self.settings = settings ?? SettingsStore.load()
+        self.dependencies = dependencies
         if bootstrapOnLaunch {
             Task { await bootstrap() }
         }
     }
 
-    /// Loads GitHub identity if a token is already in the keychain, and opens `--vault`.
+    /// Loads GitHub identity from GitHub CLI or a saved PAT, then opens `--vault`.
     func bootstrap() async {
-        if let token {
-            do {
-                githubUser = try await GitHubService.user(token: token)
-                githubRepos = try await GitHubService.repos(token: token)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
+        await connectGitHub()
         let args = ProcessInfo.processInfo.arguments
         if let index = args.firstIndex(of: "--vault"), args.indices.contains(index + 1) {
             let path = args[index + 1]
@@ -65,14 +97,61 @@ final class AppModel {
         }
     }
 
+    /// Resolves a GitHub token from `gh` (when enabled and available) or the Keychain PAT.
+    func connectGitHub() async {
+        githubConnectionGeneration &+= 1
+        let generation = githubConnectionGeneration
+        let useCLI = settings.useGitHubCLI
+        let status = await dependencies.githubCLIStatus(useCLI)
+        guard isCurrentGitHubConnection(generation, useCLI: useCLI) else { return }
+        githubCLIStatus = status
+        let candidates = GitHubAuthResolver.candidates(
+            useCLI: useCLI,
+            cliToken: status.token,
+            keychainToken: dependencies.loadKeychainToken()
+        )
+        if candidates.isEmpty {
+            clearGitHubConnection(error: nil)
+            return
+        }
+        var lastError: Error?
+        for candidate in candidates {
+            do {
+                let user = try await dependencies.githubUser(candidate.token)
+                guard isCurrentGitHubConnection(generation, useCLI: useCLI) else { return }
+                let repos = try await dependencies.githubRepos(candidate.token)
+                guard isCurrentGitHubConnection(generation, useCLI: useCLI) else { return }
+                githubUser = user
+                githubRepos = repos
+                activeToken = candidate.token
+                githubAuthSource = candidate.source
+                errorMessage = nil
+                return
+            } catch {
+                guard isCurrentGitHubConnection(generation, useCLI: useCLI) else { return }
+                lastError = error
+            }
+        }
+        clearGitHubConnection(error: lastError)
+    }
+
+    /// Inspects and opens a vault folder. Missing paths toast and return to welcome.
     func openVault(path: String) async {
         busyMessage = "Inspecting vault…"
+        guard FileService.directoryExists(at: path) else {
+            rejectMissingVault(path: path, name: URL(fileURLWithPath: path).lastPathComponent)
+            return
+        }
         let info = await Task.detached { GitService.inspect(path: path) }.value
         await openVault(info)
     }
 
     /// Opens a GitHub-backed vault folder.
     func openVault(_ info: VaultInfo) async {
+        guard FileService.directoryExists(at: info.path) else {
+            rejectMissingVault(path: info.path, name: info.name)
+            return
+        }
         if (!tabs.isEmpty || vault != nil), vault?.path != info.path, !(await flushDirtyTabs()) {
             busyMessage = nil
             return
@@ -81,12 +160,12 @@ final class AppModel {
         remember(info)
         busyMessage = "Opening vault…"
         let path = info.path
-        let token = info.isGitHub ? token : nil
+        let credential = info.isGitHub ? gitCredential : nil
         let hasRemote = info.remote != nil
         let pulled: GitStatus = await Task.detached {
             do {
                 if hasRemote {
-                    return try GitService.pull(path: path, token: token)
+                    return try GitService.pull(path: path, credential: credential)
                 }
                 return GitService.status(path: path)
             } catch {
@@ -324,6 +403,46 @@ final class AppModel {
         }
     }
 
+    /// Renames a note on disk and retargets any open tab for that file.
+    func renameNote(path: String, newName: String) async {
+        let currentTitle = Markdown.title(from: path)
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var proposed = trimmed
+        if proposed.lowercased().hasSuffix(".md") {
+            proposed.removeLast(3)
+            proposed = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard proposed != currentTitle else { return }
+
+        if let tab = tabs.first(where: { $0.path == path }), tab.dirty {
+            guard await save(id: tab.id, sync: false) else { return }
+        }
+
+        let root = vault.map { URL(fileURLWithPath: $0.path) }
+        do {
+            let source = URL(fileURLWithPath: path)
+            let dest = try await Task.detached {
+                try FileService.rename(source, to: newName, root: root)
+            }.value
+            retargetOpenItems(from: path, to: dest.path)
+            if vault != nil {
+                await refreshVault(reconcileTabs: true)
+                if let aligned = notes.first(where: {
+                    FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path
+                        == FileService.canonicalURL(dest).path
+                })?.path, aligned != dest.path {
+                    retargetOpenItems(from: dest.path, to: aligned)
+                }
+                if settings.autoSync {
+                    await syncNow(message: "Rename \(currentTitle) to \(Markdown.title(from: dest.path))")
+                }
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func deletePath(_ path: String) async {
         guard let vault else { return }
         do {
@@ -358,11 +477,11 @@ final class AppModel {
         guard let vault else { return }
         gitStatus = GitStatus(state: .syncing, branch: vault.branch, remote: vault.remote, message: "Syncing…")
         let path = vault.path
-        let token = vault.isGitHub ? token : nil
+        let credential = vault.isGitHub ? gitCredential : nil
         let msg = message ?? "Update \(activeTab?.title ?? "notes")"
         do {
             let status = try await Task.detached {
-                try GitService.sync(path: path, message: msg, token: token)
+                try GitService.sync(path: path, message: msg, credential: credential)
             }.value
             gitStatus = status
             await refreshVault(reconcileTabs: true)
@@ -374,11 +493,16 @@ final class AppModel {
 
     func saveToken(_ raw: String) async {
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            errorMessage = GitHubError.noToken.localizedDescription
+            return
+        }
         do {
-            try KeychainService.save(token: normalized)
-            githubUser = try await GitHubService.user(token: normalized)
-            githubRepos = try await GitHubService.repos(token: normalized)
+            _ = try await dependencies.githubUser(normalized)
+            _ = try await dependencies.githubRepos(normalized)
+            try dependencies.saveKeychainToken(normalized)
             errorMessage = nil
+            await connectGitHub()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -389,7 +513,7 @@ final class AppModel {
             errorMessage = GitHubError.badInput.localizedDescription
             return
         }
-        guard let token else {
+        guard token != nil, let credential = gitCredential else {
             errorMessage = GitHubError.noToken.localizedDescription
             settingsOpen = true
             return
@@ -399,7 +523,7 @@ final class AppModel {
             let dest = URL(fileURLWithPath: settings.vaultsRoot, isDirectory: true)
             let cloneURL = "https://github.com/\(parsed.owner)/\(parsed.repo).git"
             let url = try await Task.detached {
-                try GitService.clone(cloneURL: cloneURL, destDir: dest, token: token)
+                try GitService.clone(cloneURL: cloneURL, destDir: dest, credential: credential)
             }.value
             cloneOpen = false
             busyMessage = nil
@@ -411,7 +535,7 @@ final class AppModel {
     }
 
     func createGithubVault(name: String, isPrivate: Bool) async {
-        guard let token else {
+        guard let token, let credential = gitCredential else {
             errorMessage = GitHubError.noToken.localizedDescription
             settingsOpen = true
             return
@@ -430,13 +554,12 @@ final class AppModel {
             Try a wiki link: [[Welcome]]
             """
             try FileService.write(dest.appendingPathComponent("Welcome.md"), content: welcome)
-            let tokenCopy = token
             _ = try await Task.detached {
                 try GitService.initAndPush(
                     path: dest.path,
                     remoteURL: repo.cloneURL,
                     message: "Initial commit from Vulkan Glass",
-                    token: tokenCopy
+                    credential: credential
                 )
             }.value
             createOpen = false
@@ -450,11 +573,64 @@ final class AppModel {
 
     func loadRepos() async {
         guard let token else { return }
-        githubRepos = (try? await GitHubService.repos(token: token)) ?? []
+        githubRepos = (try? await dependencies.githubRepos(token)) ?? []
+    }
+
+    private func isCurrentGitHubConnection(_ generation: Int, useCLI: Bool) -> Bool {
+        generation == githubConnectionGeneration && settings.useGitHubCLI == useCLI
+    }
+
+    private func clearGitHubConnection(error: Error?) {
+        activeToken = nil
+        githubAuthSource = nil
+        githubUser = nil
+        githubRepos = []
+        errorMessage = error?.localizedDescription
     }
 
     func patchSettings(_ mutate: (inout AppSettings) -> Void) {
         mutate(&settings)
+        SettingsStore.save(settings)
+    }
+
+    /// Updates open tabs after a file is renamed on disk.
+    private func retargetOpenItems(from oldPath: String, to newPath: String) {
+        if let task = saveTasks.removeValue(forKey: oldPath) {
+            task.cancel()
+        }
+        if let index = tabs.firstIndex(where: { $0.path == oldPath }) {
+            tabs[index].path = newPath
+            tabs[index].title = Markdown.title(from: newPath)
+        }
+        if activeTabID == oldPath {
+            activeTabID = newPath
+        }
+    }
+
+    /// Shows a toast and returns to the welcome screen when a vault folder is gone.
+    private func rejectMissingVault(path: String, name: String) {
+        busyMessage = nil
+        errorMessage = FileServiceError.missingVault(name).localizedDescription
+        forgetRecent(path: path)
+        if vault == nil || vault?.path == path {
+            saveTasks.values.forEach { $0.cancel() }
+            saveTasks = [:]
+            syncTask?.cancel()
+            vault = nil
+            fileTree = []
+            notes = []
+            tabs = []
+            activeTabID = nil
+            gitStatus = nil
+            centerView = .editor
+        }
+    }
+
+    /// Drops a vanished vault from the recents list so it cannot trap the user again.
+    private func forgetRecent(path: String) {
+        let remaining = settings.recentVaults.filter { $0.path != path }
+        guard remaining.count != settings.recentVaults.count else { return }
+        settings.recentVaults = remaining
         SettingsStore.save(settings)
     }
 

@@ -4,6 +4,9 @@ import Foundation
 enum FileServiceError: LocalizedError, Equatable {
     case invalidRelativePath(String)
     case outsideRoot(String)
+    case missingVault(String)
+    case nameTaken(String)
+    case symbolicLinkRenameUnsupported(String)
 
     var errorDescription: String? {
         switch self {
@@ -11,12 +14,24 @@ enum FileServiceError: LocalizedError, Equatable {
             return "Invalid file or folder name: \(value)"
         case .outsideRoot(let path):
             return "The requested path is outside the vault: \(path)"
+        case .missingVault(let name):
+            return "The vault “\(name)” doesn’t exist."
+        case .nameTaken(let name):
+            return "A file named \(name) already exists."
+        case .symbolicLinkRenameUnsupported(let path):
+            return "Symbolic-link notes cannot be renamed in Vulkan Glass: \(path)"
         }
     }
 }
 
 enum FileService {
     private static let skipped = Set([".git", "node_modules", ".obsidian", ".vulkan-glass", "dist", "out"])
+
+    /// Returns whether `path` exists on disk and is a directory.
+    static func directoryExists(at path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
 
     static func tree(at root: URL) -> [FileNode] {
         let root = canonicalURL(root)
@@ -55,6 +70,96 @@ enum FileService {
     static func moveToTrash(_ url: URL, root: URL) throws {
         let canonical = try validateExisting(url, inside: root)
         try FileManager.default.trashItem(at: canonical, resultingItemURL: nil)
+    }
+
+    /// Renames a Markdown file in place, keeping it in the same folder.
+    static func rename(_ url: URL, to newName: String, root: URL?) throws -> URL {
+        let fileName = try markdownFileName(from: newName)
+        let original = url.standardizedFileURL
+        if try original.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
+            throw FileServiceError.symbolicLinkRenameUnsupported(original.path)
+        }
+        let source: URL
+        if let root {
+            source = try validateExisting(original, inside: root)
+        } else {
+            source = canonicalURL(original)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue
+            else {
+                throw FileServiceError.invalidRelativePath(url.path)
+            }
+        }
+
+        let destination = original.deletingLastPathComponent().appendingPathComponent(fileName)
+        if let root {
+            let canonicalRoot = canonicalURL(root)
+            let destCanonical = canonicalURL(destination)
+            let sourceParent = canonicalURL(source.deletingLastPathComponent())
+            let destParent = canonicalURL(destination.deletingLastPathComponent())
+            guard destParent.path == sourceParent.path,
+                  destCanonical.path.hasPrefix(canonicalRoot.path + "/")
+            else {
+                throw FileServiceError.outsideRoot(destination.path)
+            }
+        }
+
+        let sourceCanonical = canonicalURL(source)
+        let destCanonical = canonicalURL(destination)
+        let sameItem = sourceCanonical.path == destCanonical.path
+            || (
+                canonicalURL(source.deletingLastPathComponent()).path
+                    == canonicalURL(destination.deletingLastPathComponent()).path
+                    && source.lastPathComponent.compare(destination.lastPathComponent, options: .caseInsensitive)
+                    == .orderedSame
+            )
+        if sameItem {
+            if source.lastPathComponent == destination.lastPathComponent {
+                return original
+            }
+            let temp = original.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).md")
+            try FileManager.default.moveItem(at: source, to: temp)
+            do {
+                try FileManager.default.moveItem(at: temp, to: destination)
+            } catch {
+                try? FileManager.default.moveItem(at: temp, to: source)
+                throw error
+            }
+            return destination
+        }
+
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw FileServiceError.nameTaken(fileName)
+        }
+        try FileManager.default.moveItem(at: source, to: destination)
+        return destination
+    }
+
+    /// Builds a `.md` filename from a user-entered title, rejecting path separators.
+    static func markdownFileName(from raw: String) throws -> String {
+        var stem = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if stem.lowercased().hasSuffix(".md") {
+            stem.removeLast(3)
+            stem = stem.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let components = (stem as NSString).pathComponents
+        guard !stem.isEmpty,
+              !stem.hasPrefix("."),
+              stem.rangeOfCharacter(from: .newlines) == nil,
+              !(stem as NSString).isAbsolutePath,
+              !stem.contains("/"),
+              !stem.contains("\\"),
+              !stem.contains(":"),
+              !stem.contains("\0"),
+              stem != ".",
+              stem != "..",
+              !components.contains(".."),
+              !components.contains(".")
+        else {
+            throw FileServiceError.invalidRelativePath(raw)
+        }
+        return "\(stem).md"
     }
 
     static func index(at root: URL) -> [NoteMeta] {

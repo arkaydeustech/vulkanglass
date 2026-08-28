@@ -5,20 +5,39 @@ struct RightSidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                tabButton("point.3.connected.trianglepath.dotted", .graph)
-                tabButton("link", .backlinks)
-                tabButton("list.bullet.indent", .outline)
-                tabButton("number", .tags)
-                Spacer()
+            HStack(spacing: 2) {
+                TitleBarIcon(
+                    symbol: "point.3.connected.trianglepath.dotted",
+                    help: "Local graph",
+                    active: model.rightPanel == .graph
+                ) {
+                    model.rightPanel = .graph
+                }
+                TitleBarIcon(symbol: "link", help: "Backlinks", active: model.rightPanel == .backlinks) {
+                    model.rightPanel = .backlinks
+                }
+                TitleBarIcon(
+                    symbol: "list.bullet.indent",
+                    help: "Outline",
+                    active: model.rightPanel == .outline
+                ) {
+                    model.rightPanel = .outline
+                }
+                TitleBarIcon(symbol: "number", help: "Tags", active: model.rightPanel == .tags) {
+                    model.rightPanel = .tags
+                }
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
             .frame(height: VGTheme.titleBarHeight)
-            .overlay(alignment: .bottom) { VGTheme.divider(dark: model.dark).frame(height: 1) }
+            .overlay(alignment: .bottom) {
+                VGTheme.divider(dark: model.dark).frame(height: 1)
+            }
 
             if model.rightPanel == .graph {
                 GraphView(localOnly: true, showCaption: true)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .clipped()
             } else {
                 ScrollView {
                     Group {
@@ -34,6 +53,7 @@ struct RightSidebarView: View {
                 }
             }
         }
+        .clipped()
     }
 
     private var backlinks: some View {
@@ -98,20 +118,5 @@ struct RightSidebarView: View {
                 }
             }
         }
-    }
-
-    private func tabButton(_ symbol: String, _ panel: RightPanel) -> some View {
-        Button {
-            model.rightPanel = panel
-        } label: {
-            Image(systemName: symbol)
-                .foregroundStyle(model.rightPanel == panel ? VGTheme.textAccent : VGTheme.textMuted(dark: model.dark))
-                .frame(width: 28, height: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(model.rightPanel == panel ? VGTheme.accent.opacity(0.2) : Color.clear)
-                )
-        }
-        .buttonStyle(.plain)
     }
 }

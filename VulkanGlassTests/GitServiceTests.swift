@@ -45,6 +45,53 @@ final class GitServiceTests: XCTestCase {
         XCTAssertTrue(GitService.credentialPayload(token: sentinel).contains(sentinel))
     }
 
+    func testGitHubCLICredentialUsesTransientHelperInsteadOfKeychain() {
+        let arguments = GitService.credentialArguments(
+            for: .gitHubCLI(executablePath: "/opt/homebrew/bin/gh"),
+            remote: "https://github.com/owner/repo.git"
+        )
+        XCTAssertTrue(arguments.joined(separator: " ").contains("gh' auth git-credential"))
+        XCTAssertFalse(arguments.contains("credential.helper=osxkeychain"))
+
+        let patArguments = GitService.credentialArguments(
+            for: .personalAccessToken("secret-not-an-argument"),
+            remote: "https://github.com/owner/repo.git"
+        )
+        XCTAssertEqual(patArguments, GitService.credentialArguments)
+        XCTAssertFalse(patArguments.joined().contains("secret-not-an-argument"))
+    }
+
+    func testGitHubCLIHelperParticipatesInGitCredentialProtocol() throws {
+        let root = try temporaryDirectory()
+        let helper = root.appendingPathComponent("fake gh")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "auth" ] && [ "$2" = "git-credential" ] && [ "$3" = "get" ]; then
+          while IFS= read -r line && [ -n "$line" ]; do :; done
+          echo username=x-access-token
+          echo password=transient-cli-token
+          exit 0
+        fi
+        exit 1
+        """
+        try script.write(to: helper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+        let arguments = GitService.credentialArguments(
+            for: .gitHubCLI(executablePath: helper.path),
+            remote: "https://github.com/owner/repo.git"
+        )
+
+        let output = try Shell.run(
+            "/usr/bin/git",
+            arguments + ["credential", "fill"],
+            input: Data("protocol=https\nhost=github.com\n\n".utf8)
+        )
+
+        XCTAssertTrue(output.contains("username=x-access-token"))
+        XCTAssertTrue(output.contains("password=transient-cli-token"))
+        XCTAssertFalse(arguments.contains("credential.helper=osxkeychain"))
+    }
+
     func testGitMutationsAreSerialized() {
         let state = NSLock()
         var active = 0
@@ -68,7 +115,7 @@ final class GitServiceTests: XCTestCase {
         let root = try temporaryDirectory()
         try FileManager.default.createDirectory(at: root.appendingPathComponent("repo"), withIntermediateDirectories: true)
         XCTAssertThrowsError(
-            try GitService.clone(cloneURL: "https://github.com/owner/repo.git", destDir: root, token: nil)
+            try GitService.clone(cloneURL: "https://github.com/owner/repo.git", destDir: root, credential: nil)
         ) { error in
             guard case GitServiceError.destinationExists = error else {
                 return XCTFail("Unexpected error: \(error)")
@@ -85,7 +132,87 @@ final class GitServiceTests: XCTestCase {
         _ = try Shell.git(["add", "--all"], cwd: root)
         _ = try Shell.git(["commit", "-m", "Initial"], cwd: root)
         _ = try Shell.git(["remote", "add", "origin", root.appendingPathComponent("missing.git").path], cwd: root)
-        XCTAssertThrowsError(try GitService.pull(path: root.path, token: nil))
+        XCTAssertThrowsError(try GitService.pull(path: root.path, credential: nil))
+    }
+
+    func testPullPreservesUnstagedEditsInsteadOfFailingRebase() throws {
+        let pair = try connectedRepositories()
+        try "local draft".write(to: pair.local.appendingPathComponent("Draft.md"), atomically: true, encoding: .utf8)
+
+        let status = try GitService.pull(path: pair.local.path, credential: nil)
+
+        XCTAssertNotEqual(status.state, .error)
+        XCTAssertEqual(try String(contentsOf: pair.local.appendingPathComponent("Draft.md"), encoding: .utf8), "local draft")
+    }
+
+    func testSyncCommitsUnstagedEditsThenPushes() throws {
+        let pair = try connectedRepositories()
+        try "local draft".write(to: pair.local.appendingPathComponent("Draft.md"), atomically: true, encoding: .utf8)
+
+        let status = try GitService.sync(path: pair.local.path, message: "Save draft", credential: nil)
+
+        XCTAssertEqual(status.state, .synced)
+        XCTAssertEqual(try Shell.git(["status", "--porcelain"], cwd: pair.local), "")
+        let cloned = try temporaryDirectory()
+        _ = try Shell.git(["clone", pair.remote.path, "."], cwd: cloned)
+        XCTAssertEqual(try String(contentsOf: cloned.appendingPathComponent("Draft.md"), encoding: .utf8), "local draft")
+    }
+
+    func testConflictingAutostashIsReportedAndNeverPushed() throws {
+        let pair = try connectedRepositories()
+        let peer = try temporaryDirectory()
+        _ = try Shell.git(["clone", pair.remote.path, "."], cwd: peer)
+        _ = try Shell.git(["config", "user.name", "Peer"], cwd: peer)
+        _ = try Shell.git(["config", "user.email", "peer@example.com"], cwd: peer)
+        try "# Remote".write(to: peer.appendingPathComponent("Welcome.md"), atomically: true, encoding: .utf8)
+        _ = try Shell.git(["add", "--all"], cwd: peer)
+        _ = try Shell.git(["commit", "-m", "Remote edit"], cwd: peer)
+        _ = try Shell.git(["push", "origin", "main"], cwd: peer)
+
+        try "# Local".write(
+            to: pair.local.appendingPathComponent("Welcome.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertThrowsError(try GitService.pull(path: pair.local.path, credential: nil)) { error in
+            guard case GitServiceError.unmergedPaths(let paths) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(paths, ["Welcome.md"])
+        }
+        XCTAssertTrue(
+            try String(contentsOf: pair.local.appendingPathComponent("Welcome.md"), encoding: .utf8)
+                .contains("<<<<<<< Updated upstream")
+        )
+        XCTAssertThrowsError(
+            try GitService.sync(path: pair.local.path, message: "Must not publish", credential: nil)
+        ) { error in
+            guard case GitServiceError.unmergedPaths = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+
+        let verify = try temporaryDirectory()
+        _ = try Shell.git(["clone", pair.remote.path, "."], cwd: verify)
+        let remoteText = try String(contentsOf: verify.appendingPathComponent("Welcome.md"), encoding: .utf8)
+        XCTAssertEqual(remoteText, "# Remote")
+        XCTAssertFalse(remoteText.contains("<<<<<<<"))
+    }
+
+    private func connectedRepositories() throws -> (local: URL, remote: URL) {
+        let remote = try temporaryDirectory()
+        _ = try Shell.git(["init", "--bare", "-b", "main"], cwd: remote)
+        let local = try temporaryDirectory()
+        _ = try Shell.git(["init", "-b", "main"], cwd: local)
+        _ = try Shell.git(["config", "user.name", "Tests"], cwd: local)
+        _ = try Shell.git(["config", "user.email", "tests@example.com"], cwd: local)
+        try "# Welcome".write(to: local.appendingPathComponent("Welcome.md"), atomically: true, encoding: .utf8)
+        _ = try Shell.git(["add", "--all"], cwd: local)
+        _ = try Shell.git(["commit", "-m", "Initial"], cwd: local)
+        _ = try Shell.git(["remote", "add", "origin", remote.path], cwd: local)
+        _ = try Shell.git(["push", "-u", "origin", "main"], cwd: local)
+        return (local, remote)
     }
 
     private func temporaryDirectory() throws -> URL {

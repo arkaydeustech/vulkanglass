@@ -13,11 +13,46 @@ struct AppSettings: Codable, Sendable {
     var vaultsRoot: String
     var autoSync: Bool
     var darkMode: Bool
+    var useGitHubCLI: Bool
+    var leftSidebarWidth: CGFloat
 
     static func `default`() -> AppSettings {
         let root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("VulkanGlass", isDirectory: true).path
-        return AppSettings(recentVaults: [], vaultsRoot: root, autoSync: true, darkMode: true)
+        return AppSettings(
+            recentVaults: [],
+            vaultsRoot: root,
+            autoSync: true,
+            darkMode: true,
+            useGitHubCLI: true,
+            leftSidebarWidth: VGTheme.sidebarWidth
+        )
+    }
+
+    init(
+        recentVaults: [RecentVault],
+        vaultsRoot: String,
+        autoSync: Bool,
+        darkMode: Bool,
+        useGitHubCLI: Bool = true,
+        leftSidebarWidth: CGFloat = VGTheme.sidebarWidth
+    ) {
+        self.recentVaults = recentVaults
+        self.vaultsRoot = vaultsRoot
+        self.autoSync = autoSync
+        self.darkMode = darkMode
+        self.useGitHubCLI = useGitHubCLI
+        self.leftSidebarWidth = leftSidebarWidth
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        recentVaults = try container.decode([RecentVault].self, forKey: .recentVaults)
+        vaultsRoot = try container.decode(String.self, forKey: .vaultsRoot)
+        autoSync = try container.decode(Bool.self, forKey: .autoSync)
+        darkMode = try container.decode(Bool.self, forKey: .darkMode)
+        useGitHubCLI = try container.decodeIfPresent(Bool.self, forKey: .useGitHubCLI) ?? true
+        leftSidebarWidth = try container.decodeIfPresent(CGFloat.self, forKey: .leftSidebarWidth) ?? VGTheme.sidebarWidth
     }
 }
 

@@ -8,17 +8,20 @@ struct GraphView: View {
     var showCaption = true
 
     var body: some View {
-        GraphCanvasRepresentable(
-            notes: includedNotes,
-            allNotes: model.notes,
-            activeID: model.activeTabID,
-            linkedTitles: linkedTitles,
-            dark: model.dark,
-            onOpen: { path in
-                Task { await model.openTab(path: path) }
-            }
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        GeometryReader { geo in
+            GraphCanvasRepresentable(
+                notes: includedNotes,
+                allNotes: model.notes,
+                activeID: model.activeTabID,
+                linkedTitles: linkedTitles,
+                dark: model.dark,
+                onOpen: { path in
+                    Task { await model.openTab(path: path) }
+                }
+            )
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .clipped()
         .background(VGTheme.backgroundPrimary(dark: model.dark))
         .overlay(alignment: .topLeading) {
             if showCaption {
@@ -72,8 +75,8 @@ struct GraphCanvasRepresentable: NSViewRepresentable {
         view.onOpen = onOpen
         view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         view.setContentHuggingPriority(.defaultLow, for: .vertical)
-        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        view.setContentCompressionResistancePriority(.fittingSizeCompression, for: .horizontal)
+        view.setContentCompressionResistancePriority(.fittingSizeCompression, for: .vertical)
         return view
     }
 
@@ -110,14 +113,17 @@ final class GraphCanvasView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        setupTimer()
-        setupTracking()
+        configureCanvas()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+        configureCanvas()
+    }
+
+    private func configureCanvas() {
         wantsLayer = true
+        clipsToBounds = true
         setupTimer()
         setupTracking()
     }
@@ -129,9 +135,7 @@ final class GraphCanvasView: NSView {
         }
     }
 
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
-    }
+    override var intrinsicContentSize: NSSize { .zero }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 

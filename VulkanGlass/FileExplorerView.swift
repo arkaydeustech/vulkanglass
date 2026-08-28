@@ -84,6 +84,7 @@ private struct TreeRow: View {
     let depth: Int
     @State private var open = true
     @State private var confirmingDelete = false
+    @State private var renaming = false
 
     var body: some View {
         if node.isDirectory {
@@ -110,28 +111,47 @@ private struct TreeRow: View {
             }
         } else {
             let active = model.activeTabID == node.path
-            Button {
-                Task { await model.openTab(path: node.path) }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "doc.text")
-                    Text(node.name.replacingOccurrences(of: ".md", with: "", options: .caseInsensitive))
-                    Spacer()
+            let displayName = node.name.replacingOccurrences(of: ".md", with: "", options: .caseInsensitive)
+            Group {
+                if renaming {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text")
+                        InlineRenameField(text: displayName) { name in
+                            renaming = false
+                            Task { await model.renameNote(path: node.path, newName: name) }
+                        } onCancel: {
+                            renaming = false
+                        }
+                    }
+                    .foregroundStyle(VGTheme.textNormal(dark: model.dark))
+                    .padding(.leading, 20 + CGFloat(depth) * 14)
+                    .padding(.vertical, 3)
+                } else {
+                    Button {
+                        Task { await model.openTab(path: node.path) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "doc.text")
+                            Text(displayName)
+                            Spacer()
+                        }
+                        .foregroundStyle(VGTheme.textNormal(dark: model.dark))
+                        .padding(.leading, 20 + CGFloat(depth) * 14)
+                        .padding(.vertical, 3)
+                        .background(active ? VGTheme.hover(dark: model.dark) : Color.clear)
+                        .overlay(alignment: .leading) {
+                            Rectangle()
+                                .fill(active ? VGTheme.accent : Color.clear)
+                                .frame(width: 2)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Rename") { renaming = true }
+                        Button("Move to Trash…", role: .destructive) { confirmingDelete = true }
+                    }
                 }
-                .foregroundStyle(VGTheme.textNormal(dark: model.dark))
-                .padding(.leading, 20 + CGFloat(depth) * 14)
-                .padding(.vertical, 3)
-                .background(active ? VGTheme.hover(dark: model.dark) : Color.clear)
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(active ? VGTheme.accent : Color.clear)
-                        .frame(width: 2)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .contextMenu {
-                Button("Move to Trash…", role: .destructive) { confirmingDelete = true }
             }
             .confirmationDialog(
                 "Move \(node.name) to Trash?",

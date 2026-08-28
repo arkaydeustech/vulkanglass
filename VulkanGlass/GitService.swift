@@ -17,6 +17,7 @@ enum GitServiceError: LocalizedError, Equatable {
     case destinationExists(String)
     case invalidDestination(String)
     case rebaseInProgress
+    case unmergedPaths([String])
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ enum GitServiceError: LocalizedError, Equatable {
             return "The clone destination is outside the configured vault folder: \(path)"
         case .rebaseInProgress:
             return "This repository already has a rebase in progress. Resolve or abort it before syncing."
+        case .unmergedPaths(let paths):
+            return "Git could not reapply local changes cleanly. Resolve the conflicts before syncing: \(paths.joined(separator: ", "))."
         }
     }
 }
@@ -144,7 +147,7 @@ enum GitService {
         }
     }
 
-    static func clone(cloneURL: String, destDir: URL, token: String?) throws -> URL {
+    static func clone(cloneURL: String, destDir: URL, credential: GitCredential?) throws -> URL {
         try withMutationLock {
             guard isHTTPSGitHubRemote(cloneURL) else {
                 throw GitServiceError.invalidGitHubRemote(cloneURL)
@@ -163,27 +166,37 @@ enum GitService {
             guard !FileManager.default.fileExists(atPath: target.path) else {
                 throw GitServiceError.destinationExists(target.path)
             }
-            try approveGitHubCredential(token)
-            _ = try Shell.run("/usr/bin/git", credentialArguments + ["clone", cloneURL, target.path])
+            try prepareCredential(credential, remote: cloneURL)
+            _ = try Shell.run(
+                "/usr/bin/git",
+                credentialArguments(for: credential, remote: cloneURL) + ["clone", cloneURL, target.path]
+            )
             return target
         }
     }
 
-    static func sync(path: String, message: String, token: String?) throws -> GitStatus {
+    static func sync(path: String, message: String, credential: GitCredential?) throws -> GitStatus {
         try withMutationLock {
             let url = URL(fileURLWithPath: path)
             try ensureNoRebase(at: url)
             let remote = try Shell.git(["remote", "get-url", "origin"], cwd: url)
-            try prepareCredential(token: token, remote: remote)
-            _ = try Shell.git(["add", "--all"], cwd: url)
-            let porcelain = try Shell.git(["status", "--porcelain"], cwd: url)
-            if !porcelain.isEmpty {
-                ensureIdentity(at: url)
-                _ = try Shell.git(["commit", "-m", message], cwd: url)
-            }
+            try prepareCredential(credential, remote: remote)
+            try commitAll(at: url, message: message)
             let branch = try Shell.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: url)
-            _ = try networkGit(["pull", "--rebase", "origin", branch], cwd: url, remote: remote)
-            _ = try networkGit(["push", "-u", "origin", branch], cwd: url, remote: remote)
+            _ = try networkGit(
+                ["pull", "--rebase", "--autostash", "origin", branch],
+                cwd: url,
+                remote: remote,
+                credential: credential
+            )
+            try ensureNoUnmergedPaths(at: url)
+            try commitAll(at: url, message: message)
+            _ = try networkGit(
+                ["push", "-u", "origin", branch],
+                cwd: url,
+                remote: remote,
+                credential: credential
+            )
             let porcelainAfter = try Shell.git(["status", "--porcelain"], cwd: url)
             guard porcelainAfter.isEmpty else {
                 return GitStatus(state: .idle, branch: branch, remote: remote, message: "Uncommitted changes")
@@ -192,14 +205,20 @@ enum GitService {
         }
     }
 
-    static func pull(path: String, token: String?) throws -> GitStatus {
+    static func pull(path: String, credential: GitCredential?) throws -> GitStatus {
         try withMutationLock {
             let url = URL(fileURLWithPath: path)
             try ensureNoRebase(at: url)
             let remote = try Shell.git(["remote", "get-url", "origin"], cwd: url)
-            try prepareCredential(token: token, remote: remote)
+            try prepareCredential(credential, remote: remote)
             let branch = try Shell.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: url)
-            _ = try networkGit(["pull", "--rebase", "origin", branch], cwd: url, remote: remote)
+            _ = try networkGit(
+                ["pull", "--rebase", "--autostash", "origin", branch],
+                cwd: url,
+                remote: remote,
+                credential: credential
+            )
+            try ensureNoUnmergedPaths(at: url)
             var result = status(path: path)
             result.remote = remote
             result.branch = branch
@@ -208,7 +227,12 @@ enum GitService {
         }
     }
 
-    static func initAndPush(path: String, remoteURL: String, message: String, token: String?) throws -> GitStatus {
+    static func initAndPush(
+        path: String,
+        remoteURL: String,
+        message: String,
+        credential: GitCredential?
+    ) throws -> GitStatus {
         try withMutationLock {
             guard isHTTPSGitHubRemote(remoteURL) else {
                 throw GitServiceError.invalidGitHubRemote(remoteURL)
@@ -229,21 +253,44 @@ enum GitService {
                 _ = try Shell.git(["commit", "-m", message], cwd: url)
             }
             _ = try Shell.git(["branch", "-M", "main"], cwd: url)
-            try prepareCredential(token: token, remote: remoteURL)
-            _ = try networkGit(["push", "-u", "origin", "main"], cwd: url, remote: remoteURL)
+            try prepareCredential(credential, remote: remoteURL)
+            _ = try networkGit(
+                ["push", "-u", "origin", "main"],
+                cwd: url,
+                remote: remoteURL,
+                credential: credential
+            )
             return GitStatus(state: .synced, branch: "main", remote: remoteURL, message: "Synced to GitHub")
         }
     }
 
-    private static func networkGit(_ arguments: [String], cwd: URL, remote: String) throws -> String {
+    private static func networkGit(
+        _ arguments: [String],
+        cwd: URL,
+        remote: String,
+        credential: GitCredential?
+    ) throws -> String {
         if isHTTPSGitHubRemote(remote) {
-            return try Shell.git(credentialArguments + arguments, cwd: cwd)
+            return try Shell.git(credentialArguments(for: credential, remote: remote) + arguments, cwd: cwd)
         }
         return try Shell.git(arguments, cwd: cwd)
     }
 
-    private static func prepareCredential(token: String?, remote: String) throws {
-        guard let token, !token.isEmpty, isHTTPSGitHubRemote(remote) else { return }
+    /// Stages everything and commits when the worktree is dirty.
+    private static func commitAll(at url: URL, message: String) throws {
+        try ensureNoUnmergedPaths(at: url)
+        _ = try Shell.git(["add", "--all"], cwd: url)
+        let porcelain = try Shell.git(["status", "--porcelain"], cwd: url)
+        guard !porcelain.isEmpty else { return }
+        ensureIdentity(at: url)
+        _ = try Shell.git(["commit", "-m", message], cwd: url)
+    }
+
+    private static func prepareCredential(_ credential: GitCredential?, remote: String) throws {
+        guard isHTTPSGitHubRemote(remote),
+              case .personalAccessToken(let token) = credential,
+              !token.isEmpty
+        else { return }
         try approveGitHubCredential(token)
     }
 
@@ -273,6 +320,29 @@ enum GitService {
         {
             throw GitServiceError.rebaseInProgress
         }
+    }
+
+    private static func ensureNoUnmergedPaths(at url: URL) throws {
+        let output = try Shell.git(["diff", "--name-only", "--diff-filter=U"], cwd: url)
+        let paths = output.split(whereSeparator: \.isNewline).map(String.init)
+        guard paths.isEmpty else { throw GitServiceError.unmergedPaths(paths) }
+    }
+
+    static func credentialArguments(for credential: GitCredential?, remote: String) -> [String] {
+        guard isHTTPSGitHubRemote(remote) else { return [] }
+        switch credential {
+        case .gitHubCLI(let executablePath):
+            let helper = "!\(shellQuoted(executablePath)) auth git-credential"
+            return ["-c", "credential.helper=", "-c", "credential.helper=\(helper)"]
+        case .personalAccessToken:
+            return credentialArguments
+        case nil:
+            return []
+        }
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     static func credentialPayload(token: String) -> String {

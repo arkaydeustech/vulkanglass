@@ -60,6 +60,15 @@ final class FileServiceTests: XCTestCase {
         XCTAssertEqual(FileService.index(at: root).map(\.relativePath), ["vault/Good.md"])
     }
 
+    func testDirectoryExistsRejectsMissingAndFilePaths() throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Note.md")
+        try "hi".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertTrue(FileService.directoryExists(at: root.path))
+        XCTAssertFalse(FileService.directoryExists(at: file.path))
+        XCTAssertFalse(FileService.directoryExists(at: root.appendingPathComponent("missing-vault").path))
+    }
+
     func testPathQualifiedWikiLinkWinsOverDuplicateTitle() throws {
         let root = try temporaryDirectory()
         for folder in ["A", "B"] {
@@ -73,10 +82,117 @@ final class FileServiceTests: XCTestCase {
         )
     }
 
+    func testRenameMovesFileAndRejectsCollisionAndTraversal() throws {
+        let root = try temporaryDirectory()
+        let nested = root.appendingPathComponent("Daily")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let source = nested.appendingPathComponent("Untitled.md")
+        let taken = nested.appendingPathComponent("Taken.md")
+        try "hello".write(to: source, atomically: true, encoding: .utf8)
+        try "taken".write(to: taken, atomically: true, encoding: .utf8)
+
+        let renamed = try FileService.rename(source, to: "Hello", root: root)
+        XCTAssertEqual(renamed.lastPathComponent, "Hello.md")
+        XCTAssertEqual(try FileService.read(renamed), "hello")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(
+            FileService.canonicalURL(renamed.deletingLastPathComponent()).path,
+            FileService.canonicalURL(nested).path
+        )
+
+        XCTAssertThrowsError(try FileService.rename(renamed, to: "Taken", root: root)) { error in
+            XCTAssertEqual(error as? FileServiceError, .nameTaken("Taken.md"))
+        }
+        XCTAssertThrowsError(try FileService.rename(renamed, to: "../Escape", root: root))
+        XCTAssertThrowsError(try FileService.rename(renamed, to: "foo/bar", root: root))
+        XCTAssertThrowsError(try FileService.markdownFileName(from: ""))
+        XCTAssertEqual(try FileService.markdownFileName(from: "Note.md"), "Note.md")
+    }
+
+    func testRenameCanChangeOnlyCase() throws {
+        let root = try temporaryDirectory()
+        let source = root.appendingPathComponent("untitled.md")
+        try "body".write(to: source, atomically: true, encoding: .utf8)
+        let renamed = try FileService.rename(source, to: "Untitled", root: root)
+        XCTAssertEqual(renamed.lastPathComponent, "Untitled.md")
+        XCTAssertEqual(try FileService.read(renamed), "body")
+    }
+
+    func testStandaloneSymlinkRenameIsRejectedWithoutMovingTarget() throws {
+        let parent = try temporaryDirectory()
+        let sourceDirectory = parent.appendingPathComponent("source")
+        let linkDirectory = parent.appendingPathComponent("links")
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: linkDirectory, withIntermediateDirectories: true)
+        let target = sourceDirectory.appendingPathComponent("Target.md")
+        let link = linkDirectory.appendingPathComponent("Linked.md")
+        try "target".write(to: target, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        XCTAssertThrowsError(try FileService.rename(link, to: "Renamed", root: nil)) { error in
+            XCTAssertEqual(error as? FileServiceError, .symbolicLinkRenameUnsupported(link.path))
+        }
+        XCTAssertEqual(try FileService.read(target), "target")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), target.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: linkDirectory.appendingPathComponent("Renamed.md").path))
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+}
+
+final class ThemeLayoutTests: XCTestCase {
+    func testRightSidebarNeverExceedsEightyPercentOfTheWindow() {
+        XCTAssertEqual(VGTheme.cappedSidebarWidth(windowWidth: 2000), VGTheme.sidebarWidth)
+        XCTAssertEqual(VGTheme.cappedSidebarWidth(windowWidth: 200), 160, accuracy: 0.01)
+        XCTAssertEqual(VGTheme.cappedSidebarWidth(windowWidth: 0), 0)
+    }
+
+    func testTitleBarIsCompactAroundItsIcons() {
+        XCTAssertGreaterThanOrEqual(VGTheme.trafficLightsInset, 70)
+        XCTAssertEqual(VGTheme.titleBarHeight, VGTheme.titleBarIconSize + 8)
+        XCTAssertGreaterThan(VGTheme.titleBarHeight, VGTheme.titleBarIconSize)
+        XCTAssertGreaterThanOrEqual(VGTheme.titleBarIconSize, 26)
+    }
+
+    func testLeftSidebarWidthClampsToAUsableRange() {
+        XCTAssertEqual(
+            VGTheme.clampedLeftSidebarWidth(100, windowWidth: 2000, rightSidebarVisible: true),
+            VGTheme.sidebarMinWidth
+        )
+        XCTAssertEqual(
+            VGTheme.clampedLeftSidebarWidth(900, windowWidth: 2000, rightSidebarVisible: true),
+            VGTheme.sidebarMaxWidth
+        )
+        XCTAssertEqual(
+            VGTheme.clampedLeftSidebarWidth(240, windowWidth: 2000, rightSidebarVisible: true),
+            240
+        )
+    }
+
+    func testBothSidebarsReserveMinimumEditorWidthAtMinimumWindowSize() {
+        let windowWidth: CGFloat = 860
+        let left = VGTheme.clampedLeftSidebarWidth(
+            VGTheme.sidebarMaxWidth,
+            windowWidth: windowWidth,
+            rightSidebarVisible: true
+        )
+        let right = VGTheme.cappedSidebarWidth(windowWidth: windowWidth)
+        let editor = windowWidth - VGTheme.ribbonWidth - left - VGTheme.splitHandleWidth - 1 - right
+
+        XCTAssertGreaterThanOrEqual(editor, VGTheme.editorMinWidth)
+        XCTAssertGreaterThanOrEqual(left, VGTheme.sidebarMinWidth)
+    }
+
+    func testCollapsedSidebarControlStartsAfterTrafficLights() {
+        XCTAssertGreaterThanOrEqual(
+            VGTheme.ribbonWidth + VGTheme.collapsedLeftTitleBarInset,
+            VGTheme.trafficLightsInset
+        )
     }
 }

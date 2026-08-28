@@ -7,7 +7,7 @@ enum GitHubError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .noToken: return "Add a GitHub personal access token in Settings."
+        case .noToken: return "Sign in with GitHub CLI (gh auth login) or add a personal access token in Settings."
         case .badInput: return "Enter a GitHub URL or owner/repo."
         case .api(let message): return message
         }

@@ -1,12 +1,11 @@
 import SwiftUI
 
-/// Vertical left ribbon matching Obsidian's icon rail. Traffic lights sit above it.
+/// Vertical left ribbon matching Obsidian's icon rail.
 struct RibbonView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         VStack(spacing: 4) {
-            Color.clear.frame(height: VGTheme.titleBarHeight)
             ribbon("New note", "square.and.pencil") { Task { await model.newNote() } }
             ribbon("Files", "folder", active: model.leftOpen && model.leftPanel == .files && model.centerView == .editor) {
                 model.leftPanel = .files
@@ -32,6 +31,7 @@ struct RibbonView: View {
             .help("Switch vault")
             ribbon("Settings", "gearshape") { model.settingsOpen = true }
         }
+        .padding(.top, 6)
         .padding(.bottom, 8)
         .frame(width: VGTheme.ribbonWidth)
         .background(VGTheme.backgroundTertiary(dark: model.dark))

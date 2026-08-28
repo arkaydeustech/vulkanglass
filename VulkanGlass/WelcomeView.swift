@@ -51,13 +51,10 @@ struct WelcomeView: View {
                 model.openStandaloneFile()
             }
             action("key", model.githubUser.map { "GitHub: \($0.login)" } ?? "Connect GitHub",
-                   "Personal access token for clone, create, and sync") {
+                   githubSubtitle) {
                 model.settingsOpen = true
             }
 
-            if let error = model.errorMessage {
-                Text(error).font(.caption).foregroundStyle(.red)
-            }
             if let busy = model.busyMessage {
                 Text(busy).font(.caption).foregroundStyle(VGTheme.textAccent)
             }
@@ -127,5 +124,17 @@ struct WelcomeView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private var githubSubtitle: String {
+        if model.githubUser != nil {
+            return model.githubAuthSource == .gitHubCLI
+                ? "Connected via GitHub CLI"
+                : "Personal access token for clone, create, and sync"
+        }
+        if model.githubCLIStatus.isInstalled, model.settings.useGitHubCLI {
+            return "GitHub CLI detected — run gh auth login, or add a token"
+        }
+        return "Personal access token for clone, create, and sync"
     }
 }
