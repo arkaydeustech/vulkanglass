@@ -1,0 +1,13 @@
+node_modules
+.DS_Store
+*.log
+output
+.playwright-cli
+build
+DerivedData
+.swiftpm
+.ok
+*.xcuserstate
+xcuserdata
+.env
+.env.*
