@@ -280,6 +280,8 @@ struct SourceEditor: NSViewRepresentable {
 
 /// Forwards movement keys to wiki-link completion while the popup is open.
 final class SourceTextView: NSTextView {
+    private static let legacyStringPasteboardType = NSPasteboard.PasteboardType("NSStringPboardType")
+
     weak var wikiHandler: WikiLinkKeyHandling?
     private(set) var baseURL: URL?
     private(set) var loadRemoteImages = false
@@ -320,7 +322,23 @@ final class SourceTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
-        pasteAsPlainText(sender)
+        pastePlainText(from: .general)
+    }
+
+    /// Inserts a pasteboard's plain-text representation through the normal text-system
+    /// change hooks. Both the Edit menu (including its keyboard shortcut) and the
+    /// contextual Paste item arrive through `paste(_:)` above.
+    @discardableResult
+    func pastePlainText(from pasteboard: NSPasteboard) -> Bool {
+        guard isEditable, let pastedText = plainText(from: pasteboard) else { return false }
+        let replacementRange = selectedRange()
+        guard shouldChangeText(in: replacementRange, replacementString: pastedText) else { return false }
+
+        replaceCharacters(in: replacementRange, with: pastedText)
+        didChangeText()
+        let insertionPoint = replacementRange.location + (pastedText as NSString).length
+        setSelectedRange(NSRange(location: insertionPoint, length: 0))
+        return true
     }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
@@ -330,7 +348,16 @@ final class SourceTextView: NSTextView {
 
     override var writablePasteboardTypes: [NSPasteboard.PasteboardType] { [.string] }
 
-    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] { [.string] }
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        [.string, Self.legacyStringPasteboardType]
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)) {
+            return isEditable && NSPasteboard.general.availableType(from: readablePasteboardTypes) != nil
+        }
+        return super.validateUserInterfaceItem(item)
+    }
 
     override func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
         let range = selectedRange()
@@ -338,6 +365,13 @@ final class SourceTextView: NSTextView {
         pboard.declareTypes([.string], owner: nil)
         pboard.setString((string as NSString).substring(with: range), forType: .string)
         return true
+    }
+
+    private func plainText(from pasteboard: NSPasteboard) -> String? {
+        for type in readablePasteboardTypes {
+            if let text = pasteboard.string(forType: type) { return text }
+        }
+        return nil
     }
 
     override func changeFont(_ sender: Any?) {}

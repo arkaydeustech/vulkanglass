@@ -630,6 +630,80 @@ final class LivePreviewTests: XCTestCase {
 
 @MainActor
 final class EditorLifecycleTests: XCTestCase {
+    func testPasteInsertsMarkdownAtTheCaretAndNotifiesTheEditor() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.setString("# Pasted\n\n- markdown", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        var changes: [String] = []
+        let coordinator = SourceEditor.Coordinator(onChange: { changes.append($0) })
+        let textView = SourceTextView()
+        textView.delegate = coordinator
+        textView.string = "Before  after"
+        textView.setSelectedRange(NSRange(location: 7, length: 0))
+
+        XCTAssertTrue(textView.pastePlainText(from: pasteboard))
+        XCTAssertEqual(textView.string, "Before # Pasted\n\n- markdown after")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 27, length: 0))
+        XCTAssertEqual(changes.last, textView.string)
+    }
+
+    func testPasteReplacesTheActiveSelection() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.setString("**new**", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        textView.string = "Replace old text"
+        textView.setSelectedRange(NSRange(location: 8, length: 3))
+
+        XCTAssertTrue(textView.pastePlainText(from: pasteboard))
+        XCTAssertEqual(textView.string, "Replace **new** text")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 15, length: 0))
+    }
+
+    func testPasteIgnoresPasteboardsWithoutPlainText() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.setData(Data([0x00, 0x01]), forType: .png)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        textView.string = "Unchanged"
+        textView.setSelectedRange(NSRange(location: 9, length: 0))
+
+        XCTAssertFalse(textView.pastePlainText(from: pasteboard))
+        XCTAssertEqual(textView.string, "Unchanged")
+    }
+
+    func testEditorContextMenuRoutesPasteToTheNativePasteAction() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let textView = SourceTextView(frame: window.contentView!.bounds)
+        window.contentView = textView
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .rightMouseDown,
+            location: NSPoint(x: 20, y: 20),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+
+        let menu = try XCTUnwrap(textView.menu(for: event))
+        let pasteItem = try XCTUnwrap(menu.items.first(where: { $0.title == "Paste" }))
+        XCTAssertEqual(pasteItem.action, #selector(NSText.paste(_:)))
+    }
+
     func testImageCacheUsesResolvedURLsAndResetsAcrossNotes() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let first = root.appendingPathComponent("One", isDirectory: true)
