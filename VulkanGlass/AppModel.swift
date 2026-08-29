@@ -9,6 +9,7 @@ struct AppModelDependencies {
     var githubRepos: (String) async throws -> [GitHubRepo]
     var loadKeychainToken: () -> String?
     var saveKeychainToken: (String) throws -> Void
+    var authenticationDisabled: () -> Bool = { false }
 
     static let live = AppModelDependencies(
         githubCLIStatus: { includeToken in
@@ -17,8 +18,51 @@ struct AppModelDependencies {
         githubUser: { try await GitHubService.user(token: $0) },
         githubRepos: { try await GitHubService.repos(token: $0) },
         loadKeychainToken: { KeychainService.load() },
-        saveKeychainToken: { try KeychainService.save(token: $0) }
+        saveKeychainToken: { try KeychainService.save(token: $0) },
+        authenticationDisabled: { DevelopmentAuthentication.isDisabledForThisProcess }
     )
+}
+
+enum DevelopmentAuthentication {
+    static let environmentKey = "VULKANGLASS_DISABLE_AUTH"
+    static let launchArgument = "--disable-auth"
+
+    /// XCTest publishes these into the host application's environment before any app code runs.
+    static let testEnvironmentKeys = [
+        "XCTestConfigurationFilePath",
+        "XCTestBundlePath",
+        "XCTestSessionIdentifier"
+    ]
+
+    /// Resolved once per process: launch arguments and environment cannot change after launch,
+    /// and this is read from SwiftUI view bodies.
+    static let isDisabledForThisProcess = isDisabled()
+
+    /// Development-only escape hatch. Release builds always authenticate normally so a
+    /// shipped app cannot be silently downgraded by a launch argument or environment variable.
+    static func isDisabled(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        #if DEBUG
+        if arguments.contains(launchArgument) { return true }
+        if isRunningTests(environment: environment) { return true }
+        guard let value = environment[environmentKey] else { return false }
+        return ["1", "true", "yes", "on"].contains(
+            value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        )
+        #else
+        return false
+        #endif
+    }
+
+    /// True while hosting an XCTest bundle. The unit tests run inside the real app, so its
+    /// launch would otherwise reach the Keychain and `gh` through `AppModel.bootstrap()`.
+    static func isRunningTests(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        testEnvironmentKeys.contains { environment[$0] != nil }
+    }
 }
 
 /// Central application state for vaults, tabs, and GitHub sync.
@@ -50,6 +94,9 @@ final class AppModel {
     var busyMessage: String?
     var githubCLIStatus = GitHubCLIStatus()
     var githubAuthSource: GitHubAuthSource?
+
+    /// True when this launch runs local-only: no Keychain, no `gh`, no GitHub network calls.
+    var authenticationDisabled: Bool { dependencies.authenticationDisabled() }
 
     var inWorkspace: Bool { vault != nil || !tabs.isEmpty }
     var dark: Bool { settings.darkMode }
@@ -100,6 +147,11 @@ final class AppModel {
     /// Resolves a GitHub token from `gh` (when enabled and available) or the Keychain PAT.
     func connectGitHub() async {
         githubConnectionGeneration &+= 1
+        if authenticationDisabled {
+            githubCLIStatus = GitHubCLIStatus()
+            clearGitHubConnection(error: nil)
+            return
+        }
         let generation = githubConnectionGeneration
         let useCLI = settings.useGitHubCLI
         let status = await dependencies.githubCLIStatus(useCLI)
@@ -160,14 +212,19 @@ final class AppModel {
         remember(info)
         busyMessage = "Opening vault…"
         let path = info.path
+        let authenticationDisabled = self.authenticationDisabled
         let credential = info.isGitHub ? gitCredential : nil
         let hasRemote = info.remote != nil
         let pulled: GitStatus = await Task.detached {
             do {
-                if hasRemote {
+                if hasRemote, !authenticationDisabled {
                     return try GitService.pull(path: path, credential: credential)
                 }
-                return GitService.status(path: path)
+                var status = GitService.status(path: path)
+                if hasRemote, authenticationDisabled {
+                    status.message = "Local only — GitHub auth disabled for development"
+                }
+                return status
             } catch {
                 return GitStatus(state: .error, branch: info.branch, remote: info.remote, message: error.localizedDescription)
             }
@@ -289,10 +346,29 @@ final class AppModel {
         if let outgoing = activeTabID, outgoing != id,
            tabs.first(where: { $0.id == outgoing })?.dirty == true
         {
-            Task { await save(id: outgoing, sync: false) }
+            // Track the flush in `saveTasks` so it is cancellable and awaitable like any other
+            // autosave; it supersedes the pending debounce for the same tab.
+            saveTasks[outgoing]?.cancel()
+            saveTasks[outgoing] = Task { [weak self] in
+                _ = await self?.save(id: outgoing, sync: false)
+            }
         }
         activeTabID = id
         centerView = .editor
+    }
+
+    /// Awaits every in-flight autosave, including debounced writes that have not fired yet.
+    /// Lets callers (and tests) observe persisted content without guessing at a sleep duration.
+    func awaitPendingSaves() async {
+        var awaited: Set<String> = []
+        while true {
+            let pending = saveTasks.filter { !awaited.contains($0.key) }
+            guard !pending.isEmpty else { return }
+            for (id, task) in pending {
+                awaited.insert(id)
+                await task.value
+            }
+        }
     }
 
     /// Updates editor text and schedules autosave plus GitHub sync.
@@ -475,6 +551,15 @@ final class AppModel {
 
     func syncNow(message: String? = nil) async {
         guard let vault else { return }
+        guard !authenticationDisabled else {
+            gitStatus = GitStatus(
+                state: .idle,
+                branch: vault.branch,
+                remote: vault.remote,
+                message: "Local only — GitHub auth disabled for development"
+            )
+            return
+        }
         gitStatus = GitStatus(state: .syncing, branch: vault.branch, remote: vault.remote, message: "Syncing…")
         let path = vault.path
         let credential = vault.isGitHub ? gitCredential : nil
@@ -492,6 +577,10 @@ final class AppModel {
     }
 
     func saveToken(_ raw: String) async {
+        guard !authenticationDisabled else {
+            errorMessage = "GitHub authentication is disabled for this development launch."
+            return
+        }
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
             errorMessage = GitHubError.noToken.localizedDescription

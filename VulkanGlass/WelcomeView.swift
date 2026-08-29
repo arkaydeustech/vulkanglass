@@ -127,6 +127,9 @@ struct WelcomeView: View {
     }
 
     private var githubSubtitle: String {
+        if model.authenticationDisabled {
+            return "Disabled for this local-only development launch"
+        }
         if model.githubUser != nil {
             return model.githubAuthSource == .gitHubCLI
                 ? "Connected via GitHub CLI"

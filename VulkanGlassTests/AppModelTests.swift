@@ -3,6 +3,142 @@ import XCTest
 
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testDevelopmentAuthenticationCanBeDisabledForAutomatedLaunches() {
+        XCTAssertTrue(DevelopmentAuthentication.isDisabled(environment: [:], arguments: ["VulkanGlass", "--disable-auth"]))
+        XCTAssertTrue(DevelopmentAuthentication.isDisabled(environment: ["VULKANGLASS_DISABLE_AUTH": "yes"], arguments: []))
+        XCTAssertFalse(DevelopmentAuthentication.isDisabled(environment: ["VULKANGLASS_DISABLE_AUTH": "0"], arguments: []))
+    }
+
+    func testDevelopmentAuthenticationTrimsValuesAndRejectsUnrecognizedOnes() {
+        XCTAssertTrue(DevelopmentAuthentication.isDisabled(environment: ["VULKANGLASS_DISABLE_AUTH": " 1 "], arguments: []))
+        XCTAssertTrue(DevelopmentAuthentication.isDisabled(environment: ["VULKANGLASS_DISABLE_AUTH": "\tTRUE\n"], arguments: []))
+        XCTAssertFalse(DevelopmentAuthentication.isDisabled(environment: ["VULKANGLASS_DISABLE_AUTH": ""], arguments: []))
+        XCTAssertFalse(DevelopmentAuthentication.isDisabled(environment: ["VULKANGLASS_DISABLE_AUTH": "   "], arguments: []))
+        XCTAssertFalse(DevelopmentAuthentication.isDisabled(environment: ["VULKANGLASS_DISABLE_AUTH": "maybe"], arguments: []))
+        XCTAssertFalse(DevelopmentAuthentication.isDisabled(environment: [:], arguments: ["VulkanGlass", "--disable-authentication"]))
+    }
+
+    func testRunningUnderXCTestDisablesAuthenticationInTheHostApp() {
+        // VulkanGlassTests is hosted by VulkanGlass.app, so `xcodebuild test` launches the real
+        // app and runs AppModel.bootstrap(). Without this, that bootstrap reads the Keychain and
+        // macOS shows an unlock prompt during every test run.
+        XCTAssertTrue(DevelopmentAuthentication.isRunningTests())
+        XCTAssertTrue(DevelopmentAuthentication.isDisabledForThisProcess)
+        let liveModel = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        XCTAssertTrue(liveModel.authenticationDisabled)
+    }
+
+    func testTestEnvironmentDetectionLooksAtXCTestKeysOnly() {
+        XCTAssertTrue(DevelopmentAuthentication.isRunningTests(environment: ["XCTestConfigurationFilePath": "/tmp/x.plist"]))
+        XCTAssertTrue(DevelopmentAuthentication.isRunningTests(environment: ["XCTestBundlePath": "/tmp/x.xctest"]))
+        XCTAssertTrue(DevelopmentAuthentication.isRunningTests(environment: ["XCTestSessionIdentifier": "abc"]))
+        XCTAssertFalse(DevelopmentAuthentication.isRunningTests(environment: [:]))
+        XCTAssertFalse(DevelopmentAuthentication.isRunningTests(environment: ["PATH": "/usr/bin"]))
+        XCTAssertTrue(DevelopmentAuthentication.isDisabled(environment: ["XCTestBundlePath": "/tmp/x.xctest"], arguments: []))
+    }
+
+    func testDisabledAuthenticationDoesNotTouchCredentialSources() async {
+        final class Calls {
+            var cli = 0
+            var keychain = 0
+        }
+        let calls = Calls()
+        let dependencies = AppModelDependencies(
+            githubCLIStatus: { _ in
+                calls.cli += 1
+                return GitHubCLIStatus(executablePath: "/usr/local/bin/gh", token: "cli")
+            },
+            githubUser: { token in GitHubUser(login: token, name: nil, avatarURL: "") },
+            githubRepos: { _ in [] },
+            loadKeychainToken: {
+                calls.keychain += 1
+                return "pat"
+            },
+            saveKeychainToken: { _ in },
+            authenticationDisabled: { true }
+        )
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+
+        await model.connectGitHub()
+
+        XCTAssertEqual(calls.cli, 0)
+        XCTAssertEqual(calls.keychain, 0)
+        XCTAssertNil(model.token)
+        XCTAssertNil(model.githubAuthSource)
+        XCTAssertTrue(model.authenticationDisabled)
+    }
+
+    func testDisabledAuthenticationRefusesToWriteAPersonalAccessToken() async {
+        final class Calls {
+            var saved: [String] = []
+        }
+        let calls = Calls()
+        let model = AppModel(
+            settings: .default(),
+            bootstrapOnLaunch: false,
+            dependencies: disabledAuthDependencies(onSave: { calls.saved.append($0) })
+        )
+
+        await model.saveToken("ghp_realtoken")
+
+        XCTAssertTrue(calls.saved.isEmpty)
+        XCTAssertNil(model.token)
+        XCTAssertEqual(model.errorMessage, "GitHub authentication is disabled for this development launch.")
+    }
+
+    func testDisabledAuthenticationSkipsSyncAndReportsLocalOnly() async throws {
+        let root = try temporaryDirectory()
+        let model = AppModel(
+            settings: .default(),
+            bootstrapOnLaunch: false,
+            dependencies: disabledAuthDependencies()
+        )
+        // Not a git repository: if the guard were missing, GitService.sync would fail outright.
+        model.vault = VaultInfo(
+            name: "vault",
+            path: root.path,
+            remote: "https://github.com/owner/repo.git",
+            branch: "main",
+            isGitHub: true
+        )
+
+        await model.syncNow()
+
+        XCTAssertEqual(model.gitStatus?.state, .idle)
+        XCTAssertEqual(model.gitStatus?.message, "Local only — GitHub auth disabled for development")
+        XCTAssertEqual(model.gitStatus?.branch, "main")
+        XCTAssertEqual(model.gitStatus?.remote, "https://github.com/owner/repo.git")
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testDisabledAuthenticationOpensRemoteVaultWithoutPulling() async throws {
+        let original = SettingsStore.load()
+        defer { SettingsStore.save(original) }
+        let root = try temporaryDirectory()
+        try "# Welcome".write(to: root.appendingPathComponent("Welcome.md"), atomically: true, encoding: .utf8)
+        let model = AppModel(
+            settings: .default(),
+            bootstrapOnLaunch: false,
+            dependencies: disabledAuthDependencies()
+        )
+        let info = VaultInfo(
+            name: root.lastPathComponent,
+            path: root.path,
+            remote: "https://github.com/owner/repo.git",
+            branch: "main",
+            isGitHub: true
+        )
+
+        await model.openVault(info)
+
+        XCTAssertEqual(model.vault?.path, root.path)
+        XCTAssertEqual(model.gitStatus?.message, "Local only — GitHub auth disabled for development")
+        XCTAssertNotEqual(model.gitStatus?.state, .error)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.busyMessage)
+        XCTAssertEqual(model.tabs.first?.title, "Welcome")
+    }
+
     func testConnectGitHubFallsBackToPATWhenCLIIsRejected() async {
         let dependencies = AppModelDependencies(
             githubCLIStatus: { _ in GitHubCLIStatus(executablePath: "/usr/local/bin/gh", token: "cli") },
@@ -127,7 +263,7 @@ final class AppModelTests: XCTestCase {
         model.updateContent(a.path, "edited a")
         model.setActiveTab(b.path)
         model.updateContent(b.path, "edited b")
-        try await Task.sleep(for: .milliseconds(700))
+        await model.awaitPendingSaves()
 
         XCTAssertEqual(try FileService.read(a), "edited a")
         XCTAssertEqual(try FileService.read(b), "edited b")
@@ -310,6 +446,31 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
         XCTAssertEqual(model.tabs.first?.path, source.path)
         XCTAssertNil(model.errorMessage)
+    }
+
+    private func disabledAuthDependencies(
+        onSave: @escaping (String) -> Void = { _ in }
+    ) -> AppModelDependencies {
+        AppModelDependencies(
+            githubCLIStatus: { _ in
+                XCTFail("gh must not be invoked while authentication is disabled")
+                return GitHubCLIStatus()
+            },
+            githubUser: { _ in
+                XCTFail("GitHub must not be contacted while authentication is disabled")
+                throw GitHubError.noToken
+            },
+            githubRepos: { _ in
+                XCTFail("GitHub must not be contacted while authentication is disabled")
+                throw GitHubError.noToken
+            },
+            loadKeychainToken: {
+                XCTFail("the Keychain must not be read while authentication is disabled")
+                return nil
+            },
+            saveKeychainToken: { onSave($0) },
+            authenticationDisabled: { true }
+        )
     }
 
     private func temporaryDirectory() throws -> URL {

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -18,7 +19,18 @@ def run(cmd: list[str]) -> None:
     subprocess.check_call(cmd, cwd=ROOT, env={**os.environ, "DEVELOPER_DIR": str(DEVELOPER_DIR)})
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--with-auth",
+        action="store_true",
+        help="allow GitHub CLI and macOS Keychain access in the launched app",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     if not DEVELOPER_DIR.exists():
         sys.exit("Xcode.app not found at /Applications/Xcode.app")
     run([sys.executable, str(ROOT / "scripts" / "generate_xcodeproj.py")])
@@ -49,7 +61,11 @@ def main() -> None:
         capture_output=True,
     )
     subprocess.run(["killall", "VulkanGlass"], check=False, capture_output=True)
-    subprocess.check_call(["open", "-n", str(app)])
+    launch = ["open", "-n", str(app)]
+    if not args.with_auth:
+        launch.extend(["--args", "--disable-auth"])
+        print("Launching in local-only development mode (GitHub auth disabled)")
+    subprocess.check_call(launch)
 
 
 if __name__ == "__main__":

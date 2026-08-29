@@ -167,6 +167,7 @@ struct SettingsSheet: View {
                     .foregroundStyle(.secondary)
                 HStack {
                     SecureField("ghp_…", text: $token)
+                        .disabled(model.authenticationDisabled)
                     Button("Save") {
                         Task {
                             await model.saveToken(token)
@@ -176,7 +177,10 @@ struct SettingsSheet: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(VGTheme.accent)
-                    .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        model.authenticationDisabled
+                            || token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
                 }
                 if let message { Text(message).font(.caption) }
             }
@@ -213,6 +217,9 @@ struct SettingsSheet: View {
     }
 
     private var githubHelpText: String {
+        if model.authenticationDisabled {
+            return "This is a local-only development launch, so GitHub CLI and Keychain access are turned off. Relaunch with python3 scripts/build.py --with-auth to test signing in."
+        }
         if model.githubCLIStatus.isInstalled {
             return "GitHub CLI detected. Vulkan Glass signs in with it automatically when you are logged in (gh auth login)."
         }
@@ -220,6 +227,9 @@ struct SettingsSheet: View {
     }
 
     private var connectionStatus: String {
+        if model.authenticationDisabled {
+            return "GitHub authentication is disabled for this development launch"
+        }
         if let user = model.githubUser {
             switch model.githubAuthSource {
             case .gitHubCLI:
