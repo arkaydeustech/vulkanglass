@@ -4,6 +4,20 @@ import SwiftUI
 struct MarkdownPreviewLayoutMetrics: Equatable {
     var scrollSurfaceSize: CGSize?
     var readingColumnSize: CGSize?
+    var tableCells: [MarkdownPreviewTableCellLayout] = []
+}
+
+struct MarkdownPreviewTableCellLayout: Equatable {
+    var table: Int
+    var row: Int
+    var column: Int
+    var size: CGSize
+}
+
+enum MarkdownPreviewTableStyle {
+    static func background(dark: Bool, isHeader: Bool) -> Color {
+        isHeader ? VGTheme.backgroundSecondary(dark: dark).opacity(0.85) : Color.clear
+    }
 }
 
 private enum MarkdownPreviewLayoutPreferenceKey: PreferenceKey {
@@ -16,6 +30,12 @@ private enum MarkdownPreviewLayoutPreferenceKey: PreferenceKey {
         let next = nextValue()
         value.scrollSurfaceSize = next.scrollSurfaceSize ?? value.scrollSurfaceSize
         value.readingColumnSize = next.readingColumnSize ?? value.readingColumnSize
+        for cell in next.tableCells {
+            value.tableCells.removeAll {
+                $0.table == cell.table && $0.row == cell.row && $0.column == cell.column
+            }
+            value.tableCells.append(cell)
+        }
     }
 }
 
@@ -34,8 +54,8 @@ struct MarkdownPreviewView: View {
             let paneWidth = max(0, geometry.size.width)
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(displayBlocks.enumerated()), id: \.offset) { _, block in
-                        blockView(block)
+                    ForEach(Array(displayBlocks.enumerated()), id: \.offset) { blockIndex, block in
+                        blockView(block, blockIndex: blockIndex)
                     }
                 }
                 .padding(.horizontal, VGTheme.readingHorizontalPadding)
@@ -88,7 +108,7 @@ struct MarkdownPreviewView: View {
     }
 
     @ViewBuilder
-    private func blockView(_ block: MDBlock) -> some View {
+    private func blockView(_ block: MDBlock, blockIndex: Int) -> some View {
         switch block {
         case .code(let language, let code):
             ZStack(alignment: .topTrailing) {
@@ -142,9 +162,32 @@ struct MarkdownPreviewView: View {
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) { col, cell in
                             InlineRunsView(text: cell, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-                                .fontWeight(rowIndex == 0 ? .semibold : .regular)
                                 .padding(8)
-                                .frame(maxWidth: .infinity, alignment: alignment(alignments, col))
+                                .frame(
+                                    maxWidth: .infinity,
+                                    maxHeight: .infinity,
+                                    alignment: alignment(alignments, col)
+                                )
+                                .background(MarkdownPreviewTableStyle.background(dark: dark, isHeader: rowIndex == 0))
+                                .background {
+                                    if onLayout != nil {
+                                        GeometryReader { cellGeometry in
+                                            Color.clear.preference(
+                                                key: MarkdownPreviewLayoutPreferenceKey.self,
+                                                value: MarkdownPreviewLayoutMetrics(
+                                                    tableCells: [
+                                                        MarkdownPreviewTableCellLayout(
+                                                            table: blockIndex,
+                                                            row: rowIndex,
+                                                            column: col,
+                                                            size: cellGeometry.size
+                                                        )
+                                                    ]
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
                                 .border(VGTheme.divider(dark: dark), width: 0.5)
                         }
                     }

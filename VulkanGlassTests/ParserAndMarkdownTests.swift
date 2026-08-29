@@ -657,6 +657,114 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertEqual((unicode as NSString).substring(with: emojiRange).trimmingCharacters(in: .whitespaces), "😀")
     }
 
+    func testLiveTableCellsAreRegularLeadingAlignedAndVerticallyCentered() throws {
+        let table = "|       |       Header       |\n| --- | --- |\n| value | second |"
+        let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 320))
+        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.string = table
+        textView.liveDecorations = LivePreview.apply(
+            to: textView.textStorage!,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: true,
+            maximumTableWidth: textView.maximumTableWidth
+        )
+
+        let source = table as NSString
+        let headerRange = source.range(of: "Header")
+        let font = try XCTUnwrap(textView.textStorage?.attribute(.font, at: headerRange.location, effectiveRange: nil) as? NSFont)
+        XCTAssertFalse(font.fontDescriptor.symbolicTraits.contains(.bold))
+
+        let paragraph = try XCTUnwrap(
+            textView.textStorage?.attribute(.paragraphStyle, at: headerRange.location, effectiveRange: nil) as? NSParagraphStyle
+        )
+        XCTAssertEqual(paragraph.alignment, .left)
+        XCTAssertEqual(paragraph.firstLineHeadIndent, 12)
+
+        let leadingPadding = source.range(of: "       Header")
+        XCTAssertTrue(isHidden(textView.textStorage!, at: leadingPadding.location))
+
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let container = try XCTUnwrap(textView.textContainer)
+        layoutManager.ensureLayout(for: container)
+        let decoration = try XCTUnwrap(textView.liveDecorations.tables.first)
+        let headerGlyphs = layoutManager.glyphRange(forCharacterRange: headerRange, actualCharacterRange: nil)
+        let headerRect = layoutManager.boundingRect(forGlyphRange: headerGlyphs, in: container)
+        let secondColumnX = decoration.columnWidths[0] + 12
+        XCTAssertEqual(headerRect.minX, secondColumnX, accuracy: 1)
+
+        let bodyFont = NSFont.systemFont(ofSize: 16)
+        let fontHeight = ceil(bodyFont.ascender - bodyFont.descender + bodyFont.leading)
+        let expectedBaselineOffset = floor((38 - fontHeight) / 2)
+        let actualBaselineOffset = try XCTUnwrap(
+            textView.textStorage?.attribute(.baselineOffset, at: headerRange.location, effectiveRange: nil) as? NSNumber
+        )
+        XCTAssertEqual(CGFloat(truncating: actualBaselineOffset), expectedBaselineOffset)
+        XCTAssertLessThan(layoutManager.location(forGlyphAt: headerGlyphs.location).y, 38)
+    }
+
+    func testLiveTableCenteringPreservesInlineBaselineOffsets() throws {
+        let table = "| H<sub>2</sub>O | x<sup>3</sup> [^1] |\n| --- | --- |\n| a | b |"
+        let storage = NSTextStorage(string: table)
+        _ = LivePreview.apply(
+            to: storage,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: true
+        )
+
+        let source = table as NSString
+        let bodyLocation = source.range(of: "H<sub>").location
+        let subscriptLocation = source.range(of: "2</sub>").location
+        let superscriptLocation = source.range(of: "3</sup>").location
+        let footnoteLocation = source.range(of: "1]").location
+
+        func baseline(at location: Int) throws -> CGFloat {
+            let value = try XCTUnwrap(
+                storage.attribute(.baselineOffset, at: location, effectiveRange: nil) as? NSNumber
+            )
+            return CGFloat(truncating: value)
+        }
+
+        let bodyBaseline = try baseline(at: bodyLocation)
+        XCTAssertEqual(try baseline(at: subscriptLocation), bodyBaseline - 3)
+        XCTAssertEqual(try baseline(at: superscriptLocation), bodyBaseline + 6)
+        XCTAssertEqual(try baseline(at: footnoteLocation), bodyBaseline + 6)
+    }
+
+    func testLiveWhitespaceOnlyTableCellStaysHiddenSizedAndAddressable() throws {
+        let table = "| A | B |\n| --- | --- |\n|  | value |"
+        let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 320))
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.string = table
+        textView.liveDecorations = LivePreview.apply(
+            to: textView.textStorage!,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: true,
+            maximumTableWidth: textView.maximumTableWidth
+        )
+
+        let tableDecoration = try XCTUnwrap(textView.liveDecorations.tables.first)
+        let emptyCell = try XCTUnwrap(tableDecoration.rows.last?.cellRanges.first)
+        XCTAssertGreaterThan(emptyCell.length, 0)
+        for location in emptyCell.location..<NSMaxRange(emptyCell) {
+            XCTAssertTrue(isHidden(textView.textStorage!, at: location))
+        }
+        XCTAssertEqual(tableDecoration.columnWidths[0], 112)
+
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let container = try XCTUnwrap(textView.textContainer)
+        layoutManager.ensureLayout(for: container)
+        let glyphs = layoutManager.glyphRange(forCharacterRange: emptyCell, actualCharacterRange: nil)
+        XCTAssertGreaterThan(glyphs.length, 0)
+        XCTAssertEqual(layoutManager.characterIndexForGlyph(at: glyphs.location), emptyCell.location)
+
+        textView.setSelectedRange(NSRange(location: emptyCell.location, length: 0))
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: emptyCell.location, length: 0))
+    }
+
     func testTableMutationsAddAColumnAndRowWithUsefulCaretOffsets() throws {
         let table = "| A | B |\n| :--- | ---: |\n| 1 | 2 |"
         let column = try XCTUnwrap(GFM.addingTableColumn(to: table))
@@ -1277,6 +1385,54 @@ final class EditorLifecycleTests: XCTestCase {
         }
     }
 
+    func testReadingPreviewTableHeaderIsDistinctAndCellsFillTheirRows() async throws {
+        let headerColor = NSColor(MarkdownPreviewTableStyle.background(dark: false, isHeader: true))
+        let bodyColor = NSColor(MarkdownPreviewTableStyle.background(dark: false, isHeader: false))
+        XCTAssertNotEqual(headerColor, bodyColor)
+
+        let renderedView = MarkdownPreviewView(
+            text: "| Header One | Header Two |\n| --- | --- |\n| Body One | Body Two |",
+            noteTitles: [],
+            dark: false,
+            onWiki: { _ in }
+        )
+        .frame(width: 400, height: 120, alignment: .topLeading)
+        .background(Color.white)
+        let renderedHostingView = NSHostingView(rootView: renderedView)
+        renderedHostingView.frame = NSRect(x: 0, y: 0, width: 400, height: 120)
+        renderedHostingView.layoutSubtreeIfNeeded()
+        renderedHostingView.displayIfNeeded()
+        let bitmap = try XCTUnwrap(renderedHostingView.bitmapImageRepForCachingDisplay(in: renderedHostingView.bounds))
+        renderedHostingView.cacheDisplay(in: renderedHostingView.bounds, to: bitmap)
+        var headerBackgroundPixels = 0
+        for y in 0..<bitmap.pixelsHigh {
+            for x in 0..<bitmap.pixelsWide {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.redComponent > 0.90,
+                   color.redComponent < 0.995,
+                   abs(color.redComponent - color.greenComponent) < 0.01,
+                   abs(color.redComponent - color.blueComponent) < 0.01 {
+                    headerBackgroundPixels += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(headerBackgroundPixels, 500)
+
+        let metrics = try await readingPreviewTableMetrics(
+            markdown: "| #tag | Plain |\n| --- | --- |\n| Body | [^1] |",
+            paneWidth: 500
+        )
+        let rows = Dictionary(grouping: metrics, by: \.row)
+        XCTAssertEqual(rows.count, 2)
+        for cells in rows.values {
+            XCTAssertEqual(cells.count, 2)
+            let expectedHeight = try XCTUnwrap(cells.first?.size.height)
+            for cell in cells.dropFirst() {
+                XCTAssertEqual(cell.size.height, expectedHeight, accuracy: 0.5)
+            }
+        }
+    }
+
     func testReadingPreviewFillsWideAndNarrowPanesWhileCappingItsColumn() async throws {
         for paneWidth: CGFloat in [1_000, 600, 100] {
             let metrics = try await readingPreviewMetrics(paneWidth: paneWidth)
@@ -1324,6 +1480,35 @@ final class EditorLifecycleTests: XCTestCase {
         await fulfillment(of: [reported], timeout: 2)
         withExtendedLifetime(hostingView) {}
         return try XCTUnwrap(result)
+    }
+
+    private func readingPreviewTableMetrics(
+        markdown: String,
+        paneWidth: CGFloat
+    ) async throws -> [MarkdownPreviewTableCellLayout] {
+        let reported = expectation(description: "Preview reports table-cell layout")
+        var result: [MarkdownPreviewTableCellLayout] = []
+        var fulfilled = false
+        let view = MarkdownPreviewView(
+            text: markdown,
+            noteTitles: [],
+            onLayout: { metrics in
+                result = metrics.tableCells
+                if result.count == 4, !fulfilled {
+                    fulfilled = true
+                    reported.fulfill()
+                }
+            },
+            onWiki: { _ in }
+        )
+        .frame(width: paneWidth, height: 300, alignment: .topLeading)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: paneWidth, height: 300)
+        hostingView.layoutSubtreeIfNeeded()
+
+        await fulfillment(of: [reported], timeout: 2)
+        withExtendedLifetime(hostingView) {}
+        return result
     }
 
     private func noteEditorSize(mode: EditorMode, paneSize: CGSize) async throws -> CGSize {

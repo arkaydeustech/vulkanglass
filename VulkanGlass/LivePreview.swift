@@ -388,9 +388,8 @@ enum LivePreview {
                 let measured = visibleRows.compactMap { row -> CGFloat? in
                     guard row.cellRanges.indices.contains(column) else { return nil }
                     let raw = source.substring(with: row.cellRanges[column])
-                    let font = row.isHeader
-                        ? NSFont.systemFont(ofSize: 16, weight: .bold)
-                        : NSFont.systemFont(ofSize: 16)
+                        .trimmingCharacters(in: .whitespaces)
+                    let font = NSFont.systemFont(ofSize: 16)
                     return (raw as NSString).size(withAttributes: [.font: font]).width
                 }.max() ?? 0
                 return min(260, max(112, ceil(measured + 32)))
@@ -486,16 +485,37 @@ enum LivePreview {
             for row in table.rows {
                 guard row.range.length > 0, NSMaxRange(row.range) <= storage.length else { continue }
                 let rowStyle = NSMutableParagraphStyle()
+                rowStyle.alignment = .left
+                rowStyle.firstLineHeadIndent = 12
+                rowStyle.headIndent = 12
                 rowStyle.minimumLineHeight = 38
                 rowStyle.maximumLineHeight = 38
                 storage.addAttribute(.paragraphStyle, value: rowStyle, range: row.range)
+
+                let bodyFont = NSFont.systemFont(ofSize: 16)
+                let fontHeight = ceil(bodyFont.ascender - bodyFont.descender + bodyFont.leading)
+                let baselineOffset = floor((38 - fontHeight) / 2)
+                for cell in row.cellRanges where cell.length > 0 && NSMaxRange(cell) <= storage.length {
+                    addBaselineOffset(baselineOffset, in: cell, storage: storage)
+                    for whitespace in boundaryWhitespaceRanges(in: cell, text: storage.string as NSString) {
+                        storage.addAttributes(
+                            [
+                                .font: NSFont.systemFont(ofSize: 0.01),
+                                .foregroundColor: NSColor.clear,
+                                .kern: 0,
+                                .baselineOffset: 0
+                            ],
+                            range: whitespace
+                        )
+                    }
+                }
 
                 for (index, pipe) in row.pipeRanges.enumerated() where NSMaxRange(pipe) <= storage.length {
                     let isLeading = row.hasLeadingPipe && index == 0
                     let cellIndex = row.hasLeadingPipe ? index - 1 : index
                     let advance: CGFloat
                     if isLeading {
-                        advance = 12
+                        advance = 0
                     } else if row.cellRanges.indices.contains(cellIndex), table.columnWidths.indices.contains(cellIndex) {
                         let cellWidth = storage.attributedSubstring(from: row.cellRanges[cellIndex]).size().width
                         let isTrailing = row.hasTrailingPipe && index == row.pipeRanges.count - 1
@@ -518,6 +538,43 @@ enum LivePreview {
                 }
             }
         }
+    }
+
+    private static func addBaselineOffset(
+        _ offset: CGFloat,
+        in range: NSRange,
+        storage: NSTextStorage
+    ) {
+        var runs: [(range: NSRange, offset: CGFloat)] = []
+        storage.enumerateAttribute(.baselineOffset, in: range) { value, effectiveRange, _ in
+            let existing = (value as? NSNumber).map(CGFloat.init(truncating:)) ?? 0
+            runs.append((effectiveRange, existing))
+        }
+        for run in runs {
+            storage.addAttribute(.baselineOffset, value: run.offset + offset, range: run.range)
+        }
+    }
+
+    private static func boundaryWhitespaceRanges(in range: NSRange, text: NSString) -> [NSRange] {
+        var contentStart = range.location
+        let cellEnd = NSMaxRange(range)
+        while contentStart < cellEnd, isWhitespace(text.character(at: contentStart)) {
+            contentStart += 1
+        }
+
+        var contentEnd = cellEnd
+        while contentEnd > contentStart, isWhitespace(text.character(at: contentEnd - 1)) {
+            contentEnd -= 1
+        }
+
+        var ranges: [NSRange] = []
+        if contentStart > range.location {
+            ranges.append(NSRange(location: range.location, length: contentStart - range.location))
+        }
+        if contentEnd < cellEnd {
+            ranges.append(NSRange(location: contentEnd, length: cellEnd - contentEnd))
+        }
+        return ranges
     }
 
     private static func alertDecorations(
@@ -623,7 +680,7 @@ enum LivePreview {
             return .systemFont(ofSize: size, weight: .bold)
         case .inlineCode, .codeBlock:
             return .monospacedSystemFont(ofSize: 14, weight: .regular)
-        case .bold, .boldItalic, .tableRow(isHeader: true):
+        case .bold, .boldItalic:
             return .systemFont(ofSize: 16, weight: .bold)
         case .subscriptText, .superscriptText, .footnoteRef:
             return .systemFont(ofSize: 11)
@@ -697,10 +754,8 @@ enum LivePreview {
                 .font: contentFont(for: kind),
                 .foregroundColor: faintColor(dark: dark)
             ]
-        case .tableRow(let isHeader):
-            return isHeader
-                ? [.font: contentFont(for: kind), .foregroundColor: textColor(dark: dark)]
-                : nil
+        case .tableRow:
+            return nil
         case .heading, .bold:
             return [
                 .font: contentFont(for: kind),
