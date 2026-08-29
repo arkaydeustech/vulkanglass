@@ -518,7 +518,8 @@ final class LivePreviewTests: XCTestCase {
             dark: true
         )
         XCTAssertEqual(decorations.tables.count, 2)
-        XCTAssertEqual(decorations.tables.map { $0.rowRanges.count }, [3, 3])
+        XCTAssertEqual(decorations.tables.map { $0.rows.count }, [2, 2])
+        XCTAssertTrue(decorations.tables.allSatisfy { $0.separatorRange.length > 0 })
         XCTAssertTrue(decorations.tables[0].range.upperBound < decorations.tables[1].range.location)
     }
 
@@ -596,7 +597,7 @@ final class LivePreviewTests: XCTestCase {
             dark: true
         )
         XCTAssertEqual(decorations.tables.count, 1)
-        XCTAssertTrue(decorations.tables[0].collapsed)
+        XCTAssertEqual(decorations.tables[0].rows.count, 2)
         XCTAssertTrue(isHidden(storage, at: tableTokens.first { $0.kind == .tableSeparator }!.fullRange.location))
 
         let note = LivePreview.tokens(in: "See this[^1]\n\n[^1]: a footnote")
@@ -620,6 +621,147 @@ final class LivePreviewTests: XCTestCase {
             .text(" and "),
             .emoji("🎉")
         ])
+    }
+
+    func testLiveTableKeepsItsSourceChromeHiddenWhileEditingACell() throws {
+        let table = "| Name | Count |\n| --- | ---: |\n| Glass | 2 |"
+        let tokens = LivePreview.tokens(in: table)
+        let header = try XCTUnwrap(tokens.first { $0.kind == .tableRow(isHeader: true) })
+        let storage = NSTextStorage(string: table)
+        let decorations = LivePreview.apply(
+            to: storage,
+            caret: header.fullRange.location + 3,
+            selection: NSRange(location: header.fullRange.location + 3, length: 0),
+            dark: true
+        )
+
+        XCTAssertEqual(decorations.tables.count, 1)
+        XCTAssertEqual(decorations.tables[0].rows.count, 2)
+        XCTAssertEqual(decorations.tables[0].rows.map { $0.cellRanges.count }, [2, 2])
+        XCTAssertEqual(decorations.tables[0].columnWidths.count, 2)
+        XCTAssertTrue(isHidden(storage, at: header.delimiterRanges[0].location))
+        let separator = try XCTUnwrap(tokens.first { $0.kind == .tableSeparator })
+        XCTAssertTrue(isHidden(storage, at: separator.fullRange.location))
+        let style = storage.attribute(.paragraphStyle, at: header.fullRange.location + 2, effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(style?.minimumLineHeight, 38)
+
+        let unicode = "😀 | Kind\n--- | ---\n🔥 | Hot"
+        let unicodeStorage = NSTextStorage(string: unicode)
+        let unicodeDecorations = LivePreview.apply(
+            to: unicodeStorage,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: true
+        )
+        let emojiRange = try XCTUnwrap(unicodeDecorations.tables.first?.rows.first?.cellRanges.first)
+        XCTAssertEqual((unicode as NSString).substring(with: emojiRange).trimmingCharacters(in: .whitespaces), "😀")
+    }
+
+    func testTableMutationsAddAColumnAndRowWithUsefulCaretOffsets() throws {
+        let table = "| A | B |\n| :--- | ---: |\n| 1 | 2 |"
+        let column = try XCTUnwrap(GFM.addingTableColumn(to: table))
+        XCTAssertEqual(
+            column.replacement,
+            "| A | B |  |\n| :--- | ---: | --- |\n| 1 | 2 |  |"
+        )
+        XCTAssertEqual(
+            (column.replacement as NSString).substring(with: NSRange(location: column.selectionOffset, length: 1)),
+            " "
+        )
+        XCTAssertEqual(GFM.splitTableRow(column.replacement.components(separatedBy: "\n")[0]).count, 3)
+
+        let row = try XCTUnwrap(GFM.addingTableRow(to: table))
+        XCTAssertEqual(row.replacement, table + "\n|  |  |")
+        XCTAssertEqual(row.selectionOffset, (table as NSString).length + 3)
+        XCTAssertEqual(
+            (row.replacement as NSString).substring(with: NSRange(location: row.selectionOffset, length: 1)),
+            " "
+        )
+
+        let windowsTable = table.replacingOccurrences(of: "\n", with: "\r\n")
+        XCTAssertEqual(
+            GFM.addingTableRow(to: windowsTable)?.replacement,
+            windowsTable + "\r\n|  |  |"
+        )
+    }
+
+    func testAddingAColumnNormalizesRaggedRowsAndKeepsTheCaretInsideTrailingWhitespace() throws {
+        let ragged = "| A | B |\n| --- | --- |\n| one |"
+        let normalized = try XCTUnwrap(GFM.addingTableColumn(to: ragged))
+        XCTAssertEqual(
+            normalized.replacement.components(separatedBy: "\n").map(GFM.splitTableRow).map(\.count),
+            [3, 3, 3]
+        )
+
+        let trailing = "| A | B |  \n| --- | --- |\n| 1 | 2 |"
+        let mutation = try XCTUnwrap(GFM.addingTableColumn(to: trailing))
+        let edited = NSMutableString(string: mutation.replacement)
+        edited.insert("x", at: mutation.selectionOffset)
+        let editedLines = (edited as String).components(separatedBy: "\n")
+        XCTAssertTrue(GFM.isTable(header: editedLines[0], separator: editedLines[1]))
+        XCTAssertEqual(GFM.splitTableRow(editedLines[0]).last, "x")
+    }
+
+    func testTableMutationsCoverInvalidSingleColumnAndOuterPipeVariants() throws {
+        XCTAssertNil(GFM.addingTableColumn(to: "not a table"))
+        XCTAssertNil(GFM.addingTableRow(to: "A | B\nnot a separator"))
+
+        let single = try XCTUnwrap(GFM.addingTableColumn(to: "| A |\n| --- |\n| 1 |"))
+        XCTAssertEqual(single.replacement.components(separatedBy: "\n").map(GFM.splitTableRow).map(\.count), [2, 2, 2])
+
+        let noOuterPipes = "A | B\n--- | ---\n1 | 2"
+        let column = try XCTUnwrap(GFM.addingTableColumn(to: noOuterPipes))
+        XCTAssertEqual(column.replacement.components(separatedBy: "\n").map(GFM.splitTableRow).map(\.count), [3, 3, 3])
+        let row = try XCTUnwrap(GFM.addingTableRow(to: noOuterPipes))
+        XCTAssertTrue(row.replacement.components(separatedBy: "\n").last!.hasPrefix("|"))
+        XCTAssertEqual(GFM.splitTableRow(row.replacement.components(separatedBy: "\n").last!).count, 2)
+    }
+
+    func testOnlyTheStructuralSeparatorReceivesAlignmentSyntaxDuringColumnInsertion() throws {
+        let table = "| A | B |\n| --- | --- |\n| --- | value |"
+        let mutation = try XCTUnwrap(GFM.addingTableColumn(to: table))
+        let rows = mutation.replacement.components(separatedBy: "\n").map(GFM.splitTableRow)
+        XCTAssertEqual(rows[1].last, "---")
+        XCTAssertEqual(rows[2].last, "")
+    }
+
+    func testActiveTableSeparatorIsVisibleAtNormalLineHeight() throws {
+        let table = "| A | B |\n| :--- | ---: |\n| 1 | 2 |"
+        let separator = try XCTUnwrap(LivePreview.tokens(in: table).first { $0.kind == .tableSeparator })
+        let storage = NSTextStorage(string: table)
+        let decorations = LivePreview.apply(
+            to: storage,
+            caret: separator.fullRange.location + 3,
+            selection: NSRange(location: separator.fullRange.location + 3, length: 0),
+            dark: true
+        )
+        XCTAssertTrue(try XCTUnwrap(decorations.tables.first).separatorVisible)
+        XCTAssertFalse(isHidden(storage, at: separator.fullRange.location + 3))
+        let style = storage.attribute(.paragraphStyle, at: separator.fullRange.location + 3, effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertNotEqual(style?.minimumLineHeight, 0.01)
+    }
+
+    func testTableColumnWidthsClampAndFitTheAvailableEditorWidth() throws {
+        let long = String(repeating: "wide", count: 100)
+        let table = "| A | \(long) |\n| --- | --- |\n| 1 | 2 |"
+        let storage = NSTextStorage(string: table)
+        let unconstrained = LivePreview.apply(
+            to: storage,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: true
+        )
+        XCTAssertEqual(try XCTUnwrap(unconstrained.tables.first).columnWidths, [112, 260])
+
+        let constrainedStorage = NSTextStorage(string: table)
+        let constrained = LivePreview.apply(
+            to: constrainedStorage,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: true,
+            maximumTableWidth: 180
+        )
+        XCTAssertEqual(try XCTUnwrap(constrained.tables.first).columnWidths.reduce(0, +), 180, accuracy: 0.01)
     }
 
     private func isHidden(_ storage: NSTextStorage, at location: Int) -> Bool {
@@ -770,6 +912,7 @@ final class EditorLifecycleTests: XCTestCase {
     func testLivePreviewDrawingProducesAWindowlessSnapshot() {
         let text = "```swift\nlet value = 1\n```\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n> quote\n---"
         let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+        textView.drawsBackground = false
         textView.string = text
         textView.liveDecorations = LivePreview.apply(
             to: textView.textStorage!,
@@ -786,6 +929,334 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertFalse(textView.liveDecorations.codeBlocks.isEmpty)
         XCTAssertFalse(textView.liveDecorations.tables.isEmpty)
         XCTAssertFalse(textView.liveDecorations.bars.isEmpty)
+    }
+
+    func testHoverColumnControlIsAccessibleAndMutatesThroughTheEditorDelegate() throws {
+        let table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        var changes: [String] = []
+        let coordinator = SourceEditor.Coordinator(onChange: { changes.append($0) })
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let textView = SourceTextView(frame: window.contentView!.bounds)
+        textView.delegate = coordinator
+        textView.drawsBackground = false
+        textView.string = table
+        textView.liveDecorations = LivePreview.apply(
+            to: textView.textStorage!,
+            caret: (table as NSString).length,
+            selection: NSRange(location: (table as NSString).length, length: 0),
+            dark: true
+        )
+        window.contentView = textView
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+
+        let width = try XCTUnwrap(textView.liveDecorations.tables.first).columnWidths.reduce(0, +)
+        let point = NSPoint(
+            x: textView.textContainerOrigin.x + width + 4,
+            y: textView.textContainerOrigin.y + 19
+        )
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .mouseMoved,
+            location: textView.convert(point, to: nil),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 0,
+            pressure: 0
+        ))
+        textView.mouseMoved(with: event)
+
+        let control = try XCTUnwrap(
+            textView.subviews.compactMap { $0 as? NSButton }.first { !$0.isHidden }
+        )
+        XCTAssertEqual(control.toolTip, "Add column to the right")
+        XCTAssertEqual(control.accessibilityLabel(), "Add column to the right")
+        control.performClick(nil)
+
+        XCTAssertEqual(GFM.splitTableRow(textView.string.components(separatedBy: "\n")[0]).count, 3)
+        XCTAssertEqual(changes.last, textView.string)
+    }
+
+    func testTableGlyphsStayInsideTheGridBandsAndClicksClampToTheirCell() throws {
+        let table = "| Alpha | Beta |\n| --- | --- |\n| one | two |"
+        let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 320))
+        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.string = table
+        textView.liveDecorations = LivePreview.apply(
+            to: textView.textStorage!,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: true,
+            maximumTableWidth: textView.maximumTableWidth
+        )
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let container = try XCTUnwrap(textView.textContainer)
+        layoutManager.ensureLayout(for: container)
+        let decoration = try XCTUnwrap(textView.liveDecorations.tables.first)
+
+        for row in decoration.rows {
+            var bandStart = textView.textContainerOrigin.x
+            for (index, cell) in row.cellRanges.enumerated() {
+                let glyphs = layoutManager.glyphRange(forCharacterRange: cell, actualCharacterRange: nil)
+                var glyphRect = layoutManager.boundingRect(forGlyphRange: glyphs, in: container)
+                glyphRect.origin.x += textView.textContainerOrigin.x
+                let bandEnd = bandStart + decoration.columnWidths[index]
+                XCTAssertGreaterThanOrEqual(glyphRect.minX, bandStart - 1)
+                XCTAssertLessThanOrEqual(glyphRect.maxX, bandEnd + 1)
+                bandStart = bandEnd
+            }
+        }
+
+        let firstRow = decoration.rows[0]
+        let firstBandEnd = textView.textContainerOrigin.x + decoration.columnWidths[0]
+        let firstRowGlyphs = layoutManager.glyphRange(forCharacterRange: firstRow.range, actualCharacterRange: nil)
+        var firstRowRect = layoutManager.boundingRect(forGlyphRange: firstRowGlyphs, in: container)
+        firstRowRect.origin.y += textView.textContainerOrigin.y
+        let insertion = textView.characterIndexForInsertion(
+            at: NSPoint(x: firstBandEnd - 2, y: firstRowRect.midY)
+        )
+        XCTAssertGreaterThanOrEqual(insertion, firstRow.cellRanges[0].location)
+        XCTAssertLessThanOrEqual(insertion, NSMaxRange(firstRow.cellRanges[0]))
+    }
+
+    func testMouseDragStillSelectsTextAcrossTableCells() throws {
+        let table = "| Alpha | Beta |\n| --- | --- |\n| one | two |"
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let textView = SourceTextView(frame: window.contentView!.bounds)
+        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.string = table
+        textView.liveDecorations = LivePreview.apply(
+            to: textView.textStorage!,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: true,
+            maximumTableWidth: textView.maximumTableWidth
+        )
+        window.contentView = textView
+        XCTAssertTrue(window.makeFirstResponder(textView))
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        let decoration = try XCTUnwrap(textView.liveDecorations.tables.first)
+        let row = try XCTUnwrap(decoration.rows.first)
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let container = try XCTUnwrap(textView.textContainer)
+        let glyphs = layoutManager.glyphRange(forCharacterRange: row.range, actualCharacterRange: nil)
+        var rowRect = layoutManager.boundingRect(forGlyphRange: glyphs, in: container)
+        rowRect.origin.y += textView.textContainerOrigin.y
+        let start = NSPoint(x: textView.textContainerOrigin.x + 16, y: rowRect.midY)
+        let end = NSPoint(
+            x: textView.textContainerOrigin.x + decoration.columnWidths[0] + 36,
+            y: rowRect.midY
+        )
+
+        func event(_ type: NSEvent.EventType, at point: NSPoint, number: Int) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(
+                with: type,
+                location: textView.convert(point, to: nil),
+                modifierFlags: [],
+                timestamp: TimeInterval(number) / 10,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: number,
+                clickCount: type == .leftMouseDown ? 1 : 0,
+                pressure: type == .leftMouseUp ? 0 : 1
+            ))
+        }
+
+        let down = try event(.leftMouseDown, at: start, number: 1)
+        NSApp.postEvent(try event(.leftMouseDragged, at: end, number: 2), atStart: false)
+        NSApp.postEvent(try event(.leftMouseUp, at: end, number: 3), atStart: false)
+        textView.mouseDown(with: down)
+        XCTAssertGreaterThan(textView.selectedRange().length, 0)
+    }
+
+    func testCaretDrivenTableCommandsValidateAndMutateWithoutPointerHover() throws {
+        func configuredView() -> SourceTextView {
+            let table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+            let view = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 320))
+            view.string = table
+            view.liveDecorations = LivePreview.apply(
+                to: view.textStorage!,
+                caret: 3,
+                selection: NSRange(location: 3, length: 0),
+                dark: true,
+                maximumTableWidth: view.maximumTableWidth
+            )
+            view.setSelectedRange(NSRange(location: 3, length: 0))
+            return view
+        }
+
+        let columnView = configuredView()
+        let columnItem = NSMenuItem(title: "Add Table Column", action: #selector(SourceTextView.addTableColumn(_:)), keyEquivalent: "")
+        XCTAssertTrue(columnView.validateUserInterfaceItem(columnItem))
+        columnView.addTableColumn(nil)
+        XCTAssertEqual(GFM.splitTableRow(columnView.string.components(separatedBy: "\n")[0]).count, 3)
+
+        let rowView = configuredView()
+        let rowItem = NSMenuItem(title: "Add Table Row", action: #selector(SourceTextView.addTableRow(_:)), keyEquivalent: "")
+        XCTAssertTrue(rowView.validateUserInterfaceItem(rowItem))
+        rowView.addTableRow(nil)
+        XCTAssertEqual(rowView.string.components(separatedBy: "\n").count, 4)
+
+        rowView.setSelectedRange(NSRange(location: (rowView.string as NSString).length, length: 0))
+        rowView.liveDecorations = .init()
+        XCTAssertFalse(rowView.validateUserInterfaceItem(rowItem))
+    }
+
+    func testRowHoverControlMutatesAndLayoutIsCachedAcrossMouseMoves() throws {
+        let table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let textView = SourceTextView(frame: window.contentView!.bounds)
+        textView.string = table
+        textView.liveDecorations = LivePreview.apply(
+            to: textView.textStorage!,
+            caret: 3,
+            selection: NSRange(location: 3, length: 0),
+            dark: true,
+            maximumTableWidth: textView.maximumTableWidth
+        )
+        window.contentView = textView
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let container = try XCTUnwrap(textView.textContainer)
+        layoutManager.ensureLayout(for: container)
+        let decoration = try XCTUnwrap(textView.liveDecorations.tables.first)
+        let lastRow = try XCTUnwrap(decoration.rows.last)
+        let glyphs = layoutManager.glyphRange(forCharacterRange: lastRow.range, actualCharacterRange: nil)
+        var rowRect = layoutManager.boundingRect(forGlyphRange: glyphs, in: container)
+        rowRect.origin.y += textView.textContainerOrigin.y
+        let point = NSPoint(
+            x: textView.textContainerOrigin.x + decoration.columnWidths.reduce(0, +) / 2,
+            y: rowRect.maxY + 4
+        )
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .mouseMoved,
+            location: textView.convert(point, to: nil),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 0,
+            pressure: 0
+        ))
+        textView.mouseMoved(with: event)
+        let firstComputationCount = textView.tableLayoutComputationCount
+        textView.mouseMoved(with: event)
+        XCTAssertEqual(textView.tableLayoutComputationCount, firstComputationCount)
+
+        let rowControl = try XCTUnwrap(textView.subviews.compactMap { $0 as? NSButton }.first { !$0.isHidden })
+        XCTAssertEqual(rowControl.toolTip, "Add row below")
+        rowControl.performClick(nil)
+        XCTAssertEqual(textView.string.components(separatedBy: "\n").count, 4)
+    }
+
+    func testTableControlsHideWhenDecorationsDisappearAndIgnoreStaleRanges() throws {
+        let table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let textView = SourceTextView(frame: window.contentView!.bounds)
+        textView.string = table
+        let decorations = LivePreview.apply(
+            to: textView.textStorage!,
+            caret: 3,
+            selection: NSRange(location: 3, length: 0),
+            dark: true,
+            maximumTableWidth: textView.maximumTableWidth
+        )
+        textView.liveDecorations = decorations
+        window.contentView = textView
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        let width = try XCTUnwrap(decorations.tables.first).columnWidths.reduce(0, +)
+        let point = NSPoint(x: textView.textContainerOrigin.x + width + 2, y: textView.textContainerOrigin.y + 19)
+
+        func hover() throws {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
+                with: .mouseMoved,
+                location: textView.convert(point, to: nil),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 0,
+                pressure: 0
+            ))
+            textView.mouseMoved(with: event)
+        }
+
+        try hover()
+        XCTAssertTrue(textView.subviews.contains { !$0.isHidden })
+        textView.liveDecorations = .init()
+        XCTAssertFalse(textView.subviews.contains { !$0.isHidden })
+
+        textView.liveDecorations = decorations
+        try hover()
+        let staleControl = try XCTUnwrap(textView.subviews.compactMap { $0 as? NSButton }.first { !$0.isHidden })
+        textView.string = "x"
+        staleControl.performClick(nil)
+        XCTAssertEqual(textView.string, "x")
+    }
+
+    func testWideTableAndControlsFitTheVisibleEditor() throws {
+        let table = "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 | 5 | 6 |"
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let textView = SourceTextView(frame: window.contentView!.bounds)
+        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.string = table
+        textView.liveDecorations = LivePreview.apply(
+            to: textView.textStorage!,
+            caret: 3,
+            selection: NSRange(location: 3, length: 0),
+            dark: true,
+            maximumTableWidth: textView.maximumTableWidth
+        )
+        window.contentView = textView
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        let decoration = try XCTUnwrap(textView.liveDecorations.tables.first)
+        let width = decoration.columnWidths.reduce(0, +)
+        XCTAssertLessThanOrEqual(width, textView.maximumTableWidth + 0.01)
+
+        let point = NSPoint(x: textView.textContainerOrigin.x + width + 2, y: textView.textContainerOrigin.y + 19)
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .mouseMoved,
+            location: textView.convert(point, to: nil),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 0,
+            pressure: 0
+        ))
+        textView.mouseMoved(with: event)
+        let control = try XCTUnwrap(textView.subviews.compactMap { $0 as? NSButton }.first { !$0.isHidden })
+        XCTAssertLessThanOrEqual(control.frame.maxX, textView.visibleRect.maxX + 0.01)
     }
 
     func testReadingPreviewRendersInLightAndDarkAppearances() {

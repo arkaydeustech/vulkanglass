@@ -34,6 +34,7 @@ struct SourceEditor: NSViewRepresentable {
         textView.isAutomaticDataDetectionEnabled = false
         textView.font = .systemFont(ofSize: 16)
         textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainer?.lineFragmentPadding = 0
         textView.drawsBackground = false
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -52,6 +53,9 @@ struct SourceEditor: NSViewRepresentable {
         context.coordinator.dark = dark
         context.coordinator.baseURL = baseURL
         context.coordinator.loadRemoteImages = loadRemoteImages
+        textView.onGeometryChange = { [weak coordinator = context.coordinator] in
+            coordinator?.scheduleRestyle()
+        }
         applyChrome(textView)
         context.coordinator.restyle()
         return scroll
@@ -82,6 +86,7 @@ struct SourceEditor: NSViewRepresentable {
         if let textView = nsView.documentView as? SourceTextView {
             textView.delegate = nil
             textView.wikiHandler = nil
+            textView.onGeometryChange = nil
         }
         coordinator.textView = nil
     }
@@ -168,6 +173,7 @@ struct SourceEditor: NSViewRepresentable {
                 caret: selection.location,
                 selection: selection,
                 dark: dark,
+                maximumTableWidth: textView.maximumTableWidth,
                 tokens: cachedTokens
             )
             textView.configureImages(baseURL: baseURL, loadRemoteImages: loadRemoteImages)
@@ -281,12 +287,23 @@ struct SourceEditor: NSViewRepresentable {
 /// Forwards movement keys to wiki-link completion while the popup is open.
 final class SourceTextView: NSTextView {
     private static let legacyStringPasteboardType = NSPasteboard.PasteboardType("NSStringPboardType")
+    static let tableControlThickness: CGFloat = 28
 
     weak var wikiHandler: WikiLinkKeyHandling?
     private(set) var baseURL: URL?
     private(set) var loadRemoteImages = false
     var liveDecorations = LivePreview.Decorations() {
-        didSet { needsDisplay = true }
+        didSet {
+            invalidateTableLayoutCache()
+            if let range = controlledTableRange {
+                if let updated = liveDecorations.tables.first(where: { $0.range.location == range.location }) {
+                    controlledTableRange = updated.range
+                } else {
+                    hideTableControls()
+                }
+            }
+            needsDisplay = true
+        }
     }
     private var imageCache: [URL: NSImage] = [:]
     private var loadingImages: Set<URL> = []
@@ -294,8 +311,34 @@ final class SourceTextView: NSTextView {
     private var imageGeneration = 0
     private(set) var imageLoadAttempts: [URL: Int] = [:]
     var imageLoadHandler: ((URL, Bool) -> Void)?
+    var onGeometryChange: (() -> Void)?
+    private var tableTrackingArea: NSTrackingArea?
+    private var controlledTableRange: NSRange?
+    private var cachedTableLayoutKey: TableLayoutCacheKey?
+    private var cachedTableLayouts: [TableLayout] = []
+    private(set) var tableLayoutComputationCount = 0
+    private lazy var addColumnButton = makeTableControl(
+        help: "Add column to the right",
+        action: #selector(addTableColumn(_:))
+    )
+    private lazy var addRowButton = makeTableControl(
+        help: "Add row below",
+        action: #selector(addTableRow(_:))
+    )
 
     var cachedImageURLs: Set<URL> { Set(imageCache.keys) }
+
+    var maximumTableWidth: CGFloat {
+        max(1, bounds.width - (textContainerInset.width * 2) - Self.tableControlThickness - 8)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = abs(frame.width - newSize.width) > 0.5
+        super.setFrameSize(newSize)
+        guard widthChanged else { return }
+        invalidateTableLayoutCache()
+        onGeometryChange?()
+    }
 
     func configureImages(baseURL: URL?, loadRemoteImages: Bool) {
         let normalizedBase = baseURL?.standardizedFileURL
@@ -313,6 +356,34 @@ final class SourceTextView: NSTextView {
     override func doCommand(by selector: Selector) {
         if wikiHandler?.handleCommand(selector) == true { return }
         super.doCommand(by: selector)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tableTrackingArea { removeTrackingArea(tableTrackingArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        tableTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateTableControls(at: convert(event.locationInWindow, from: nil))
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hideTableControls()
+        super.mouseExited(with: event)
+    }
+
+    override func characterIndexForInsertion(at point: NSPoint) -> Int {
+        let proposed = super.characterIndexForInsertion(at: point)
+        guard let hit = tableCell(at: point) else { return proposed }
+        return min(max(proposed, hit.range.location), NSMaxRange(hit.range))
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -355,6 +426,9 @@ final class SourceTextView: NSTextView {
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(paste(_:)) {
             return isEditable && NSPasteboard.general.availableType(from: readablePasteboardTypes) != nil
+        }
+        if item.action == #selector(addTableColumn(_:)) || item.action == #selector(addTableRow(_:)) {
+            return isEditable && tableRangeContainingSelection() != nil
         }
         return super.validateUserInterfaceItem(item)
     }
@@ -400,46 +474,38 @@ final class SourceTextView: NSTextView {
             NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
         }
         for decoration in liveDecorations.tables {
-            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
-                  rect.intersects(dirtyRect) else { continue }
+            guard let table = tableLayout(for: decoration, layoutManager: layoutManager, textContainer: textContainer),
+                  table.rect.intersects(dirtyRect) else { continue }
+            let rect = table.rect
             let fill = decoration.dark
-                ? NSColor(red: 0.16, green: 0.16, blue: 0.17, alpha: 0.9)
-                : NSColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 1)
+                ? NSColor(white: 1, alpha: 0.018)
+                : NSColor(white: 0, alpha: 0.018)
             fill.setFill()
-            let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+            let path = NSBezierPath(rect: rect)
             path.fill()
             let stroke = decoration.dark
-                ? NSColor(white: 1, alpha: 0.12)
-                : NSColor(white: 0, alpha: 0.12)
+                ? NSColor(white: 1, alpha: 0.16)
+                : NSColor(white: 0, alpha: 0.16)
             stroke.setStroke()
             path.lineWidth = 1
             path.stroke()
-            for (index, row) in decoration.rowRanges.enumerated() where index > 0 {
-                guard let rowRect = blockRect(for: row, layoutManager: layoutManager, textContainer: textContainer)
-                else { continue }
-                let y = rowRect.minY
+            for rowRect in table.rowRects.dropFirst() {
                 stroke.setStroke()
                 let line = NSBezierPath()
-                line.move(to: NSPoint(x: rect.minX + 1, y: y))
-                line.line(to: NSPoint(x: rect.maxX - 1, y: y))
+                line.move(to: NSPoint(x: rect.minX, y: rowRect.minY))
+                line.line(to: NSPoint(x: rect.maxX, y: rowRect.minY))
                 line.lineWidth = 1
                 line.stroke()
             }
-            if decoration.collapsed {
-                for pipe in decoration.pipeRanges {
-                    let glyphs = layoutManager.glyphRange(forCharacterRange: pipe, actualCharacterRange: nil)
-                    guard glyphs.length > 0 else { continue }
-                    var pipeRect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
-                    pipeRect.origin.x += textContainerOrigin.x
-                    pipeRect.origin.y += textContainerOrigin.y
-                    let x = pipeRect.midX
-                    stroke.setStroke()
-                    let line = NSBezierPath()
-                    line.move(to: NSPoint(x: x, y: rect.minY + 1))
-                    line.line(to: NSPoint(x: x, y: rect.maxY - 1))
-                    line.lineWidth = 1
-                    line.stroke()
-                }
+            var x = rect.minX
+            for width in table.columnWidths.dropLast() {
+                x += width
+                stroke.setStroke()
+                let line = NSBezierPath()
+                line.move(to: NSPoint(x: x, y: rect.minY))
+                line.line(to: NSPoint(x: x, y: rect.maxY))
+                line.lineWidth = 1
+                line.stroke()
             }
         }
         for decoration in liveDecorations.bars {
@@ -520,6 +586,219 @@ final class SourceTextView: NSTextView {
             let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16)]
             (decoration.emoji as NSString).draw(at: rect.origin, withAttributes: attrs)
         }
+    }
+
+    private struct TableLayout {
+        var decoration: LivePreview.TableDecoration
+        var rect: NSRect
+        var rowRects: [NSRect]
+        var columnWidths: [CGFloat]
+    }
+
+    private struct TableCellHit {
+        var range: NSRange
+    }
+
+    private struct TableLayoutCacheKey: Equatable {
+        var decorations: [LivePreview.TableDecoration]
+        var visibleRect: NSRect
+        var origin: NSPoint
+        var containerSize: NSSize
+    }
+
+    private func tableLayouts() -> [TableLayout] {
+        guard !liveDecorations.tables.isEmpty, let layoutManager, let textContainer else { return [] }
+        let key = TableLayoutCacheKey(
+            decorations: liveDecorations.tables,
+            visibleRect: visibleRect,
+            origin: textContainerOrigin,
+            containerSize: textContainer.containerSize
+        )
+        if key == cachedTableLayoutKey { return cachedTableLayouts }
+
+        var containerRect = visibleRect
+        containerRect.origin.x -= textContainerOrigin.x
+        containerRect.origin.y -= textContainerOrigin.y
+        layoutManager.ensureLayout(forBoundingRect: containerRect, in: textContainer)
+        let glyphs = layoutManager.glyphRange(forBoundingRect: containerRect, in: textContainer)
+        let characters = layoutManager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        let visibleTables = liveDecorations.tables.filter {
+            NSIntersectionRange($0.range, characters).length > 0
+        }
+        let layouts = visibleTables.compactMap {
+            tableLayout(for: $0, layoutManager: layoutManager, textContainer: textContainer)
+        }
+        tableLayoutComputationCount += 1
+        cachedTableLayoutKey = key
+        cachedTableLayouts = layouts
+        return layouts
+    }
+
+    private func invalidateTableLayoutCache() {
+        cachedTableLayoutKey = nil
+        cachedTableLayouts = []
+    }
+
+    private func tableLayout(
+        for decoration: LivePreview.TableDecoration,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> TableLayout? {
+        let rows = decoration.rows.compactMap { row -> NSRect? in
+            guard let rect = lineRect(for: row.range, layoutManager: layoutManager, textContainer: textContainer) else {
+                return nil
+            }
+            return rect
+        }
+        guard let first = rows.first, let last = rows.last, !decoration.columnWidths.isEmpty else { return nil }
+        let width = decoration.columnWidths.reduce(0, +)
+        let rect = NSRect(
+            x: textContainerOrigin.x,
+            y: first.minY,
+            width: width,
+            height: last.maxY - first.minY
+        )
+        let normalizedRows = rows.map {
+            NSRect(x: rect.minX, y: $0.minY, width: width, height: $0.height)
+        }
+        return TableLayout(
+            decoration: decoration,
+            rect: rect,
+            rowRects: normalizedRows,
+            columnWidths: decoration.columnWidths
+        )
+    }
+
+    private func lineRect(
+        for range: NSRange,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> NSRect? {
+        guard range.length > 0 else { return nil }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return nil }
+        var result = NSRect.null
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, _, _ in
+            result = result.union(rect)
+        }
+        guard !result.isNull else { return nil }
+        result.origin.x += textContainerOrigin.x
+        result.origin.y += textContainerOrigin.y
+        return result
+    }
+
+    private func tableCell(at point: NSPoint) -> TableCellHit? {
+        for table in tableLayouts() where table.rect.contains(point) {
+            guard let rowIndex = table.rowRects.firstIndex(where: { $0.contains(point) }),
+                  table.decoration.rows.indices.contains(rowIndex)
+            else { continue }
+            var boundary = table.rect.minX
+            for (column, width) in table.columnWidths.enumerated() {
+                boundary += width
+                if point.x <= boundary,
+                   table.decoration.rows[rowIndex].cellRanges.indices.contains(column) {
+                    return TableCellHit(range: table.decoration.rows[rowIndex].cellRanges[column])
+                }
+            }
+        }
+        return nil
+    }
+
+    private func updateTableControls(at point: NSPoint) {
+        for table in tableLayouts() {
+            let reachableRight = max(table.rect.minX, visibleRect.maxX - Self.tableControlThickness)
+            let reachableBottom = max(table.rect.minY, visibleRect.maxY - Self.tableControlThickness)
+            let columnFrame = NSRect(
+                x: min(table.rect.maxX, reachableRight),
+                y: table.rect.minY,
+                width: Self.tableControlThickness,
+                height: table.rect.height
+            )
+            let rowFrame = NSRect(
+                x: table.rect.minX,
+                y: min(table.rect.maxY, reachableBottom),
+                width: min(table.rect.width, max(0, visibleRect.maxX - table.rect.minX)),
+                height: Self.tableControlThickness
+            )
+            if columnFrame.insetBy(dx: -6, dy: 0).contains(point) {
+                showTableControl(addColumnButton, frame: columnFrame, table: table.decoration.range)
+                addRowButton.isHidden = true
+                return
+            }
+            if rowFrame.insetBy(dx: 0, dy: -6).contains(point) {
+                showTableControl(addRowButton, frame: rowFrame, table: table.decoration.range)
+                addColumnButton.isHidden = true
+                return
+            }
+        }
+        hideTableControls()
+    }
+
+    private func showTableControl(_ button: TableInsertButton, frame: NSRect, table: NSRange) {
+        ensureTableControls()
+        controlledTableRange = table
+        button.frame = frame
+        button.isHidden = false
+    }
+
+    private func hideTableControls() {
+        if addColumnButton.superview != nil { addColumnButton.isHidden = true }
+        if addRowButton.superview != nil { addRowButton.isHidden = true }
+        controlledTableRange = nil
+    }
+
+    private func ensureTableControls() {
+        if addColumnButton.superview == nil {
+            addSubview(addColumnButton)
+            addColumnButton.isHidden = true
+        }
+        if addRowButton.superview == nil {
+            addSubview(addRowButton)
+            addRowButton.isHidden = true
+        }
+    }
+
+    private func makeTableControl(help: String, action: Selector) -> TableInsertButton {
+        let button = TableInsertButton(frame: .zero)
+        button.target = self
+        button.action = action
+        button.toolTip = help
+        button.setAccessibilityLabel(help)
+        button.setAccessibilityHelp(help)
+        return button
+    }
+
+    @objc func addTableColumn(_ sender: Any?) {
+        mutateTableAtCurrentTarget(using: GFM.addingTableColumn)
+    }
+
+    @objc func addTableRow(_ sender: Any?) {
+        mutateTableAtCurrentTarget(using: GFM.addingTableRow)
+    }
+
+    private func tableRangeContainingSelection() -> NSRange? {
+        let caret = selectedRange().location
+        return liveDecorations.tables.first {
+            caret >= $0.range.location && caret <= NSMaxRange($0.range)
+        }?.range
+    }
+
+    private func mutateTableAtCurrentTarget(
+        using mutation: (String) -> GFM.TableMutation?
+    ) {
+        guard let range = controlledTableRange ?? tableRangeContainingSelection(),
+              NSMaxRange(range) <= (string as NSString).length,
+              let result = mutation((string as NSString).substring(with: range)),
+              shouldChangeText(in: range, replacementString: result.replacement)
+        else { return }
+
+        replaceCharacters(in: range, with: result.replacement)
+        didChangeText()
+        let caret = range.location + result.selectionOffset
+        window?.makeFirstResponder(self)
+        setSelectedRange(NSRange(location: caret, length: 0))
+        scrollRangeToVisible(NSRange(location: caret, length: 0))
+        hideTableControls()
     }
 
     private func image(for raw: String) -> NSImage? {
@@ -622,6 +901,70 @@ final class SourceTextView: NSTextView {
         union.size.height += 12
         if union.height < 28 { union.size.height = 28 }
         return union
+    }
+}
+
+/// A quiet edge affordance that becomes tangible only while the pointer is on it.
+private final class TableInsertButton: NSButton {
+    private var pointerInside = false
+    private var pointerTrackingArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        title = ""
+        image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
+        imagePosition = .imageOnly
+        imageScaling = .scaleNone
+        contentTintColor = .secondaryLabelColor
+        isBordered = false
+        bezelStyle = .regularSquare
+        setButtonType(.momentaryChange)
+        focusRingType = .default
+        wantsLayer = true
+        layer?.cornerRadius = 3
+        updateAppearance()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTrackingArea { removeTrackingArea(pointerTrackingArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        pointerTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        pointerInside = true
+        updateAppearance()
+        NSCursor.pointingHand.set()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        pointerInside = false
+        updateAppearance()
+        NSCursor.arrow.set()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAppearance()
+    }
+
+    private func updateAppearance() {
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let alpha: CGFloat = pointerInside ? 0.15 : 0.07
+        layer?.backgroundColor = (dark ? NSColor.white : NSColor.black)
+            .withAlphaComponent(alpha)
+            .cgColor
+        contentTintColor = pointerInside ? .labelColor : .secondaryLabelColor
     }
 }
 

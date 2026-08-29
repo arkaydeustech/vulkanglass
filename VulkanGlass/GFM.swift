@@ -2,6 +2,11 @@ import Foundation
 
 /// GitHub Flavored Markdown helpers shared by live preview and reading view.
 enum GFM {
+    struct TableMutation: Equatable {
+        var replacement: String
+        var selectionOffset: Int
+    }
+
     enum AlertKind: String, Equatable, CaseIterable {
         case note = "NOTE"
         case tip = "TIP"
@@ -109,6 +114,94 @@ enum GFM {
     static func isTable(header: String, separator: String) -> Bool {
         guard looksLikeTableRow(header), isTableSeparator(separator) else { return false }
         return splitTableRow(header).count == splitTableRow(separator).count
+    }
+
+    /// Adds an empty cell to the right edge of every source row while preserving the
+    /// table's existing text. The returned offset places the caret in the new header cell.
+    static func addingTableColumn(to markdown: String) -> TableMutation? {
+        let separator = tableLineSeparator(in: markdown)
+        let lines = markdown.components(separatedBy: separator)
+        guard lines.count >= 2,
+              isTable(header: lines[0], separator: lines[1])
+        else { return nil }
+
+        let existingColumns = splitTableRow(lines[0]).count
+        var caret = 0
+        let edited = lines.enumerated().map { index, line in
+            var next = line
+            if index > 1 {
+                while splitTableRow(next).count < existingColumns {
+                    next = appendingTableCell("", to: next).line
+                }
+            }
+            let appended = appendingTableCell(index == 1 ? "---" : "", to: next)
+            if index == 0 {
+                caret = appended.cellInteriorOffset
+            }
+            return appended.line
+        }
+        return TableMutation(replacement: edited.joined(separator: separator), selectionOffset: caret)
+    }
+
+    /// Appends a blank body row and returns a caret position inside its first cell.
+    static func addingTableRow(to markdown: String) -> TableMutation? {
+        let separator = tableLineSeparator(in: markdown)
+        let lines = markdown.components(separatedBy: separator)
+        guard lines.count >= 2,
+              isTable(header: lines[0], separator: lines[1])
+        else { return nil }
+        let columns = splitTableRow(lines[0]).count
+        guard columns > 0 else { return nil }
+
+        let row = "| " + Array(repeating: "", count: columns).joined(separator: " | ") + " |"
+        let replacement = markdown + separator + row
+        return TableMutation(
+            replacement: replacement,
+            selectionOffset: (markdown as NSString).length + (separator as NSString).length + 2
+        )
+    }
+
+    private static func tableLineSeparator(in markdown: String) -> String {
+        markdown.contains("\r\n") ? "\r\n" : "\n"
+    }
+
+    private struct AppendedTableCell {
+        var line: String
+        var cellInteriorOffset: Int
+    }
+
+    private static func appendingTableCell(_ cell: String, to line: String) -> AppendedTableCell {
+        let ns = line as NSString
+        var bodyEnd = ns.length
+        while bodyEnd > 0 {
+            let scalar = ns.character(at: bodyEnd - 1)
+            guard scalar == 32 || scalar == 9 || scalar == 13 else { break }
+            bodyEnd -= 1
+        }
+        let body = ns.substring(to: bodyEnd)
+        let trailing = ns.substring(from: bodyEnd)
+        let cellLength = (cell as NSString).length
+        if hasUnescapedTrailingPipe(body) {
+            let withoutPipe = (body as NSString).substring(to: (body as NSString).length - 1)
+            return AppendedTableCell(
+                line: withoutPipe + "| \(cell) |" + trailing,
+                cellInteriorOffset: (withoutPipe as NSString).length + 2 + cellLength
+            )
+        }
+        return AppendedTableCell(
+            line: body + " | \(cell) |" + trailing,
+            cellInteriorOffset: (body as NSString).length + 3 + cellLength
+        )
+    }
+
+    private static func hasUnescapedTrailingPipe(_ line: String) -> Bool {
+        guard line.last == "|" else { return false }
+        var slashes = 0
+        for character in line.dropLast().reversed() {
+            guard character == "\\" else { break }
+            slashes += 1
+        }
+        return slashes.isMultiple(of: 2)
     }
 
     static func emoji(for shortcode: String) -> String? {

@@ -53,10 +53,20 @@ enum LivePreview {
 
     struct TableDecoration: Equatable {
         var range: NSRange
-        var rowRanges: [NSRange]
-        var pipeRanges: [NSRange]
-        var collapsed: Bool
+        var rows: [TableRowDecoration]
+        var separatorRange: NSRange
+        var separatorVisible: Bool
+        var columnWidths: [CGFloat]
         var dark: Bool
+    }
+
+    struct TableRowDecoration: Equatable {
+        var range: NSRange
+        var cellRanges: [NSRange]
+        var pipeRanges: [NSRange]
+        var isHeader: Bool
+        var hasLeadingPipe: Bool
+        var hasTrailingPipe: Bool
     }
 
     struct BlockBarDecoration: Equatable {
@@ -166,6 +176,7 @@ enum LivePreview {
         caret: Int,
         selection: NSRange,
         dark: Bool,
+        maximumTableWidth: CGFloat? = nil,
         tokens suppliedTokens: [Token]? = nil
     ) -> Decorations {
         let text = storage.string
@@ -219,7 +230,14 @@ enum LivePreview {
         }
 
         var decorations = Decorations()
-        decorations.tables = tableDecorations(from: found, text: text, caret: caret, selection: selection, dark: dark)
+        decorations.tables = tableDecorations(
+            from: found,
+            text: text,
+            caret: caret,
+            selection: selection,
+            dark: dark,
+            maximumWidth: maximumTableWidth
+        )
         decorations.bars = alertDecorations(from: found, text: text, caret: caret, selection: selection, dark: dark)
 
         for token in found {
@@ -255,26 +273,21 @@ enum LivePreview {
                         dark: dark
                     )
                 )
-            case .tableRow, .tableSeparator:
-                let ghostPipes = !active && token.kind != .tableSeparator
-                let hideAll = !active && token.kind == .tableSeparator
-                if hideAll {
+            case .tableSeparator:
+                if token.fullRange.length > 0 {
                     storage.addAttributes(
-                        delimiterAttributes(visible: false, font: font, dark: dark),
+                        delimiterAttributes(visible: active, font: font, dark: dark),
                         range: token.fullRange
                     )
-                } else {
-                    for range in token.delimiterRanges where range.length > 0 && NSMaxRange(range) <= storage.length {
-                        storage.addAttributes(
-                            delimiterAttributes(
-                                visible: active,
-                                font: font,
-                                dark: dark,
-                                keepWidth: ghostPipes
-                            ),
-                            range: range
-                        )
-                    }
+                }
+            case .tableRow:
+                // Table source is structural, not editing chrome. Keep pipes hidden even
+                // while the caret is inside a cell, as in Obsidian's live table editor.
+                for range in token.delimiterRanges where range.length > 0 && NSMaxRange(range) <= storage.length {
+                    storage.addAttributes(
+                        delimiterAttributes(visible: false, font: font, dark: dark, keepWidth: true),
+                        range: range
+                    )
                 }
             case .emoji(let glyph):
                 if token.fullRange.length > 0 {
@@ -343,6 +356,7 @@ enum LivePreview {
                 }
             }
         }
+        styleTables(decorations.tables, in: storage)
         storage.endEditing()
         return decorations
     }
@@ -352,7 +366,8 @@ enum LivePreview {
         text: String,
         caret: Int,
         selection: NSRange,
-        dark: Bool
+        dark: Bool,
+        maximumWidth: CGFloat?
     ) -> [TableDecoration] {
         let rows = tokens.filter {
             if case .tableRow = $0.kind { return true }
@@ -360,16 +375,148 @@ enum LivePreview {
         }.sorted { $0.fullRange.location < $1.fullRange.location }
         return groupedAdjacent(rows, text: text).map { group in
             let range = group.dropFirst().reduce(group[0].fullRange) { NSUnionRange($0, $1.fullRange) }
-            let active = group.contains {
-                $0.containsCaret(caret) || NSIntersectionRange(selection, $0.fullRange).length > 0
+            let source = text as NSString
+            let visibleRows = group.compactMap { token -> TableRowDecoration? in
+                guard case .tableRow(let isHeader) = token.kind else { return nil }
+                return tableRowDecoration(for: token, isHeader: isHeader, in: source)
             }
+            let separator = group.first { $0.kind == .tableSeparator }?.fullRange ?? NSRange(location: range.location, length: 0)
+            let separatorVisible = caret >= separator.location && caret <= NSMaxRange(separator)
+                || NSIntersectionRange(selection, separator).length > 0
+            let columns = visibleRows.map(\.cellRanges.count).max() ?? 0
+            let desiredWidths = (0..<columns).map { column -> CGFloat in
+                let measured = visibleRows.compactMap { row -> CGFloat? in
+                    guard row.cellRanges.indices.contains(column) else { return nil }
+                    let raw = source.substring(with: row.cellRanges[column])
+                    let font = row.isHeader
+                        ? NSFont.systemFont(ofSize: 16, weight: .bold)
+                        : NSFont.systemFont(ofSize: 16)
+                    return (raw as NSString).size(withAttributes: [.font: font]).width
+                }.max() ?? 0
+                return min(260, max(112, ceil(measured + 32)))
+            }
+            let widths = fittedTableWidths(desiredWidths, maximumWidth: maximumWidth)
             return TableDecoration(
                 range: range,
-                rowRanges: group.map(\.fullRange),
-                pipeRanges: group.flatMap(\.delimiterRanges),
-                collapsed: !active,
+                rows: visibleRows,
+                separatorRange: separator,
+                separatorVisible: separatorVisible,
+                columnWidths: widths,
                 dark: dark
             )
+        }
+    }
+
+    private static func fittedTableWidths(_ widths: [CGFloat], maximumWidth: CGFloat?) -> [CGFloat] {
+        guard let maximumWidth, maximumWidth > 0 else { return widths }
+        let total = widths.reduce(0, +)
+        guard total > maximumWidth, total > 0 else { return widths }
+        let scale = maximumWidth / total
+        return widths.map { $0 * scale }
+    }
+
+    private static func tableRowDecoration(
+        for token: Token,
+        isHeader: Bool,
+        in text: NSString
+    ) -> TableRowDecoration {
+        let line = text.substring(with: token.fullRange) as NSString
+        let localPipes = token.delimiterRanges.map { $0.location - token.fullRange.location }
+        var firstText = 0
+        while firstText < line.length, isWhitespace(line.character(at: firstText)) {
+            firstText += 1
+        }
+        var lastText = line.length
+        while lastText > firstText, isWhitespace(line.character(at: lastText - 1)) {
+            lastText -= 1
+        }
+        let hasLeadingPipe = localPipes.first == firstText
+        let hasTrailingPipe = localPipes.last == lastText - 1
+        var separators = localPipes
+        if hasLeadingPipe, !separators.isEmpty { separators.removeFirst() }
+        if hasTrailingPipe, !separators.isEmpty { separators.removeLast() }
+
+        var starts = [hasLeadingPipe ? firstText + 1 : firstText]
+        starts.append(contentsOf: separators.map { $0 + 1 })
+        var ends = separators
+        ends.append(hasTrailingPipe ? lastText - 1 : lastText)
+        let cells = zip(starts, ends).map { start, end in
+            return NSRange(
+                location: token.fullRange.location + start,
+                length: max(0, end - start)
+            )
+        }
+        return TableRowDecoration(
+            range: token.fullRange,
+            cellRanges: cells,
+            pipeRanges: token.delimiterRanges,
+            isHeader: isHeader,
+            hasLeadingPipe: hasLeadingPipe,
+            hasTrailingPipe: hasTrailingPipe
+        )
+    }
+
+    private static func isWhitespace(_ utf16: unichar) -> Bool {
+        guard let scalar = UnicodeScalar(utf16) else { return false }
+        return CharacterSet.whitespacesAndNewlines.contains(scalar)
+    }
+
+    private static func styleTables(
+        _ tables: [TableDecoration],
+        in storage: NSTextStorage
+    ) {
+        for table in tables {
+            if !table.separatorVisible,
+               table.separatorRange.length > 0,
+               NSMaxRange(table.separatorRange) <= storage.length {
+                let hiddenLine = NSMutableParagraphStyle()
+                hiddenLine.minimumLineHeight = 0.01
+                hiddenLine.maximumLineHeight = 0.01
+                storage.addAttributes(
+                    [
+                        .font: NSFont.systemFont(ofSize: 0.01),
+                        .foregroundColor: NSColor.clear,
+                        .kern: 0,
+                        .paragraphStyle: hiddenLine
+                    ],
+                    range: table.separatorRange
+                )
+            }
+
+            for row in table.rows {
+                guard row.range.length > 0, NSMaxRange(row.range) <= storage.length else { continue }
+                let rowStyle = NSMutableParagraphStyle()
+                rowStyle.minimumLineHeight = 38
+                rowStyle.maximumLineHeight = 38
+                storage.addAttribute(.paragraphStyle, value: rowStyle, range: row.range)
+
+                for (index, pipe) in row.pipeRanges.enumerated() where NSMaxRange(pipe) <= storage.length {
+                    let isLeading = row.hasLeadingPipe && index == 0
+                    let cellIndex = row.hasLeadingPipe ? index - 1 : index
+                    let advance: CGFloat
+                    if isLeading {
+                        advance = 12
+                    } else if row.cellRanges.indices.contains(cellIndex), table.columnWidths.indices.contains(cellIndex) {
+                        let cellWidth = storage.attributedSubstring(from: row.cellRanges[cellIndex]).size().width
+                        let isTrailing = row.hasTrailingPipe && index == row.pipeRanges.count - 1
+                        let trailingAdjustment: CGFloat = isTrailing ? 12 : 0
+                        advance = max(0, table.columnWidths[cellIndex] - cellWidth - trailingAdjustment)
+                    } else {
+                        advance = 0
+                    }
+                    storage.addAttributes(
+                        [
+                            .font: NSFont.systemFont(ofSize: 0.01),
+                            .foregroundColor: NSColor.clear,
+                            .kern: advance,
+                            .underlineStyle: 0,
+                            .strikethroughStyle: 0,
+                            .backgroundColor: NSColor.clear
+                        ],
+                        range: pipe
+                    )
+                }
+            }
         }
     }
 

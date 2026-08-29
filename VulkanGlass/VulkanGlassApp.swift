@@ -68,6 +68,16 @@ struct VulkanGlassApp: App {
                     .keyboardShortcut("d", modifiers: .command)
                 Button("Close vault") { Task { await model.closeVault() } }
             }
+            CommandMenu("Table") {
+                Button("Add Table Column") {
+                    NSApp.sendAction(#selector(SourceTextView.addTableColumn(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                Button("Add Table Row") {
+                    NSApp.sendAction(#selector(SourceTextView.addTableRow(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.settingsOpen = true }
                     .keyboardShortcut(",", modifiers: .command)
