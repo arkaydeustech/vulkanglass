@@ -1,6 +1,24 @@
 import AppKit
 import SwiftUI
 
+struct MarkdownPreviewLayoutMetrics: Equatable {
+    var scrollSurfaceSize: CGSize?
+    var readingColumnSize: CGSize?
+}
+
+private enum MarkdownPreviewLayoutPreferenceKey: PreferenceKey {
+    static var defaultValue = MarkdownPreviewLayoutMetrics()
+
+    static func reduce(
+        value: inout MarkdownPreviewLayoutMetrics,
+        nextValue: () -> MarkdownPreviewLayoutMetrics
+    ) {
+        let next = nextValue()
+        value.scrollSurfaceSize = next.scrollSurfaceSize ?? value.scrollSurfaceSize
+        value.readingColumnSize = next.readingColumnSize ?? value.readingColumnSize
+    }
+}
+
 /// Reading view: headings, lists, teal wiki links, and tag pills.
 struct MarkdownPreviewView: View {
     let text: String
@@ -8,18 +26,56 @@ struct MarkdownPreviewView: View {
     var baseURL: URL? = nil
     var dark = true
     var loadRemoteImages = false
+    var onLayout: ((MarkdownPreviewLayoutMetrics) -> Void)? = nil
     var onWiki: (String) -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(displayBlocks.enumerated()), id: \.offset) { _, block in
-                    blockView(block)
+        GeometryReader { geometry in
+            let paneWidth = max(0, geometry.size.width)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(displayBlocks.enumerated()), id: \.offset) { _, block in
+                        blockView(block)
+                    }
+                }
+                .padding(.horizontal, VGTheme.readingHorizontalPadding)
+                .padding(.bottom, VGTheme.readingBottomPadding)
+                .frame(
+                    width: VGTheme.readingColumnWidth(paneWidth: paneWidth),
+                    alignment: .leading
+                )
+                .background {
+                    if onLayout != nil {
+                        GeometryReader { columnGeometry in
+                            Color.clear.preference(
+                                key: MarkdownPreviewLayoutPreferenceKey.self,
+                                value: MarkdownPreviewLayoutMetrics(
+                                    readingColumnSize: columnGeometry.size
+                                )
+                            )
+                        }
+                    }
+                }
+                .frame(minWidth: paneWidth, alignment: .leading)
+            }
+            .frame(width: paneWidth, height: geometry.size.height, alignment: .topLeading)
+            .background {
+                if onLayout != nil {
+                    GeometryReader { scrollGeometry in
+                        Color.clear.preference(
+                            key: MarkdownPreviewLayoutPreferenceKey.self,
+                            value: MarkdownPreviewLayoutMetrics(
+                                scrollSurfaceSize: scrollGeometry.size
+                            )
+                        )
+                    }
                 }
             }
-            .padding(.horizontal, 56)
-            .padding(.bottom, 96)
-            .frame(maxWidth: 780, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onPreferenceChange(MarkdownPreviewLayoutPreferenceKey.self) { metrics in
+            guard metrics.scrollSurfaceSize != nil, metrics.readingColumnSize != nil else { return }
+            onLayout?(metrics)
         }
     }
 

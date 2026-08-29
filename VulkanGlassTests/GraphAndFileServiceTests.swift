@@ -147,6 +147,14 @@ final class FileServiceTests: XCTestCase {
 }
 
 final class ThemeLayoutTests: XCTestCase {
+    func testReadingColumnCapsAtItsReadableWidthAndClampsToThePane() {
+        XCTAssertEqual(VGTheme.readingColumnMaxWidth, 780)
+        XCTAssertEqual(VGTheme.readingColumnWidth(paneWidth: 1_000), 780)
+        XCTAssertEqual(VGTheme.readingColumnWidth(paneWidth: 600), 600)
+        XCTAssertEqual(VGTheme.readingColumnWidth(paneWidth: 100), 100)
+        XCTAssertEqual(VGTheme.readingColumnWidth(paneWidth: 0), 0)
+    }
+
     func testRightSidebarNeverExceedsEightyPercentOfTheWindow() {
         XCTAssertEqual(VGTheme.cappedSidebarWidth(windowWidth: 2000), VGTheme.sidebarWidth)
         XCTAssertEqual(VGTheme.cappedSidebarWidth(windowWidth: 200), 160, accuracy: 0.01)

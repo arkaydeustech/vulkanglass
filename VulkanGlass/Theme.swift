@@ -55,7 +55,15 @@ enum VGTheme {
     static let splitHandleWidth: CGFloat = 10
     static let splitGlowDuration: TimeInterval = 0.18
     static let editorMinWidth: CGFloat = 320
+    static let readingColumnMaxWidth: CGFloat = 780
+    static let readingHorizontalPadding: CGFloat = 56
+    static let readingBottomPadding: CGFloat = 96
     static let collapsedLeftTitleBarInset = max(0, trafficLightsInset - ribbonWidth)
+
+    /// Keeps prose readable in a wide pane without overflowing a narrow one.
+    static func readingColumnWidth(paneWidth: CGFloat) -> CGFloat {
+        min(readingColumnMaxWidth, max(0, paneWidth))
+    }
 
     /// Preferred sidebar width, never more than 80% of the window.
     static func cappedSidebarWidth(windowWidth: CGFloat) -> CGFloat {

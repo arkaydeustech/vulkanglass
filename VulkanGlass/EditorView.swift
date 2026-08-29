@@ -774,9 +774,18 @@ struct WikiLinkPickerView: View {
     }
 }
 
+private enum NoteEditorLayoutPreferenceKey: PreferenceKey {
+    static var defaultValue: CGSize?
+
+    static func reduce(value: inout CGSize?, nextValue: () -> CGSize?) {
+        value = nextValue() ?? value
+    }
+}
+
 struct NoteEditorView: View {
     @Environment(AppModel.self) private var model
     @State private var renaming = false
+    var onLayout: ((CGSize) -> Void)? = nil
 
     var body: some View {
         if let tab = model.activeTab, let index = model.tabs.firstIndex(where: { $0.id == tab.id }) {
@@ -804,6 +813,20 @@ struct NoteEditorView: View {
                             model.updateContent(tab.id, newValue)
                         }
                 }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background {
+                if onLayout != nil {
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: NoteEditorLayoutPreferenceKey.self,
+                            value: geometry.size
+                        )
+                    }
+                }
+            }
+            .onPreferenceChange(NoteEditorLayoutPreferenceKey.self) { size in
+                if let size { onLayout?(size) }
             }
             .onChange(of: tab.path) { _, _ in
                 renaming = false

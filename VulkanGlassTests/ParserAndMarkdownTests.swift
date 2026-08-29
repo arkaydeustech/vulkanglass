@@ -806,6 +806,91 @@ final class EditorLifecycleTests: XCTestCase {
         }
     }
 
+    func testReadingPreviewFillsWideAndNarrowPanesWhileCappingItsColumn() async throws {
+        for paneWidth: CGFloat in [1_000, 600, 100] {
+            let metrics = try await readingPreviewMetrics(paneWidth: paneWidth)
+            let scrollWidth = try XCTUnwrap(metrics.scrollSurfaceSize?.width)
+            let columnWidth = try XCTUnwrap(metrics.readingColumnSize?.width)
+            XCTAssertEqual(scrollWidth, paneWidth, accuracy: 1)
+            XCTAssertEqual(
+                columnWidth,
+                VGTheme.readingColumnWidth(paneWidth: paneWidth),
+                accuracy: 1
+            )
+        }
+    }
+
+    func testNoteEditorFillsItsPaneInReadingAndSourceModes() async throws {
+        let paneSize = CGSize(width: 1_000, height: 600)
+        for mode in [EditorMode.preview, .source] {
+            let size = try await noteEditorSize(mode: mode, paneSize: paneSize)
+            XCTAssertEqual(size.width, paneSize.width, accuracy: 1, "Mode: \(mode)")
+            XCTAssertEqual(size.height, paneSize.height, accuracy: 1, "Mode: \(mode)")
+        }
+    }
+
+    private func readingPreviewMetrics(paneWidth: CGFloat) async throws -> MarkdownPreviewLayoutMetrics {
+        let reported = expectation(description: "Preview reports layout at \(paneWidth) points")
+        var result: MarkdownPreviewLayoutMetrics?
+        var fulfilled = false
+        let view = MarkdownPreviewView(
+            text: "Body",
+            noteTitles: [],
+            onLayout: { metrics in
+                result = metrics
+                if !fulfilled {
+                    fulfilled = true
+                    reported.fulfill()
+                }
+            },
+            onWiki: { _ in }
+        )
+        .frame(width: paneWidth, height: 600, alignment: .topLeading)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: paneWidth, height: 600)
+        hostingView.layoutSubtreeIfNeeded()
+
+        await fulfillment(of: [reported], timeout: 2)
+        withExtendedLifetime(hostingView) {}
+        return try XCTUnwrap(result)
+    }
+
+    private func noteEditorSize(mode: EditorMode, paneSize: CGSize) async throws -> CGSize {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-layout-test.md"
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Layout Test",
+                content: "Body",
+                originalContent: "Body",
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = mode
+
+        let reported = expectation(description: "Note editor reports \(mode) layout")
+        var result: CGSize?
+        var fulfilled = false
+        let view = NoteEditorView { size in
+            result = size
+            if !fulfilled {
+                fulfilled = true
+                reported.fulfill()
+            }
+        }
+        .environment(model)
+        .frame(width: paneSize.width, height: paneSize.height, alignment: .topLeading)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(origin: .zero, size: paneSize)
+        hostingView.layoutSubtreeIfNeeded()
+
+        await fulfillment(of: [reported], timeout: 2)
+        withExtendedLifetime(hostingView) {}
+        return try XCTUnwrap(result)
+    }
+
     func testKeyboardNavigationConfirmsSelectedWikiSuggestion() {
         let coordinator = SourceEditor.Coordinator(onChange: { _ in })
         let textView = SourceTextView()
