@@ -39,16 +39,21 @@ enum VGTheme {
     }
 
     static let ribbonWidth: CGFloat = 44
-    static let titleBarHeight: CGFloat = 36
     static let titleBarIconSize: CGFloat = 28
     static let titleBarIconFont: CGFloat = 15
+    static let titleBarVerticalPadding: CGFloat = 8
+    static let titleBarHeight = titleBarIconSize + titleBarVerticalPadding * 2
+    static let titleBarTrailingInset: CGFloat = 16
+    static let paneDividerInset: CGFloat = 16
     static let statusBarHeight: CGFloat = 24
     static let sidebarWidth: CGFloat = 260
     static let sidebarMinWidth: CGFloat = 180
     static let sidebarMaxWidth: CGFloat = 560
     static let sidebarMaxWindowFraction: CGFloat = 0.8
-    static let trafficLightsInset: CGFloat = 78
-    static let splitHandleWidth: CGFloat = 6
+    static let trafficLightsInset: CGFloat = 96
+    static let splitLineWidth: CGFloat = 1
+    static let splitHandleWidth: CGFloat = 10
+    static let splitGlowDuration: TimeInterval = 0.18
     static let editorMinWidth: CGFloat = 320
     static let collapsedLeftTitleBarInset = max(0, trafficLightsInset - ribbonWidth)
 
@@ -57,19 +62,40 @@ enum VGTheme {
         min(sidebarWidth, max(0, windowWidth * sidebarMaxWindowFraction))
     }
 
-    /// Clamps the left sidebar while reserving fixed chrome and a usable editor.
-    static func clampedLeftSidebarWidth(
+    /// Clamps a sidebar while reserving chrome, the other pane, and a usable editor.
+    static func clampedSidebarWidth(
         _ preferred: CGFloat,
         windowWidth: CGFloat,
-        rightSidebarVisible: Bool
+        otherSidebarWidth: CGFloat
     ) -> CGFloat {
-        let rightWidth = rightSidebarVisible ? cappedSidebarWidth(windowWidth: windowWidth) + 1 : 0
         let available = max(
             0,
-            windowWidth - ribbonWidth - splitHandleWidth - rightWidth - editorMinWidth
+            windowWidth - ribbonWidth - splitLineWidth - otherSidebarWidth - editorMinWidth
         )
         let upper = min(sidebarMaxWidth, available)
         let lower = min(sidebarMinWidth, upper)
         return min(max(preferred, lower), upper)
+    }
+
+    /// Clamps the left sidebar while reserving fixed chrome and a usable editor.
+    static func clampedLeftSidebarWidth(
+        _ preferred: CGFloat,
+        windowWidth: CGFloat,
+        rightSidebarVisible: Bool,
+        rightSidebarWidth: CGFloat = sidebarWidth
+    ) -> CGFloat {
+        let rightWidth = rightSidebarVisible ? rightSidebarWidth + splitLineWidth : 0
+        return clampedSidebarWidth(preferred, windowWidth: windowWidth, otherSidebarWidth: rightWidth)
+    }
+
+    /// Clamps the right sidebar. Dragging its divider right shrinks it.
+    static func clampedRightSidebarWidth(
+        _ preferred: CGFloat,
+        windowWidth: CGFloat,
+        leftSidebarVisible: Bool,
+        leftSidebarWidth: CGFloat = sidebarWidth
+    ) -> CGFloat {
+        let leftWidth = leftSidebarVisible ? leftSidebarWidth + splitLineWidth : 0
+        return clampedSidebarWidth(preferred, windowWidth: windowWidth, otherSidebarWidth: leftWidth)
     }
 }

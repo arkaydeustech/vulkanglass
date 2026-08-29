@@ -77,6 +77,7 @@ struct TitleBarTabStrip: View {
                     }
                 }
             }
+            .frame(minWidth: 0)
             Button {
                 Task { await model.newNote() }
             } label: {
@@ -91,32 +92,76 @@ struct TitleBarTabStrip: View {
     }
 }
 
-/// Full-height drag handle between the left sidebar and the editor.
+/// Hairline pane boundary that glows teal on hover, matching Obsidian's split.
 struct SplitHandle: View {
     var dark: Bool
-    var onChanged: (CGFloat) -> Void
-    var onEnded: () -> Void
+    var resizable: Bool = false
+    var onChanged: (CGFloat) -> Void = { _ in }
+    var onEnded: () -> Void = {}
+
+    @State private var hovering = false
+    @State private var dragging = false
+
+    private var glowing: Bool { hovering || dragging }
 
     var body: some View {
         ZStack {
-            VGTheme.divider(dark: dark).frame(width: 1)
-            Color.clear
+            Rectangle()
+                .fill(VGTheme.accent)
+                .frame(width: 4)
+                .blur(radius: 7)
+                .opacity(glowing ? 0.7 : 0)
+                .animation(.easeInOut(duration: VGTheme.splitGlowDuration), value: glowing)
+            Rectangle()
+                .fill(VGTheme.textAccent)
+                .frame(width: VGTheme.splitLineWidth)
+                .shadow(color: VGTheme.accent.opacity(glowing ? 1 : 0), radius: 5)
+                .opacity(glowing ? 1 : 0)
+                .animation(.easeInOut(duration: VGTheme.splitGlowDuration), value: glowing)
+            Rectangle()
+                .fill(glowing ? VGTheme.textAccent : VGTheme.divider(dark: dark))
+                .frame(width: VGTheme.splitLineWidth)
+                .animation(.easeInOut(duration: VGTheme.splitGlowDuration), value: glowing)
+        }
+        .frame(width: VGTheme.splitLineWidth)
+        .frame(maxHeight: .infinity)
+        .overlay {
+            Rectangle()
+                .fill(.white.opacity(0.001))
                 .frame(width: VGTheme.splitHandleWidth)
                 .contentShape(Rectangle())
+                .onHover { inside in
+                    hovering = inside
+                    updateCursor()
+                }
+                .highPriorityGesture(dragGesture, including: resizable ? .all : .none)
         }
-        .frame(width: VGTheme.splitHandleWidth)
-        .onHover { inside in
-            if inside {
-                NSCursor.resizeLeftRight.set()
-            } else {
-                NSCursor.arrow.set()
+        .zIndex(1)
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+            .onChanged { value in
+                guard resizable else { return }
+                dragging = true
+                updateCursor()
+                onChanged(value.translation.width)
             }
+            .onEnded { _ in
+                guard resizable else { return }
+                dragging = false
+                updateCursor()
+                onEnded()
+            }
+    }
+
+    private func updateCursor() {
+        guard resizable else { return }
+        if hovering || dragging {
+            NSCursor.resizeLeftRight.set()
+        } else {
+            NSCursor.arrow.set()
         }
-        .gesture(
-            DragGesture(minimumDistance: 1)
-                .onChanged { onChanged($0.translation.width) }
-                .onEnded { _ in onEnded() }
-        )
     }
 }
 
@@ -136,7 +181,16 @@ struct WindowDragRegion: NSViewRepresentable {
 final class WindowChromeView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let window { WindowChromeConfigurator.apply(to: window) }
+        guard let window else { return }
+        WindowChromeConfigurator.apply(to: window)
+        DispatchQueue.main.async {
+            WindowChromeConfigurator.centerTrafficLights(in: window)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        if let window { WindowChromeConfigurator.centerTrafficLights(in: window) }
     }
 }
 
@@ -155,6 +209,35 @@ struct WindowChromeConfigurator: NSViewRepresentable {
         window.titlebarSeparatorStyle = .none
         window.styleMask.insert(.fullSizeContentView)
         window.toolbar = nil
+        centerTrafficLights(in: window)
+    }
+
+    /// Vertical origin for window buttons so they sit in the custom title bar, not the compact system bar.
+    static func trafficLightY(
+        buttonHeight: CGFloat,
+        containerHeight: CGFloat,
+        flipped: Bool
+    ) -> CGFloat {
+        let fromTop = max(0, (VGTheme.titleBarHeight - buttonHeight) / 2)
+        let y = flipped ? fromTop : containerHeight - fromTop - buttonHeight
+        return min(max(0, y), max(0, containerHeight - buttonHeight))
+    }
+
+    static func centerTrafficLights(in window: NSWindow) {
+        let types: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        guard let closeButton = window.standardWindowButton(.closeButton),
+              let container = closeButton.superview
+        else { return }
+
+        let y = trafficLightY(
+            buttonHeight: closeButton.frame.height,
+            containerHeight: container.bounds.height,
+            flipped: container.isFlipped
+        )
+        for type in types {
+            guard let button = window.standardWindowButton(type) else { continue }
+            button.setFrameOrigin(NSPoint(x: button.frame.origin.x, y: y))
+        }
     }
 }
 

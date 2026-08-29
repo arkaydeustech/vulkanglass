@@ -184,6 +184,13 @@ struct SettingsSheet: View {
                 .onChange(of: model.settings.autoSync) { _, _ in
                     SettingsStore.save(model.settings)
                 }
+            Toggle("Load remote images in notes", isOn: Bindable(model).settings.loadRemoteImages)
+                .onChange(of: model.settings.loadRemoteImages) { _, _ in
+                    SettingsStore.save(model.settings)
+                }
+            Text("Off by default. Enabling this can reveal your IP address to image hosts referenced by a note.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             HStack {
                 Text("Appearance")
                 Spacer()

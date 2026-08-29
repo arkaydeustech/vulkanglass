@@ -3,14 +3,24 @@ import SwiftUI
 struct WorkspaceView: View {
     @Environment(AppModel.self) private var model
     @State private var leftResizeOrigin: CGFloat?
+    @State private var rightResizeOrigin: CGFloat?
 
     var body: some View {
         VStack(spacing: 0) {
             GeometryReader { geo in
+                let rightWidth = model.rightOpen
+                    ? VGTheme.clampedRightSidebarWidth(
+                        model.settings.rightSidebarWidth,
+                        windowWidth: geo.size.width,
+                        leftSidebarVisible: model.leftOpen,
+                        leftSidebarWidth: model.settings.leftSidebarWidth
+                    )
+                    : 0
                 let leftWidth = VGTheme.clampedLeftSidebarWidth(
                     model.settings.leftSidebarWidth,
                     windowWidth: geo.size.width,
-                    rightSidebarVisible: model.rightOpen
+                    rightSidebarVisible: model.rightOpen,
+                    rightSidebarWidth: model.settings.rightSidebarWidth
                 )
                 HStack(spacing: 0) {
                     ribbonColumn
@@ -18,13 +28,16 @@ struct WorkspaceView: View {
                         leftColumn(width: leftWidth)
                         SplitHandle(
                             dark: model.dark,
+                            resizable: true,
                             onChanged: { translation in
-                                if leftResizeOrigin == nil { leftResizeOrigin = leftWidth }
-                                model.settings.leftSidebarWidth = VGTheme.clampedLeftSidebarWidth(
-                                    (leftResizeOrigin ?? leftWidth) + translation,
-                                    windowWidth: geo.size.width,
-                                    rightSidebarVisible: model.rightOpen
-                                )
+                                resizeSidebar(&leftResizeOrigin, current: leftWidth) { origin in
+                                    model.settings.leftSidebarWidth = VGTheme.clampedLeftSidebarWidth(
+                                        origin + translation,
+                                        windowWidth: geo.size.width,
+                                        rightSidebarVisible: model.rightOpen,
+                                        rightSidebarWidth: model.settings.rightSidebarWidth
+                                    )
+                                }
                             },
                             onEnded: {
                                 leftResizeOrigin = nil
@@ -34,8 +47,25 @@ struct WorkspaceView: View {
                     }
                     mainColumn(showRightToggle: !model.rightOpen)
                     if model.rightOpen {
-                        VGTheme.divider(dark: model.dark).frame(width: 1)
-                        rightColumn(width: VGTheme.cappedSidebarWidth(windowWidth: geo.size.width))
+                        SplitHandle(
+                            dark: model.dark,
+                            resizable: true,
+                            onChanged: { translation in
+                                resizeSidebar(&rightResizeOrigin, current: rightWidth) { origin in
+                                    model.settings.rightSidebarWidth = VGTheme.clampedRightSidebarWidth(
+                                        origin - translation,
+                                        windowWidth: geo.size.width,
+                                        leftSidebarVisible: model.leftOpen,
+                                        leftSidebarWidth: model.settings.leftSidebarWidth
+                                    )
+                                }
+                            },
+                            onEnded: {
+                                rightResizeOrigin = nil
+                                SettingsStore.save(model.settings)
+                            }
+                        )
+                        rightColumn(width: rightWidth)
                     }
                 }
             }
@@ -67,7 +97,10 @@ struct WorkspaceView: View {
     private func leftColumn(width: CGFloat) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 2) {
-                Color.clear.frame(width: max(0, VGTheme.trafficLightsInset - VGTheme.ribbonWidth))
+                Color.clear
+                    .frame(width: max(0, VGTheme.trafficLightsInset - VGTheme.ribbonWidth))
+                    .fixedSize()
+                    .layoutPriority(1)
                 TitleBarIcon(
                     symbol: "folder",
                     help: "Files",
@@ -92,7 +125,8 @@ struct WorkspaceView: View {
                     model.leftOpen = false
                 }
             }
-            .padding(.trailing, 2)
+            .padding(.trailing, VGTheme.paneDividerInset)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: VGTheme.titleBarHeight)
             .background(VGTheme.backgroundSecondary(dark: model.dark))
             .background(WindowDragRegion())
@@ -108,6 +142,7 @@ struct WorkspaceView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.trailing, VGTheme.paneDividerInset)
         }
         .frame(width: width)
         .background(VGTheme.backgroundSecondary(dark: model.dark))
@@ -117,7 +152,6 @@ struct WorkspaceView: View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 if !model.leftOpen {
-                    Color.clear.frame(width: VGTheme.collapsedLeftTitleBarInset)
                     TitleBarIcon(
                         symbol: "sidebar.left",
                         help: "Toggle left sidebar",
@@ -125,14 +159,15 @@ struct WorkspaceView: View {
                     ) {
                         model.leftOpen = true
                     }
-                    .padding(.leading, 4)
+                    .padding(.leading, VGTheme.collapsedLeftTitleBarInset + 8)
+                    .layoutPriority(1)
                     VGTheme.divider(dark: model.dark)
                         .frame(width: 1)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 8)
                         .padding(.trailing, 2)
                 }
                 TitleBarTabStrip()
-                Spacer(minLength: 8)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 TitleBarIcon(
                     symbol: model.editorMode == .source ? "book" : "square.and.pencil",
                     help: "Toggle reading view",
@@ -141,6 +176,7 @@ struct WorkspaceView: View {
                     model.editorMode = model.editorMode == .source ? .preview : .source
                     model.centerView = .editor
                 }
+                .padding(.trailing, showRightToggle ? 0 : VGTheme.paneDividerInset)
                 if showRightToggle {
                     TitleBarIcon(
                         symbol: "sidebar.right",
@@ -149,9 +185,10 @@ struct WorkspaceView: View {
                     ) {
                         model.rightOpen = true
                     }
-                    .padding(.trailing, 6)
+                    .padding(.trailing, VGTheme.titleBarTrailingInset)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: VGTheme.titleBarHeight)
             .background(VGTheme.backgroundSecondary(dark: model.dark))
             .background(WindowDragRegion())
@@ -185,7 +222,7 @@ struct WorkspaceView: View {
                     model.rightOpen = false
                 }
             }
-            .padding(.trailing, 6)
+            .padding(.trailing, VGTheme.titleBarTrailingInset)
             .frame(height: VGTheme.titleBarHeight)
             .background(VGTheme.backgroundSecondary(dark: model.dark))
             .background(WindowDragRegion())
@@ -199,6 +236,20 @@ struct WorkspaceView: View {
         .frame(width: width)
         .clipped()
         .background(VGTheme.backgroundSecondary(dark: model.dark))
+    }
+
+    /// Records the width at drag start and applies each update without implicit animation.
+    private func resizeSidebar(
+        _ origin: inout CGFloat?,
+        current: CGFloat,
+        apply: (CGFloat) -> Void
+    ) {
+        if origin == nil { origin = current }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            apply(origin ?? current)
+        }
     }
 
     private var titleBarBackground: some View {

@@ -113,15 +113,19 @@ final class GitHubCLIServiceTests: XCTestCase {
         """.data(using: .utf8)!
         let settings = try JSONDecoder().decode(AppSettings.self, from: json)
         XCTAssertTrue(settings.useGitHubCLI)
+        XCTAssertFalse(settings.loadRemoteImages)
         XCTAssertEqual(settings.vaultsRoot, "/tmp/vaults")
+        XCTAssertEqual(settings.rightSidebarWidth, VGTheme.sidebarWidth)
     }
 
     func testSettingsRoundTripPreservesGitHubCLIFlag() throws {
         var settings = AppSettings.default()
         settings.useGitHubCLI = false
+        settings.loadRemoteImages = true
         let data = try JSONEncoder().encode(settings)
         let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
         XCTAssertFalse(decoded.useGitHubCLI)
+        XCTAssertTrue(decoded.loadRemoteImages)
     }
 
     func testMissingTokenErrorMentionsGitHubCLI() {

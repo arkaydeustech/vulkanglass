@@ -6,6 +6,8 @@ struct SourceEditor: NSViewRepresentable {
     @Binding var text: String
     var notes: [NoteMeta]
     var dark: Bool
+    var baseURL: URL?
+    var loadRemoteImages = false
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onChange: { text = $0 })
@@ -20,11 +22,16 @@ struct SourceEditor: NSViewRepresentable {
         let textView = SourceTextView()
         textView.delegate = context.coordinator
         textView.wikiHandler = context.coordinator
-        textView.isRichText = false
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.usesFontPanel = false
+        textView.usesRuler = false
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
         textView.font = .systemFont(ofSize: 16)
         textView.textContainerInset = NSSize(width: 40, height: 8)
         textView.drawsBackground = false
@@ -43,23 +50,34 @@ struct SourceEditor: NSViewRepresentable {
         context.coordinator.textView = textView
         context.coordinator.notes = notes
         context.coordinator.dark = dark
+        context.coordinator.baseURL = baseURL
+        context.coordinator.loadRemoteImages = loadRemoteImages
         applyChrome(textView)
+        context.coordinator.restyle()
         return scroll
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.onChange = { text = $0 }
         context.coordinator.notes = notes
+        let darkChanged = context.coordinator.dark != dark
         context.coordinator.dark = dark
-        guard let textView = nsView.documentView as? NSTextView else { return }
+        context.coordinator.baseURL = baseURL
+        context.coordinator.loadRemoteImages = loadRemoteImages
+        guard let textView = nsView.documentView as? SourceTextView else { return }
+        textView.configureImages(baseURL: baseURL, loadRemoteImages: loadRemoteImages)
         if textView.string != text {
             textView.string = text
+            context.coordinator.restyle()
+        } else if darkChanged {
+            context.coordinator.restyle()
         }
         applyChrome(textView)
         context.coordinator.refreshWikiPopup()
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.cancelPendingRestyle()
         coordinator.dismissPopup()
         if let textView = nsView.documentView as? SourceTextView {
             textView.delegate = nil
@@ -69,9 +87,6 @@ struct SourceEditor: NSViewRepresentable {
     }
 
     private func applyChrome(_ textView: NSTextView) {
-        textView.textColor = dark
-            ? NSColor(red: 0.86, green: 0.87, blue: 0.87, alpha: 1)
-            : NSColor.textColor
         textView.insertionPointColor = NSColor(red: 0.08, green: 0.72, blue: 0.65, alpha: 1)
         textView.selectedTextAttributes = [
             .backgroundColor: NSColor(red: 0.08, green: 0.72, blue: 0.65, alpha: 0.28)
@@ -83,11 +98,17 @@ struct SourceEditor: NSViewRepresentable {
         weak var textView: SourceTextView?
         var notes: [NoteMeta] = []
         var dark = true
+        var baseURL: URL?
+        var loadRemoteImages = false
+        private var cachedText: String?
+        private var cachedTokens: [LivePreview.Token] = []
         private let popup = WikiLinkPopupController()
         private var session: WikiLinkSession?
         private var suggestions: [NoteMeta] = []
         private var selected = 0
         private var dismissedMarker: Int?
+        private var restyling = false
+        private var pendingRestyle: DispatchWorkItem?
 
         var isPopupVisible: Bool { popup.isVisible }
         var selectedSuggestionIndex: Int { selected }
@@ -101,13 +122,62 @@ struct SourceEditor: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let tv = notification.object as? NSTextView else { return }
+            guard !restyling, let tv = notification.object as? NSTextView else { return }
             onChange(tv.string)
+            scheduleRestyle()
             refreshWikiPopup()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
+            guard !restyling else { return }
+            scheduleRestyle()
             refreshWikiPopup()
+        }
+
+        func scheduleRestyle() {
+            pendingRestyle?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.restyle() }
+            pendingRestyle = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025, execute: work)
+        }
+
+        func cancelPendingRestyle() {
+            pendingRestyle?.cancel()
+            pendingRestyle = nil
+        }
+
+        func restyle() {
+            guard !restyling, let textView, let storage = textView.textStorage else { return }
+            pendingRestyle?.cancel()
+            pendingRestyle = nil
+            restyling = true
+            let undo = textView.undoManager
+            undo?.disableUndoRegistration()
+            defer {
+                undo?.enableUndoRegistration()
+                restyling = false
+            }
+            let selection = textView.selectedRange()
+            let text = storage.string
+            if cachedText != text {
+                cachedText = text
+                cachedTokens = LivePreview.tokens(in: text)
+            }
+            textView.liveDecorations = LivePreview.apply(
+                to: storage,
+                caret: selection.location,
+                selection: selection,
+                dark: dark,
+                tokens: cachedTokens
+            )
+            textView.configureImages(baseURL: baseURL, loadRemoteImages: loadRemoteImages)
+            textView.preloadImages()
+            textView.setSelectedRange(selection)
+            textView.typingAttributes = LivePreview.typingAttributes(
+                at: selection.location,
+                tokens: cachedTokens,
+                dark: dark
+            )
         }
 
         func refreshWikiPopup() {
@@ -211,16 +281,313 @@ struct SourceEditor: NSViewRepresentable {
 /// Forwards movement keys to wiki-link completion while the popup is open.
 final class SourceTextView: NSTextView {
     weak var wikiHandler: WikiLinkKeyHandling?
+    private(set) var baseURL: URL?
+    private(set) var loadRemoteImages = false
+    var liveDecorations = LivePreview.Decorations() {
+        didSet { needsDisplay = true }
+    }
+    private var imageCache: [URL: NSImage] = [:]
+    private var loadingImages: Set<URL> = []
+    private var failedImages: [URL: Date] = [:]
+    private var imageGeneration = 0
+    private(set) var imageLoadAttempts: [URL: Int] = [:]
+    var imageLoadHandler: ((URL, Bool) -> Void)?
+
+    var cachedImageURLs: Set<URL> { Set(imageCache.keys) }
+
+    func configureImages(baseURL: URL?, loadRemoteImages: Bool) {
+        let normalizedBase = baseURL?.standardizedFileURL
+        guard self.baseURL != normalizedBase || self.loadRemoteImages != loadRemoteImages else { return }
+        self.baseURL = normalizedBase
+        self.loadRemoteImages = loadRemoteImages
+        imageGeneration &+= 1
+        imageCache.removeAll()
+        loadingImages.removeAll()
+        failedImages.removeAll()
+        imageLoadAttempts.removeAll()
+        needsDisplay = true
+    }
 
     override func doCommand(by selector: Selector) {
         if wikiHandler?.handleCommand(selector) == true { return }
         super.doCommand(by: selector)
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        drawLiveChrome(in: dirtyRect)
+        super.draw(dirtyRect)
+        drawLiveOverlays(in: dirtyRect)
+    }
+
+    override func paste(_ sender: Any?) {
+        pasteAsPlainText(sender)
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        let plain = (insertString as? NSAttributedString)?.string ?? (insertString as? String) ?? ""
+        super.insertText(plain, replacementRange: replacementRange)
+    }
+
+    override var writablePasteboardTypes: [NSPasteboard.PasteboardType] { [.string] }
+
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] { [.string] }
+
+    override func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+        let range = selectedRange()
+        guard range.location != NSNotFound else { return false }
+        pboard.declareTypes([.string], owner: nil)
+        pboard.setString((string as NSString).substring(with: range), forType: .string)
+        return true
+    }
+
+    override func changeFont(_ sender: Any?) {}
+
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
         if resigned { wikiHandler?.dismissWikiPopup() }
         return resigned
+    }
+
+    func preloadImages() {
+        for decoration in liveDecorations.images {
+            _ = image(for: decoration.url)
+        }
+    }
+
+    private func drawLiveChrome(in dirtyRect: NSRect) {
+        guard let layoutManager, let textContainer else { return }
+        for decoration in liveDecorations.codeBlocks {
+            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+                  rect.intersects(dirtyRect) else { continue }
+            let fill = decoration.dark
+                ? NSColor(red: 0.16, green: 0.16, blue: 0.17, alpha: 1)
+                : NSColor(red: 0.94, green: 0.94, blue: 0.95, alpha: 1)
+            fill.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
+        }
+        for decoration in liveDecorations.tables {
+            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+                  rect.intersects(dirtyRect) else { continue }
+            let fill = decoration.dark
+                ? NSColor(red: 0.16, green: 0.16, blue: 0.17, alpha: 0.9)
+                : NSColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 1)
+            fill.setFill()
+            let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+            path.fill()
+            let stroke = decoration.dark
+                ? NSColor(white: 1, alpha: 0.12)
+                : NSColor(white: 0, alpha: 0.12)
+            stroke.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            for (index, row) in decoration.rowRanges.enumerated() where index > 0 {
+                guard let rowRect = blockRect(for: row, layoutManager: layoutManager, textContainer: textContainer)
+                else { continue }
+                let y = rowRect.minY
+                stroke.setStroke()
+                let line = NSBezierPath()
+                line.move(to: NSPoint(x: rect.minX + 1, y: y))
+                line.line(to: NSPoint(x: rect.maxX - 1, y: y))
+                line.lineWidth = 1
+                line.stroke()
+            }
+            if decoration.collapsed {
+                for pipe in decoration.pipeRanges {
+                    let glyphs = layoutManager.glyphRange(forCharacterRange: pipe, actualCharacterRange: nil)
+                    guard glyphs.length > 0 else { continue }
+                    var pipeRect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+                    pipeRect.origin.x += textContainerOrigin.x
+                    pipeRect.origin.y += textContainerOrigin.y
+                    let x = pipeRect.midX
+                    stroke.setStroke()
+                    let line = NSBezierPath()
+                    line.move(to: NSPoint(x: x, y: rect.minY + 1))
+                    line.line(to: NSPoint(x: x, y: rect.maxY - 1))
+                    line.lineWidth = 1
+                    line.stroke()
+                }
+            }
+        }
+        for decoration in liveDecorations.bars {
+            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+                  rect.intersects(dirtyRect) else { continue }
+            switch decoration.kind {
+            case .quote:
+                NSColor(red: 0.08, green: 0.72, blue: 0.65, alpha: 1).setFill()
+                NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY, width: 3, height: rect.height), xRadius: 1, yRadius: 1).fill()
+            case .alert(let kind):
+                let color = alertColor(kind, dark: decoration.dark)
+                color.withAlphaComponent(0.12).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
+                color.setFill()
+                NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY, width: 4, height: rect.height), xRadius: 2, yRadius: 2).fill()
+            case .rule:
+                let stroke = decoration.dark
+                    ? NSColor(white: 1, alpha: 0.18)
+                    : NSColor(white: 0, alpha: 0.18)
+                stroke.setStroke()
+                let line = NSBezierPath()
+                let y = rect.midY
+                line.move(to: NSPoint(x: rect.minX + 8, y: y))
+                line.line(to: NSPoint(x: rect.maxX - 8, y: y))
+                line.lineWidth = 1
+                line.stroke()
+            }
+        }
+        for decoration in liveDecorations.images where decoration.collapsed {
+            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+                  rect.intersects(dirtyRect) else { continue }
+            let inset = rect.insetBy(dx: 12, dy: 8)
+            if let image = image(for: decoration.url) {
+                let fitted = fittedRect(image.size, in: inset)
+                image.draw(in: fitted, from: .zero, operation: .sourceOver, fraction: 1)
+            } else {
+                NSColor.gray.withAlphaComponent(0.2).setFill()
+                NSBezierPath(roundedRect: inset, xRadius: 6, yRadius: 6).fill()
+            }
+        }
+    }
+
+    private func drawLiveOverlays(in dirtyRect: NSRect) {
+        guard let layoutManager, let textContainer else { return }
+        for decoration in liveDecorations.codeBlocks where decoration.showBadge {
+            let label = CodeHighlight.displayName(for: decoration.language)
+            guard !label.isEmpty else { continue }
+            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+                  rect.intersects(dirtyRect) else { continue }
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: decoration.dark
+                    ? NSColor(red: 0.52, green: 0.54, blue: 0.56, alpha: 1)
+                    : NSColor(red: 0.48, green: 0.50, blue: 0.52, alpha: 1)
+            ]
+            let size = (label as NSString).size(withAttributes: attrs)
+            (label as NSString).draw(at: NSPoint(x: rect.maxX - 12 - size.width, y: rect.minY + 6), withAttributes: attrs)
+        }
+        for decoration in liveDecorations.bars {
+            if case .alert(let kind) = decoration.kind, decoration.collapsed {
+                guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+                      rect.intersects(dirtyRect) else { continue }
+                let color = alertColor(kind, dark: decoration.dark)
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                    .foregroundColor: color
+                ]
+                (kind.title as NSString).draw(at: NSPoint(x: rect.minX + 14, y: rect.minY + 6), withAttributes: attrs)
+            }
+        }
+        for decoration in liveDecorations.emojis {
+            let glyphs = layoutManager.glyphRange(forCharacterRange: decoration.range, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            var rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+            rect.origin.x += textContainerOrigin.x
+            rect.origin.y += textContainerOrigin.y
+            guard rect.intersects(dirtyRect) else { continue }
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16)]
+            (decoration.emoji as NSString).draw(at: rect.origin, withAttributes: attrs)
+        }
+    }
+
+    private func image(for raw: String) -> NSImage? {
+        guard let url = resolveURL(raw) else { return nil }
+        if let cached = imageCache[url] { return cached }
+        if let retryAfter = failedImages[url] {
+            guard retryAfter <= Date() else { return nil }
+            failedImages.removeValue(forKey: url)
+        }
+        guard loadingImages.insert(url).inserted else { return nil }
+        let generation = imageGeneration
+        if url.isFileURL {
+            imageLoadAttempts[url, default: 0] += 1
+            Task { [weak self] in
+                let data = await Task.detached(priority: .utility) {
+                    try? Data(contentsOf: url, options: .mappedIfSafe)
+                }.value
+                self?.finishImageLoad(data: data, url: url, generation: generation)
+            }
+        } else if MarkdownResourceResolver.mayLoadImage(url, loadRemoteImages: loadRemoteImages) {
+            imageLoadAttempts[url, default: 0] += 1
+            Task { [weak self] in
+                let data = try? await RemoteImageLoader.data(from: url)
+                self?.finishImageLoad(data: data, url: url, generation: generation)
+            }
+        } else {
+            loadingImages.remove(url)
+            failedImages[url] = .distantFuture
+        }
+        return nil
+    }
+
+    private func finishImageLoad(data: Data?, url: URL, generation: Int) {
+        guard generation == imageGeneration else { return }
+        loadingImages.remove(url)
+        guard let data, let image = NSImage(data: data) else {
+            failedImages[url] = url.isFileURL ? .distantFuture : Date().addingTimeInterval(30)
+            imageLoadHandler?(url, false)
+            return
+        }
+        failedImages.removeValue(forKey: url)
+        imageCache[url] = image
+        imageLoadHandler?(url, true)
+        needsDisplay = true
+    }
+
+    private func resolveURL(_ raw: String) -> URL? {
+        MarkdownResourceResolver.imageURL(raw, relativeTo: baseURL)
+    }
+
+    private func fittedRect(_ size: NSSize, in bounds: NSRect) -> NSRect {
+        guard size.width > 0, size.height > 0 else { return bounds }
+        let scale = min(bounds.width / size.width, bounds.height / size.height, 1)
+        let fitted = NSSize(width: size.width * scale, height: size.height * scale)
+        return NSRect(
+            x: bounds.minX + (bounds.width - fitted.width) / 2,
+            y: bounds.minY + (bounds.height - fitted.height) / 2,
+            width: fitted.width,
+            height: fitted.height
+        )
+    }
+
+    private func alertColor(_ kind: GFM.AlertKind, dark: Bool) -> NSColor {
+        switch kind {
+        case .note:
+            return NSColor(red: 0.35, green: 0.62, blue: 0.95, alpha: 1)
+        case .tip:
+            return NSColor(red: 0.08, green: 0.72, blue: 0.65, alpha: 1)
+        case .important:
+            return NSColor(red: 0.72, green: 0.48, blue: 0.95, alpha: 1)
+        case .warning:
+            return NSColor(red: 0.95, green: 0.68, blue: 0.22, alpha: 1)
+        case .caution:
+            return NSColor(red: 0.90, green: 0.32, blue: 0.32, alpha: 1)
+        }
+    }
+
+    private func blockRect(
+        for range: NSRange,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> NSRect? {
+        let length = (string as NSString).length
+        guard length > 0 else { return nil }
+        let clamped = NSRange(
+            location: min(range.location, length - 1),
+            length: max(0, min(range.length, length - min(range.location, length - 1)))
+        )
+        let glyphs = layoutManager.glyphRange(forCharacterRange: clamped, actualCharacterRange: nil)
+        var union = NSRect.null
+        if glyphs.length > 0 {
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, _, _ in
+                union = union.union(rect)
+            }
+        }
+        guard !union.isNull else { return nil }
+        union.origin.x = textContainerOrigin.x - 8
+        union.origin.y += textContainerOrigin.y - 6
+        union.size.width = max(textContainer.containerSize.width + 16, 80)
+        union.size.height += 12
+        if union.height < 28 { union.size.height = 28 }
+        return union
     }
 }
 
@@ -384,7 +751,10 @@ struct NoteEditorView: View {
                 if model.editorMode == .preview {
                     MarkdownPreviewView(
                         text: tab.content,
-                        noteTitles: Set(model.notes.map { $0.title.lowercased() })
+                        noteTitles: Set(model.notes.map { $0.title.lowercased() }),
+                        baseURL: URL(fileURLWithPath: tab.path).deletingLastPathComponent(),
+                        dark: model.dark,
+                        loadRemoteImages: model.settings.loadRemoteImages
                     ) { target in
                         Task { await model.followWikiLink(target) }
                     }
@@ -392,7 +762,9 @@ struct NoteEditorView: View {
                     SourceEditor(
                         text: Bindable(model).tabs[index].content,
                         notes: model.notes,
-                        dark: model.dark
+                        dark: model.dark,
+                        baseURL: URL(fileURLWithPath: tab.path).deletingLastPathComponent(),
+                        loadRemoteImages: model.settings.loadRemoteImages
                     )
                         .onChange(of: model.tabs[index].content) { _, newValue in
                             model.updateContent(tab.id, newValue)

@@ -153,11 +153,17 @@ final class ThemeLayoutTests: XCTestCase {
         XCTAssertEqual(VGTheme.cappedSidebarWidth(windowWidth: 0), 0)
     }
 
-    func testTitleBarIsCompactAroundItsIcons() {
-        XCTAssertGreaterThanOrEqual(VGTheme.trafficLightsInset, 70)
-        XCTAssertEqual(VGTheme.titleBarHeight, VGTheme.titleBarIconSize + 8)
+    func testTitleBarLeavesMarginAroundItsIcons() {
+        XCTAssertGreaterThanOrEqual(VGTheme.trafficLightsInset, 90)
+        XCTAssertEqual(
+            VGTheme.titleBarHeight,
+            VGTheme.titleBarIconSize + VGTheme.titleBarVerticalPadding * 2
+        )
+        XCTAssertGreaterThanOrEqual(VGTheme.titleBarVerticalPadding, 8)
         XCTAssertGreaterThan(VGTheme.titleBarHeight, VGTheme.titleBarIconSize)
         XCTAssertGreaterThanOrEqual(VGTheme.titleBarIconSize, 26)
+        XCTAssertGreaterThanOrEqual(VGTheme.titleBarTrailingInset, 16)
+        XCTAssertGreaterThanOrEqual(VGTheme.paneDividerInset, 16)
     }
 
     func testLeftSidebarWidthClampsToAUsableRange() {
@@ -182,17 +188,57 @@ final class ThemeLayoutTests: XCTestCase {
             windowWidth: windowWidth,
             rightSidebarVisible: true
         )
-        let right = VGTheme.cappedSidebarWidth(windowWidth: windowWidth)
-        let editor = windowWidth - VGTheme.ribbonWidth - left - VGTheme.splitHandleWidth - 1 - right
+        let right = VGTheme.clampedRightSidebarWidth(
+            VGTheme.sidebarMaxWidth,
+            windowWidth: windowWidth,
+            leftSidebarVisible: true,
+            leftSidebarWidth: left
+        )
+        let editor = windowWidth - VGTheme.ribbonWidth - left
+            - VGTheme.splitLineWidth - VGTheme.splitLineWidth - right
 
         XCTAssertGreaterThanOrEqual(editor, VGTheme.editorMinWidth)
         XCTAssertGreaterThanOrEqual(left, VGTheme.sidebarMinWidth)
+        XCTAssertGreaterThanOrEqual(right, VGTheme.sidebarMinWidth)
+    }
+
+    func testRightSidebarWidthClampsToAUsableRange() {
+        XCTAssertEqual(
+            VGTheme.clampedRightSidebarWidth(100, windowWidth: 2000, leftSidebarVisible: true),
+            VGTheme.sidebarMinWidth
+        )
+        XCTAssertEqual(
+            VGTheme.clampedRightSidebarWidth(900, windowWidth: 2000, leftSidebarVisible: true),
+            VGTheme.sidebarMaxWidth
+        )
+        XCTAssertEqual(
+            VGTheme.clampedRightSidebarWidth(240, windowWidth: 2000, leftSidebarVisible: true),
+            240
+        )
+    }
+
+    func testDraggingTheRightDividerInvertsHorizontalTranslation() {
+        let origin: CGFloat = 260
+        XCTAssertEqual(
+            VGTheme.clampedRightSidebarWidth(origin - 40, windowWidth: 2000, leftSidebarVisible: true),
+            220
+        )
+        XCTAssertEqual(
+            VGTheme.clampedRightSidebarWidth(origin - (-40), windowWidth: 2000, leftSidebarVisible: true),
+            300
+        )
     }
 
     func testCollapsedSidebarControlStartsAfterTrafficLights() {
-        XCTAssertGreaterThanOrEqual(
-            VGTheme.ribbonWidth + VGTheme.collapsedLeftTitleBarInset,
-            VGTheme.trafficLightsInset
-        )
+        let controlStart = VGTheme.ribbonWidth + VGTheme.collapsedLeftTitleBarInset
+        XCTAssertGreaterThanOrEqual(controlStart, VGTheme.trafficLightsInset)
+        XCTAssertGreaterThanOrEqual(VGTheme.trafficLightsInset, VGTheme.ribbonWidth + 40)
+    }
+
+    func testPaneDividerIsHairlineWithATealHoverGlow() {
+        XCTAssertEqual(VGTheme.splitLineWidth, 1)
+        XCTAssertGreaterThan(VGTheme.splitHandleWidth, VGTheme.splitLineWidth)
+        XCTAssertGreaterThan(VGTheme.splitGlowDuration, 0)
+        XCTAssertLessThanOrEqual(VGTheme.splitGlowDuration, 0.3)
     }
 }

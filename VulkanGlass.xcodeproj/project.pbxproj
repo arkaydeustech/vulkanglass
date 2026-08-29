@@ -7,14 +7,17 @@
 	objects = {
 		5BE64C2A66DD1968BAADE323 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0837DCCC0ADE4AB724AD6EB1 /* AppModel.swift */; };
 		1B16F940F1BEE4AAF2126DC4 /* ChromeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF68F96E309842BAB0EB5C0 /* ChromeViews.swift */; };
+		2CF59801B328C7D15495431C /* CodeHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 630BBC9E60BBA1CA6FDD1D54 /* CodeHighlight.swift */; };
 		535F4DB428F2E12CA628E56D /* EditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */; };
 		FD609980C11A43562D1188D7 /* FileExplorerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AEE9ECEC806892403B21D3D /* FileExplorerView.swift */; };
 		51EB17D15ED38BC20EF2AB9F /* FileService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0625A934CA994BD43ED5E83 /* FileService.swift */; };
+		BBB4D7268E9117F5A43DF2B8 /* GFM.swift in Sources */ = {isa = PBXBuildFile; fileRef = D31B47CE645C214DECFB9311 /* GFM.swift */; };
 		9D38774F83C4777B23289DB7 /* GitHubCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17B56885DFF9E899ADA3E5B1 /* GitHubCLIService.swift */; };
 		DC271D14F28A860A8AB93D33 /* GitHubService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E1F67874442B55D0C583834 /* GitHubService.swift */; };
 		6AEDEAA304D32442A2813C2F /* GitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A8FE378C36995E8B5194EC /* GitService.swift */; };
 		2F33E1A2E4D02D735E23674E /* GraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61AAAB7316018B1C2E97B10B /* GraphView.swift */; };
 		8222DFD638C76F0D441760FD /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 801D8F68F4C283DCBF0C6BA5 /* KeychainService.swift */; };
+		0886DA4F47FE771A9F0F25A8 /* LivePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7694B9A271E832EF18D0308D /* LivePreview.swift */; };
 		443485B6604A6BDE321D7CFE /* LogoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04B18F131CFE1EF03C5DDA94 /* LogoView.swift */; };
 		2C7251E96927DA718A524B32 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = A339307944600A8EE13BB2FD /* Markdown.swift */; };
 		6BF1F2FB53E71A40D8EDCEAB /* MarkdownPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B562AF0CB8F382BF9B01643 /* MarkdownPreviewView.swift */; };
@@ -53,14 +56,17 @@
 			children = (
 				0837DCCC0ADE4AB724AD6EB1 /* AppModel.swift */,
 				1FF68F96E309842BAB0EB5C0 /* ChromeViews.swift */,
+				630BBC9E60BBA1CA6FDD1D54 /* CodeHighlight.swift */,
 				8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */,
 				4AEE9ECEC806892403B21D3D /* FileExplorerView.swift */,
 				A0625A934CA994BD43ED5E83 /* FileService.swift */,
+				D31B47CE645C214DECFB9311 /* GFM.swift */,
 				17B56885DFF9E899ADA3E5B1 /* GitHubCLIService.swift */,
 				0E1F67874442B55D0C583834 /* GitHubService.swift */,
 				60A8FE378C36995E8B5194EC /* GitService.swift */,
 				61AAAB7316018B1C2E97B10B /* GraphView.swift */,
 				801D8F68F4C283DCBF0C6BA5 /* KeychainService.swift */,
+				7694B9A271E832EF18D0308D /* LivePreview.swift */,
 				04B18F131CFE1EF03C5DDA94 /* LogoView.swift */,
 				A339307944600A8EE13BB2FD /* Markdown.swift */,
 				3B562AF0CB8F382BF9B01643 /* MarkdownPreviewView.swift */,
@@ -113,14 +119,17 @@
 		};
 		0837DCCC0ADE4AB724AD6EB1 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		1FF68F96E309842BAB0EB5C0 /* ChromeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChromeViews.swift; sourceTree = "<group>"; };
+		630BBC9E60BBA1CA6FDD1D54 /* CodeHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlight.swift; sourceTree = "<group>"; };
 		8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
 		4AEE9ECEC806892403B21D3D /* FileExplorerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerView.swift; sourceTree = "<group>"; };
 		A0625A934CA994BD43ED5E83 /* FileService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileService.swift; sourceTree = "<group>"; };
+		D31B47CE645C214DECFB9311 /* GFM.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GFM.swift; sourceTree = "<group>"; };
 		17B56885DFF9E899ADA3E5B1 /* GitHubCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCLIService.swift; sourceTree = "<group>"; };
 		0E1F67874442B55D0C583834 /* GitHubService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubService.swift; sourceTree = "<group>"; };
 		60A8FE378C36995E8B5194EC /* GitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitService.swift; sourceTree = "<group>"; };
 		61AAAB7316018B1C2E97B10B /* GraphView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphView.swift; sourceTree = "<group>"; };
 		801D8F68F4C283DCBF0C6BA5 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		7694B9A271E832EF18D0308D /* LivePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePreview.swift; sourceTree = "<group>"; };
 		04B18F131CFE1EF03C5DDA94 /* LogoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogoView.swift; sourceTree = "<group>"; };
 		A339307944600A8EE13BB2FD /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
 		3B562AF0CB8F382BF9B01643 /* MarkdownPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownPreviewView.swift; sourceTree = "<group>"; };
@@ -150,14 +159,17 @@
 			files = (
 				5BE64C2A66DD1968BAADE323 /* AppModel.swift in Sources */,
 				1B16F940F1BEE4AAF2126DC4 /* ChromeViews.swift in Sources */,
+				2CF59801B328C7D15495431C /* CodeHighlight.swift in Sources */,
 				535F4DB428F2E12CA628E56D /* EditorView.swift in Sources */,
 				FD609980C11A43562D1188D7 /* FileExplorerView.swift in Sources */,
 				51EB17D15ED38BC20EF2AB9F /* FileService.swift in Sources */,
+				BBB4D7268E9117F5A43DF2B8 /* GFM.swift in Sources */,
 				9D38774F83C4777B23289DB7 /* GitHubCLIService.swift in Sources */,
 				DC271D14F28A860A8AB93D33 /* GitHubService.swift in Sources */,
 				6AEDEAA304D32442A2813C2F /* GitService.swift in Sources */,
 				2F33E1A2E4D02D735E23674E /* GraphView.swift in Sources */,
 				8222DFD638C76F0D441760FD /* KeychainService.swift in Sources */,
+				0886DA4F47FE771A9F0F25A8 /* LivePreview.swift in Sources */,
 				443485B6604A6BDE321D7CFE /* LogoView.swift in Sources */,
 				2C7251E96927DA718A524B32 /* Markdown.swift in Sources */,
 				6BF1F2FB53E71A40D8EDCEAB /* MarkdownPreviewView.swift in Sources */,

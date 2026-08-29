@@ -14,7 +14,9 @@ struct AppSettings: Codable, Sendable {
     var autoSync: Bool
     var darkMode: Bool
     var useGitHubCLI: Bool
+    var loadRemoteImages: Bool
     var leftSidebarWidth: CGFloat
+    var rightSidebarWidth: CGFloat
 
     static func `default`() -> AppSettings {
         let root = FileManager.default.homeDirectoryForCurrentUser
@@ -25,7 +27,9 @@ struct AppSettings: Codable, Sendable {
             autoSync: true,
             darkMode: true,
             useGitHubCLI: true,
-            leftSidebarWidth: VGTheme.sidebarWidth
+            loadRemoteImages: false,
+            leftSidebarWidth: VGTheme.sidebarWidth,
+            rightSidebarWidth: VGTheme.sidebarWidth
         )
     }
 
@@ -35,14 +39,18 @@ struct AppSettings: Codable, Sendable {
         autoSync: Bool,
         darkMode: Bool,
         useGitHubCLI: Bool = true,
-        leftSidebarWidth: CGFloat = VGTheme.sidebarWidth
+        loadRemoteImages: Bool = false,
+        leftSidebarWidth: CGFloat = VGTheme.sidebarWidth,
+        rightSidebarWidth: CGFloat = VGTheme.sidebarWidth
     ) {
         self.recentVaults = recentVaults
         self.vaultsRoot = vaultsRoot
         self.autoSync = autoSync
         self.darkMode = darkMode
         self.useGitHubCLI = useGitHubCLI
+        self.loadRemoteImages = loadRemoteImages
         self.leftSidebarWidth = leftSidebarWidth
+        self.rightSidebarWidth = rightSidebarWidth
     }
 
     init(from decoder: Decoder) throws {
@@ -52,7 +60,9 @@ struct AppSettings: Codable, Sendable {
         autoSync = try container.decode(Bool.self, forKey: .autoSync)
         darkMode = try container.decode(Bool.self, forKey: .darkMode)
         useGitHubCLI = try container.decodeIfPresent(Bool.self, forKey: .useGitHubCLI) ?? true
+        loadRemoteImages = try container.decodeIfPresent(Bool.self, forKey: .loadRemoteImages) ?? false
         leftSidebarWidth = try container.decodeIfPresent(CGFloat.self, forKey: .leftSidebarWidth) ?? VGTheme.sidebarWidth
+        rightSidebarWidth = try container.decodeIfPresent(CGFloat.self, forKey: .rightSidebarWidth) ?? VGTheme.sidebarWidth
     }
 }
 

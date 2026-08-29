@@ -15,3 +15,5 @@ From [[On Writing]] and [[Evergreen notes]].
 > The best writing is rewriting.
 
 Calmness is a superpower. See also [[Philosophy]].
+
+This is an <ins>underlined</ins> text
