@@ -346,7 +346,7 @@ final class AppModelTests: XCTestCase {
         model.activeTabID = a.path
 
         model.updateContent(a.path, "edited a")
-        model.setActiveTab(b.path)
+        await model.setActiveTab(b.path)
         model.updateContent(b.path, "edited b")
         await model.awaitPendingSaves()
 
@@ -366,6 +366,536 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertTrue(model.tabs.isEmpty)
         XCTAssertEqual(try FileService.read(file), "new")
+    }
+
+    func testNewVaultNoteOpensWithSelectedTitleWorkflowAndSourceEditor() async throws {
+        let root = try temporaryDirectory()
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(
+            name: "vault",
+            path: root.path,
+            remote: nil,
+            branch: nil,
+            isGitHub: false
+        )
+        model.editorMode = .preview
+
+        await model.newNote()
+
+        let tab = try XCTUnwrap(model.activeTab)
+        XCTAssertEqual(tab.title, "Untitled")
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+        XCTAssertEqual(model.editorMode, .source)
+        XCTAssertEqual(model.centerView, .editor)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tab.path))
+
+        model.endEditingTitle(for: tab.id)
+        await model.renameNote(path: tab.path, newName: "Project Notes")
+
+        let renamed = FileService.canonicalURL(root.appendingPathComponent("Project Notes.md"))
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(model.activeTab?.title, "Project Notes")
+        XCTAssertEqual(
+            model.activeTab.map { FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path },
+            renamed.path
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamed.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tab.path))
+    }
+
+    func testBackToBackNewNotesKeepTitleTargetAndEditorModesScopedPerTab() async throws {
+        let root = try temporaryDirectory()
+        let existing = root.appendingPathComponent("Existing.md")
+        try "existing".write(to: existing, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(
+            name: "vault",
+            path: root.path,
+            remote: nil,
+            branch: nil,
+            isGitHub: false
+        )
+        await model.openTab(path: existing.path)
+        model.editorMode = .preview
+
+        await model.newNote()
+        let firstNewTab = try XCTUnwrap(model.activeTab)
+        XCTAssertEqual(firstNewTab.editorMode, .source)
+
+        await model.newNote()
+        let secondNewTab = try XCTUnwrap(model.activeTab)
+
+        XCTAssertNotEqual(
+            firstNewTab.path,
+            secondNewTab.path,
+            "tabs=\(model.tabs.map(\.path)); files=\((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []); error=\(model.errorMessage ?? "nil")"
+        )
+        XCTAssertEqual(model.titleEditingTabID, secondNewTab.id)
+        XCTAssertEqual(secondNewTab.editorMode, .source)
+        XCTAssertEqual(model.tabs.first(where: { $0.id == existing.path })?.editorMode, .preview)
+        XCTAssertEqual(model.tabs.first(where: { $0.id == firstNewTab.id })?.editorMode, .source)
+
+        await model.setActiveTab(existing.path)
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(model.editorMode, .preview)
+
+        await model.setActiveTab(firstNewTab.id)
+        XCTAssertEqual(model.editorMode, .source)
+    }
+
+    func testStandaloneNewNoteUsesInjectedSaveDestinationAndEditingWorkflow() async throws {
+        let root = try temporaryDirectory()
+        let destination = root.appendingPathComponent("Untitled.md")
+        var dependencies = disabledAuthDependencies()
+        dependencies.chooseNewStandaloneNoteURL = { destination }
+        let model = AppModel(
+            settings: .default(),
+            bootstrapOnLaunch: false,
+            dependencies: dependencies
+        )
+
+        await model.newNote()
+
+        let tab = try XCTUnwrap(model.activeTab)
+        XCTAssertEqual(tab.path, destination.path)
+        XCTAssertTrue(tab.isStandalone)
+        XCTAssertEqual(tab.editorMode, .source)
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+        XCTAssertEqual(try FileService.read(destination), "")
+    }
+
+    func testOpenTabCommitsTitleAndClearsEditingBeforeNavigation() async throws {
+        let root = try temporaryDirectory()
+        let first = root.appendingPathComponent("First.md")
+        let second = root.appendingPathComponent("Second.md")
+        try "first".write(to: first, atomically: true, encoding: .utf8)
+        try "second".write(to: second, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        await model.openTab(path: first.path, standalone: true)
+        model.beginEditingTitle(for: first.path)
+        model.updateTitleDraft(for: first.path, draft: "Committed First")
+
+        await model.openTab(path: second.path, standalone: true)
+
+        let renamed = root.appendingPathComponent("Committed First.md")
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(model.activeTabID, second.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamed.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.path))
+    }
+
+    func testStandaloneReplacementCommitsTitleBeforeReplacingTabs() async throws {
+        let root = try temporaryDirectory()
+        let first = root.appendingPathComponent("First.md")
+        let replacement = root.appendingPathComponent("Replacement.md")
+        try "first".write(to: first, atomically: true, encoding: .utf8)
+        try "replacement".write(to: replacement, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        await model.openTab(path: first.path, standalone: true)
+        model.beginEditingTitle(for: first.path)
+        model.updateTitleDraft(for: first.path, draft: "Saved Before Replace")
+
+        await model.openStandalone(url: replacement)
+
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(model.tabs.map(\.path), [replacement.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Saved Before Replace.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.path))
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testCloseTabAndVaultCommitTitleBeforeTeardown() async throws {
+        let root = try temporaryDirectory()
+        let standalone = root.appendingPathComponent("Standalone.md")
+        try "standalone".write(to: standalone, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        await model.openTab(path: standalone.path, standalone: true)
+        model.beginEditingTitle(for: standalone.path)
+        model.updateTitleDraft(for: standalone.path, draft: "Closed Tab")
+
+        await model.closeTab(standalone.path)
+
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Closed Tab.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: standalone.path))
+
+        let vaultNote = root.appendingPathComponent("Vault Note.md")
+        try "vault".write(to: vaultNote, atomically: true, encoding: .utf8)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.openTab(path: vaultNote.path)
+        model.beginEditingTitle(for: vaultNote.path)
+        model.updateTitleDraft(for: vaultNote.path, draft: "Closed Vault")
+
+        await model.closeVault()
+
+        XCTAssertNil(model.vault)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Closed Vault.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: vaultNote.path))
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testTitleEditingLifecycleIgnoresInvalidIDsAndClearsOnNavigationAndClose() async throws {
+        let root = try temporaryDirectory()
+        let a = root.appendingPathComponent("A.md")
+        let b = root.appendingPathComponent("B.md")
+        try "a".write(to: a, atomically: true, encoding: .utf8)
+        try "b".write(to: b, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = [
+            NoteTab(path: a.path, title: "A", content: "a", originalContent: "a", isStandalone: true),
+            NoteTab(path: b.path, title: "B", content: "b", originalContent: "b", isStandalone: true)
+        ]
+        model.activeTabID = a.path
+
+        model.beginEditingTitle(for: a.path)
+        model.beginEditingTitle(for: "/missing.md")
+        model.endEditingTitle(for: b.path)
+        XCTAssertEqual(model.titleEditingTabID, a.path)
+
+        await model.setActiveTab(b.path)
+        XCTAssertNil(model.titleEditingTabID)
+
+        model.beginEditingTitle(for: a.path)
+        await model.closeTab(a.path)
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(try FileService.read(a), "a")
+    }
+
+    func testClosingAndRejectingVaultClearTitleEditingBeforeTeardown() async throws {
+        let root = try temporaryDirectory()
+        let note = root.appendingPathComponent("Note.md")
+        try "body".write(to: note, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = [NoteTab(path: note.path, title: "Note", content: "body", originalContent: "body", isStandalone: false)]
+        model.activeTabID = note.path
+        model.beginEditingTitle(for: note.path)
+
+        await model.closeVault()
+
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: note.path))
+
+        let missing = root.appendingPathComponent("MissingVault")
+        model.vault = VaultInfo(name: "missing", path: missing.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = [NoteTab(path: note.path, title: "Note", content: "body", originalContent: "body", isStandalone: false)]
+        model.activeTabID = note.path
+        model.beginEditingTitle(for: note.path)
+
+        await model.openVault(path: missing.path)
+
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertNil(model.vault)
+    }
+
+    func testDeletingEditedNoteAndFolderClearsTitleEditingWithoutRenameErrors() async throws {
+        let root = try temporaryDirectory()
+        let note = root.appendingPathComponent("Delete Me.md")
+        let folder = root.appendingPathComponent("Folder", isDirectory: true)
+        let child = folder.appendingPathComponent("Child.md")
+        try "note".write(to: note, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try "child".write(to: child, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = [
+            NoteTab(path: note.path, title: "Delete Me", content: "note", originalContent: "note", isStandalone: false),
+            NoteTab(path: child.path, title: "Child", content: "child", originalContent: "child", isStandalone: false)
+        ]
+        model.activeTabID = note.path
+        model.beginEditingTitle(for: note.path)
+
+        await model.deletePath(note.path)
+
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertFalse(model.tabs.contains(where: { $0.id == note.path }))
+        XCTAssertNil(model.errorMessage)
+
+        await model.setActiveTab(child.path)
+        model.beginEditingTitle(for: child.path)
+        await model.deletePath(folder.path)
+
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertFalse(model.tabs.contains(where: { $0.id == child.path }))
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testInlineRenameNativeFieldSelectsOnlyItsOwnFieldEditor() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        let content = NSView(frame: window.contentView?.bounds ?? .zero)
+        let filterField = NSTextField(string: "Filter text")
+        filterField.frame = NSRect(x: 20, y: 70, width: 180, height: 24)
+        let renameField = InlineRenameNSTextField(string: "Untitled")
+        renameField.frame = NSRect(x: 20, y: 30, width: 180, height: 24)
+        content.addSubview(filterField)
+        content.addSubview(renameField)
+        window.contentView = content
+        window.makeKeyAndOrderFront(nil)
+
+        XCTAssertTrue(window.makeFirstResponder(filterField))
+        let filterEditor = try XCTUnwrap(filterField.currentEditor() as? NSTextView)
+        filterEditor.setSelectedRange(NSRange(location: 0, length: 0))
+
+        XCTAssertTrue(renameField.focusAndSelectAll())
+
+        let renameEditor = try XCTUnwrap(renameField.currentEditor() as? NSTextView)
+        XCTAssertTrue(window.firstResponder === renameEditor)
+        XCTAssertEqual(renameEditor.selectedRange(), NSRange(location: 0, length: "Untitled".utf16.count))
+        XCTAssertNil(filterField.currentEditor())
+    }
+
+    func testInlineRenameCommitsTextInsertedThroughActiveFieldEditor() throws {
+        var draft = "Untitled"
+        var committed: String?
+        let representable = InlineRenameTextField(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            font: .systemFont(ofSize: 13),
+            onCommit: { committed = $0 },
+            onCancel: { XCTFail("A nonempty field-editor draft should commit") }
+        )
+        let coordinator = InlineRenameTextField.Coordinator(parent: representable)
+        let field = InlineRenameNSTextField(string: draft)
+        field.delegate = coordinator
+        coordinator.attach(field)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 80),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        window.contentView?.addSubview(field)
+        window.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(field.focusAndSelectAll())
+        let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+
+        editor.insertText("Typed in AppKit", replacementRange: editor.selectedRange())
+        coordinator.controlTextDidChange(
+            Notification(name: NSControl.textDidChangeNotification, object: field)
+        )
+        XCTAssertTrue(coordinator.control(
+            field,
+            textView: editor,
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        ))
+
+        XCTAssertEqual(field.stringValue, "Typed in AppKit")
+        XCTAssertEqual(committed, "Typed in AppKit")
+    }
+
+    func testInlineRenameEscapeAndWhitespaceCancelWithoutCommit() throws {
+        var committed: String?
+        var cancelCount = 0
+        var draft = "Original"
+        let representable = InlineRenameTextField(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            font: .systemFont(ofSize: 13),
+            onCommit: { committed = $0 },
+            onCancel: { cancelCount += 1 }
+        )
+        let escapeCoordinator = InlineRenameTextField.Coordinator(parent: representable)
+        let escapeField = InlineRenameNSTextField(string: draft)
+        escapeCoordinator.textField = escapeField
+        let editor = NSTextView()
+
+        XCTAssertTrue(escapeCoordinator.control(
+            escapeField,
+            textView: editor,
+            doCommandBy: #selector(NSResponder.cancelOperation(_:))
+        ))
+        XCTAssertNil(committed)
+        XCTAssertEqual(cancelCount, 1)
+
+        let whitespaceRepresentable = InlineRenameTextField(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            font: .systemFont(ofSize: 13),
+            commitOnDismantle: true,
+            onCommit: { committed = $0 },
+            onCancel: { cancelCount += 1 }
+        )
+        let whitespaceCoordinator = InlineRenameTextField.Coordinator(parent: whitespaceRepresentable)
+        let whitespaceField = InlineRenameNSTextField(string: "   \n")
+        whitespaceCoordinator.textField = whitespaceField
+        whitespaceCoordinator.prepareForDismantle()
+
+        XCTAssertNil(committed)
+        XCTAssertEqual(cancelCount, 2)
+    }
+
+    func testRenderedNewNoteFocusesAndSelectsTitleWhileSourceModeIsVisible() async throws {
+        let root = try temporaryDirectory()
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.newNote()
+        let tab = try XCTUnwrap(model.activeTab)
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView()
+                .environment(model)
+                .frame(width: 700, height: 400)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 700, height: 400)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+        for _ in 0..<10 where firstDescendant(of: InlineRenameNSTextField.self, in: hostingView)?.currentEditor() == nil {
+            await Task.yield()
+            hostingView.layoutSubtreeIfNeeded()
+        }
+
+        let field = try XCTUnwrap(firstDescendant(of: InlineRenameNSTextField.self, in: hostingView))
+        let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+        XCTAssertEqual(model.editorMode, .source)
+        XCTAssertEqual(model.centerView, .editor)
+        XCTAssertNotNil(firstDescendant(of: SourceTextView.self, in: hostingView))
+        XCTAssertEqual(field.stringValue, tab.title)
+        XCTAssertTrue(window.firstResponder === editor)
+        XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: tab.title.utf16.count))
+    }
+
+    func testInlineRenameDismantleDoesNotCommitDraft() async {
+        var draft = "Half typed"
+        var committed: String?
+        var cancelled = false
+        let representable = InlineRenameTextField(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            font: .systemFont(ofSize: 13),
+            onCommit: { committed = $0 },
+            onCancel: { cancelled = true }
+        )
+        let coordinator = InlineRenameTextField.Coordinator(parent: representable)
+        let field = InlineRenameNSTextField(string: draft)
+        coordinator.textField = field
+        coordinator.prepareForDismantle()
+
+        coordinator.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: field))
+        await Task.yield()
+
+        XCTAssertNil(committed)
+        XCTAssertFalse(cancelled)
+    }
+
+    func testDocumentTitleDismantleCommitsDraft() {
+        var draft = "Renamed on tab switch"
+        var committed: String?
+        let representable = InlineRenameTextField(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            font: .systemFont(ofSize: 34, weight: .bold),
+            commitOnDismantle: true,
+            onCommit: { committed = $0 },
+            onCancel: { XCTFail("A nonempty document title should commit") }
+        )
+        let coordinator = InlineRenameTextField.Coordinator(parent: representable)
+        let field = InlineRenameNSTextField(string: draft)
+        coordinator.textField = field
+
+        coordinator.prepareForDismantle()
+
+        XCTAssertEqual(committed, "Renamed on tab switch")
+    }
+
+    func testInlineRenameBlurCommitsWhileFieldRemainsAttached() async {
+        var draft = "Renamed"
+        var committed: String?
+        let representable = InlineRenameTextField(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            font: .systemFont(ofSize: 13),
+            onCommit: { committed = $0 },
+            onCancel: { XCTFail("A nonempty draft should commit") }
+        )
+        let coordinator = InlineRenameTextField.Coordinator(parent: representable)
+        let field = InlineRenameNSTextField(string: draft)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 80),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        window.contentView?.addSubview(field)
+        coordinator.textField = field
+
+        coordinator.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: field))
+        await Task.yield()
+
+        XCTAssertEqual(committed, "Renamed")
+    }
+
+    func testSwitchingTabsCommitsTitleAndGivesNextEditFreshState() async throws {
+        let root = try temporaryDirectory()
+        let firstURL = root.appendingPathComponent("First Untitled.md")
+        let secondURL = root.appendingPathComponent("Second Untitled.md")
+        try "first".write(to: firstURL, atomically: true, encoding: .utf8)
+        try "second".write(to: secondURL, atomically: true, encoding: .utf8)
+        let firstPath = firstURL.path
+        let secondPath = secondURL.path
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = [
+            NoteTab(path: firstPath, title: "Untitled", content: "", originalContent: "", isStandalone: true),
+            NoteTab(path: secondPath, title: "Untitled 1", content: "", originalContent: "", isStandalone: true)
+        ]
+        model.activeTabID = firstPath
+        model.beginEditingTitle(for: firstPath)
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView()
+                .environment(model)
+                .frame(width: 700, height: 400)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 700, height: 400)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+        await Task.yield()
+
+        let firstField = try XCTUnwrap(firstDescendant(of: InlineRenameNSTextField.self, in: hostingView))
+        firstField.stringValue = "First draft"
+        (firstField.delegate as? InlineRenameTextField.Coordinator)?.controlTextDidChange(
+            Notification(name: NSControl.textDidChangeNotification, object: firstField)
+        )
+
+        await model.setActiveTab(secondPath)
+        model.beginEditingTitle(for: secondPath)
+        hostingView.layoutSubtreeIfNeeded()
+        await Task.yield()
+        hostingView.layoutSubtreeIfNeeded()
+
+        let secondField = try XCTUnwrap(firstDescendant(of: InlineRenameNSTextField.self, in: hostingView))
+        XCTAssertFalse(firstField === secondField)
+        XCTAssertEqual(secondField.stringValue, "Untitled 1")
+
+        let renamedURL = root.appendingPathComponent("First draft.md")
+        for _ in 0..<50 where !model.tabs.contains(where: { $0.title == "First draft" }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamedURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstPath))
+        XCTAssertEqual(model.tabs.first(where: { $0.title == "First draft" })?.path, renamedURL.path)
     }
 
     func testFailedSaveRemainsDirtyAndPublishesError() async {
@@ -451,6 +981,7 @@ final class AppModelTests: XCTestCase {
             NoteTab(path: source.path, title: "Untitled", content: "edited", originalContent: "draft", isStandalone: false)
         ]
         model.activeTabID = source.path
+        model.beginEditingTitle(for: source.path)
 
         await model.renameNote(path: source.path, newName: "Hello")
 
@@ -461,6 +992,7 @@ final class AppModelTests: XCTestCase {
             dest.path
         )
         XCTAssertEqual(model.tabs.first?.title, "Hello")
+        XCTAssertEqual(model.titleEditingTabID, dest.path)
         XCTAssertEqual(
             model.tabs.first.map { FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path },
             dest.path
@@ -589,4 +1121,12 @@ private final class SystemAppearanceFeed {
         currentDarkMode = isDark
         handler?(isDark)
     }
+}
+
+private func firstDescendant<View: NSView>(of type: View.Type, in root: NSView) -> View? {
+    if let match = root as? View { return match }
+    for subview in root.subviews {
+        if let match = firstDescendant(of: type, in: subview) { return match }
+    }
+    return nil
 }

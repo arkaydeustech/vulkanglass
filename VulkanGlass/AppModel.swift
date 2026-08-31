@@ -10,6 +10,7 @@ struct AppModelDependencies {
     var loadKeychainToken: () -> String?
     var saveKeychainToken: (String) throws -> Void
     var authenticationDisabled: () -> Bool = { false }
+    var chooseNewStandaloneNoteURL: @MainActor () -> URL? = { nil }
 
     static let live = AppModelDependencies(
         githubCLIStatus: { includeToken in
@@ -19,7 +20,15 @@ struct AppModelDependencies {
         githubRepos: { try await GitHubService.repos(token: $0) },
         loadKeychainToken: { KeychainService.load() },
         saveKeychainToken: { try KeychainService.save(token: $0) },
-        authenticationDisabled: { DevelopmentAuthentication.isDisabledForThisProcess }
+        authenticationDisabled: { DevelopmentAuthentication.isDisabledForThisProcess },
+        chooseNewStandaloneNoteURL: {
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+            panel.nameFieldStringValue = "Untitled.md"
+            panel.message = "Save Markdown file"
+            guard panel.runModal() == .OK else { return nil }
+            return panel.url
+        }
     )
 }
 
@@ -101,12 +110,30 @@ final class AppModel {
     var notes: [NoteMeta] = []
     var tabs: [NoteTab] = []
     var activeTabID: String?
+    var titleEditingTabID: String?
+    private(set) var titleEditingDraft = ""
     var leftOpen = true
     var rightOpen = true
     var leftPanel: LeftPanel = .files
     var rightPanel: RightPanel = .graph
     var centerView: CenterView = .editor
-    var editorMode: EditorMode = .preview
+    var editorMode: EditorMode {
+        get {
+            guard let activeTabID,
+                  let index = tabs.firstIndex(where: { $0.id == activeTabID })
+            else { return defaultEditorMode }
+            return tabs[index].editorMode
+        }
+        set {
+            guard let activeTabID,
+                  let index = tabs.firstIndex(where: { $0.id == activeTabID })
+            else {
+                defaultEditorMode = newValue
+                return
+            }
+            tabs[index].editorMode = newValue
+        }
+    }
     var searchQuery = ""
     var gitStatus: GitStatus?
     var commandOpen = false
@@ -145,6 +172,7 @@ final class AppModel {
 
     private var activeToken: String?
     private let dependencies: AppModelDependencies
+    private var defaultEditorMode: EditorMode = .preview
     private var githubConnectionGeneration = 0
     @ObservationIgnored private var systemAppearanceObservation: NSKeyValueObservation?
 
@@ -153,6 +181,9 @@ final class AppModel {
 
     private var saveTasks: [String: Task<Void, Never>] = [:]
     private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var titleCommitTask: Task<Bool, Never>?
+    @ObservationIgnored private var titleCommitTabID: String?
+    @ObservationIgnored private var titleCommitGeneration: UUID?
 
     init(
         settings: AppSettings? = nil,
@@ -236,6 +267,10 @@ final class AppModel {
     func openVault(path: String) async {
         busyMessage = "Inspecting vault…"
         guard FileService.directoryExists(at: path) else {
+            guard await commitTitleEditing() else {
+                busyMessage = nil
+                return
+            }
             rejectMissingVault(path: path, name: URL(fileURLWithPath: path).lastPathComponent)
             return
         }
@@ -246,8 +281,15 @@ final class AppModel {
     /// Opens a GitHub-backed vault folder.
     func openVault(_ info: VaultInfo) async {
         guard FileService.directoryExists(at: info.path) else {
+            guard await commitTitleEditing() else { return }
             rejectMissingVault(path: info.path, name: info.name)
             return
+        }
+        if (!tabs.isEmpty || vault != nil), vault?.path != info.path {
+            guard await commitTitleEditing() else {
+                busyMessage = nil
+                return
+            }
         }
         if (!tabs.isEmpty || vault != nil), vault?.path != info.path, !(await flushDirtyTabs()) {
             busyMessage = nil
@@ -278,7 +320,10 @@ final class AppModel {
         if pulled.state == .error { errorMessage = pulled.message }
         await refreshVault(reconcileTabs: false)
         busyMessage = nil
-        editorMode = .preview
+        defaultEditorMode = .preview
+        for index in tabs.indices {
+            tabs[index].editorMode = .preview
+        }
         centerView = .editor
         rightPanel = .graph
         let featured = notes.first { $0.title.lowercased() == "writing is telepathy" }
@@ -294,6 +339,7 @@ final class AppModel {
 
     /// Closes the current vault and returns to the welcome screen.
     func closeVault() async {
+        guard await commitTitleEditing() else { return }
         guard await flushDirtyTabs() else { return }
         saveTasks.values.forEach { $0.cancel() }
         saveTasks = [:]
@@ -301,6 +347,8 @@ final class AppModel {
         vault = nil
         fileTree = []
         notes = []
+        titleEditingTabID = nil
+        titleEditingDraft = ""
         tabs = []
         activeTabID = nil
         gitStatus = nil
@@ -346,12 +394,18 @@ final class AppModel {
 
     /// Opens or focuses a tab for a note path.
     func openTab(path: String, standalone: Bool = false, content: String? = nil) async {
+        if activeTabID != path {
+            guard await commitTitleEditing() else { return }
+        }
         if let existing = tabs.first(where: { $0.path == path }) {
+            titleEditingTabID = nil
+            titleEditingDraft = ""
             activeTabID = existing.id
             centerView = .editor
             return
         }
         do {
+            let inheritedEditorMode = editorMode
             let text: String
             if let content {
                 text = content
@@ -363,9 +417,12 @@ final class AppModel {
                 title: Markdown.title(from: path),
                 content: text,
                 originalContent: text,
-                isStandalone: standalone
+                isStandalone: standalone,
+                editorMode: inheritedEditorMode
             )
             tabs.append(tab)
+            titleEditingTabID = nil
+            titleEditingDraft = ""
             activeTabID = tab.id
             centerView = .editor
         } catch {
@@ -376,18 +433,31 @@ final class AppModel {
     func closeTab(_ id: String? = nil) async {
         let target = id ?? activeTabID
         guard let target else { return }
-        if let tab = tabs.first(where: { $0.id == target }), tab.dirty, !(await save(id: target, sync: false)) {
+        let wasActive = activeTabID == target
+        if titleEditingTabID == target || titleCommitTabID == target {
+            guard await commitTitleEditing(for: target) else { return }
+        }
+        let resolvedTarget = wasActive ? (activeTabID ?? target) : target
+        if let tab = tabs.first(where: { $0.id == resolvedTarget }), tab.dirty,
+           !(await save(id: resolvedTarget, sync: false))
+        {
             return
         }
-        saveTasks[target]?.cancel()
-        saveTasks[target] = nil
-        tabs.removeAll { $0.id == target }
-        if activeTabID == target {
+        saveTasks[resolvedTarget]?.cancel()
+        saveTasks[resolvedTarget] = nil
+        if titleEditingTabID == resolvedTarget {
+            titleEditingTabID = nil
+            titleEditingDraft = ""
+        }
+        tabs.removeAll { $0.id == resolvedTarget }
+        if activeTabID == resolvedTarget {
             activeTabID = tabs.last?.id
         }
     }
 
-    func setActiveTab(_ id: String) {
+    func setActiveTab(_ id: String) async {
+        guard id != activeTabID else { return }
+        guard await commitTitleEditing() else { return }
         if let outgoing = activeTabID, outgoing != id,
            tabs.first(where: { $0.id == outgoing })?.dirty == true
         {
@@ -398,8 +468,70 @@ final class AppModel {
                 _ = await self?.save(id: outgoing, sync: false)
             }
         }
+        if titleEditingTabID != id {
+            titleEditingTabID = nil
+        }
         activeTabID = id
         centerView = .editor
+    }
+
+    func beginEditingTitle(for id: String) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        titleEditingTabID = id
+        titleEditingDraft = tab.title
+    }
+
+    func updateTitleDraft(for id: String, draft: String) {
+        guard titleEditingTabID == id else { return }
+        titleEditingDraft = draft
+    }
+
+    func endEditingTitle(for id: String) {
+        if titleEditingTabID == id {
+            titleEditingTabID = nil
+            titleEditingDraft = ""
+        }
+    }
+
+    /// Commits the current draft before navigation mutates or removes its tab. The task is
+    /// retained so a simultaneous close or vault replacement waits for the same filesystem move.
+    @discardableResult
+    func commitTitleEditing(for id: String? = nil) async -> Bool {
+        if let pending = titleCommitTask,
+           id == nil || titleCommitTabID == id
+        {
+            return await pending.value
+        }
+        guard let target = titleEditingTabID,
+              id == nil || id == target,
+              tabs.contains(where: { $0.id == target })
+        else { return true }
+
+        let draft = titleEditingDraft
+        titleEditingTabID = nil
+        titleEditingDraft = ""
+        let generation = UUID()
+        titleCommitGeneration = generation
+        titleCommitTabID = target
+        let task = Task { [weak self] in
+            guard let self else { return false }
+            return await self.renameNote(path: target, newName: draft)
+        }
+        titleCommitTask = task
+        let committed = await task.value
+        if titleCommitGeneration == generation {
+            titleCommitTask = nil
+            titleCommitTabID = nil
+            titleCommitGeneration = nil
+        }
+        if !committed,
+           titleEditingTabID == nil,
+           tabs.contains(where: { $0.id == target })
+        {
+            titleEditingTabID = target
+            titleEditingDraft = draft
+        }
+        return committed
     }
 
     /// Awaits every in-flight autosave, including debounced writes that have not fired yet.
@@ -475,19 +607,17 @@ final class AppModel {
                 let url = try FileService.createNote(in: URL(fileURLWithPath: vault.path), name: "Untitled")
                 await refreshVault()
                 await openTab(path: url.path)
+                prepareNewNoteForEditing(at: url.path)
             } catch {
                 errorMessage = error.localizedDescription
             }
             return
         }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        panel.nameFieldStringValue = "Untitled.md"
-        panel.message = "Save Markdown file"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let url = dependencies.chooseNewStandaloneNoteURL() else { return }
         do {
             try FileService.write(url, content: "")
             await openTab(path: url.path, standalone: true, content: "")
+            prepareNewNoteForEditing(at: url.path)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -525,19 +655,20 @@ final class AppModel {
     }
 
     /// Renames a note on disk and retargets any open tab for that file.
-    func renameNote(path: String, newName: String) async {
+    @discardableResult
+    func renameNote(path: String, newName: String) async -> Bool {
         let currentTitle = Markdown.title(from: path)
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return true }
         var proposed = trimmed
         if proposed.lowercased().hasSuffix(".md") {
             proposed.removeLast(3)
             proposed = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard proposed != currentTitle else { return }
+        guard proposed != currentTitle else { return true }
 
         if let tab = tabs.first(where: { $0.path == path }), tab.dirty {
-            guard await save(id: tab.id, sync: false) else { return }
+            guard await save(id: tab.id, sync: false) else { return false }
         }
 
         let root = vault.map { URL(fileURLWithPath: $0.path) }
@@ -559,8 +690,10 @@ final class AppModel {
                     await syncNow(message: "Rename \(currentTitle) to \(Markdown.title(from: dest.path))")
                 }
             }
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -572,6 +705,10 @@ final class AppModel {
             let prefix = url.standardizedFileURL.path + "/"
             let removedIDs = tabs.filter { $0.path == path || $0.path.hasPrefix(prefix) }.map(\.id)
             removedIDs.forEach { saveTasks[$0]?.cancel(); saveTasks[$0] = nil }
+            if let titleEditingTabID, removedIDs.contains(titleEditingTabID) {
+                self.titleEditingTabID = nil
+                titleEditingDraft = ""
+            }
             tabs.removeAll { $0.path == path || $0.path.hasPrefix(prefix) }
             if let activeTabID, removedIDs.contains(activeTabID) { self.activeTabID = tabs.last?.id }
             await refreshVault()
@@ -739,6 +876,18 @@ final class AppModel {
         if activeTabID == oldPath {
             activeTabID = newPath
         }
+        if titleEditingTabID == oldPath {
+            titleEditingTabID = newPath
+        }
+    }
+
+    /// New notes always begin in source mode with their generated title ready to replace.
+    private func prepareNewNoteForEditing(at path: String) {
+        guard tabs.contains(where: { $0.id == path }) else { return }
+        editorMode = .source
+        centerView = .editor
+        titleEditingTabID = path
+        titleEditingDraft = Markdown.title(from: path)
     }
 
     /// Shows a toast and returns to the welcome screen when a vault folder is gone.
@@ -753,6 +902,8 @@ final class AppModel {
             vault = nil
             fileTree = []
             notes = []
+            titleEditingTabID = nil
+            titleEditingDraft = ""
             tabs = []
             activeTabID = nil
             gitStatus = nil
@@ -818,8 +969,10 @@ final class AppModel {
         }
     }
 
-    private func openStandalone(url: URL) async {
+    func openStandalone(url: URL) async {
+        guard await commitTitleEditing() else { return }
         guard await flushDirtyTabs() else { return }
+        let inheritedEditorMode = editorMode
         vault = nil
         fileTree = []
         notes = []
@@ -831,8 +984,11 @@ final class AppModel {
                 title: Markdown.title(from: url.path),
                 content: text,
                 originalContent: text,
-                isStandalone: true
+                isStandalone: true,
+                editorMode: inheritedEditorMode
             )
+            titleEditingTabID = nil
+            titleEditingDraft = ""
             tabs = [tab]
             activeTabID = tab.id
             centerView = .editor

@@ -44,7 +44,7 @@ struct TitleBarTabStrip: View {
                         let active = tab.id == model.activeTabID && model.centerView == .editor
                         HStack(spacing: 6) {
                             Button {
-                                model.setActiveTab(tab.id)
+                                Task { await model.setActiveTab(tab.id) }
                             } label: {
                                 Text((tab.dirty ? "• " : "") + tab.title)
                                     .lineLimit(1)

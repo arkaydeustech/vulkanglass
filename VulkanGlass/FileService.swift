@@ -218,8 +218,10 @@ enum FileService {
 
         let canonicalRoot = canonicalURL(root)
         let raw = canonicalRoot.appendingPathComponent(value).standardizedFileURL
-        let resolvedParent = canonicalURL(raw.deletingLastPathComponent())
-        let candidate = resolvedParent.appendingPathComponent(raw.lastPathComponent).standardizedFileURL
+        // Resolve both existing and not-yet-created candidates the same way. Foundation can
+        // re-express an existing /private/var path through /var during standardization, which
+        // otherwise makes the second generated "Untitled" filename look outside its vault.
+        let candidate = canonicalURL(raw)
         guard candidate.path.hasPrefix(canonicalRoot.path + "/") else {
             throw FileServiceError.outsideRoot(candidate.path)
         }

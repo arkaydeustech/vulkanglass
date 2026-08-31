@@ -1170,7 +1170,6 @@ private enum NoteEditorLayoutPreferenceKey: PreferenceKey {
 
 struct NoteEditorView: View {
     @Environment(AppModel.self) private var model
-    @State private var renaming = false
     var onLayout: ((CGSize) -> Void)? = nil
 
     var body: some View {
@@ -1214,9 +1213,6 @@ struct NoteEditorView: View {
             .onPreferenceChange(NoteEditorLayoutPreferenceKey.self) { size in
                 if let size { onLayout?(size) }
             }
-            .onChange(of: tab.path) { _, _ in
-                renaming = false
-            }
         } else {
             Text("No file is open. Create a note or open a Markdown file.")
                 .foregroundStyle(VGTheme.textFaint(dark: model.dark))
@@ -1226,22 +1222,27 @@ struct NoteEditorView: View {
 
     private func titleRow(_ tab: NoteTab) -> some View {
         Group {
-            if renaming {
+            if model.titleEditingTabID == tab.id {
                 InlineRenameField(
-                    text: tab.title,
-                    font: .system(size: 34, weight: .bold)
+                    text: model.titleEditingDraft,
+                    font: .systemFont(ofSize: 34, weight: .bold),
+                    commitOnDisappear: true,
+                    onChange: { model.updateTitleDraft(for: tab.id, draft: $0) }
                 ) { name in
-                    renaming = false
-                    Task { await model.renameNote(path: tab.path, newName: name) }
+                    Task {
+                        model.updateTitleDraft(for: tab.id, draft: name)
+                        await model.commitTitleEditing(for: tab.id)
+                    }
                 } onCancel: {
-                    renaming = false
+                    Task { model.endEditingTitle(for: tab.id) }
                 }
+                .id(tab.id)
             } else {
                 Text(tab.title)
                     .font(.system(size: 34, weight: .bold))
                     .foregroundStyle(VGTheme.textNormal(dark: model.dark))
                     .contentShape(Rectangle())
-                    .onTapGesture { renaming = true }
+                    .onTapGesture { model.beginEditingTitle(for: tab.id) }
                     .help("Rename")
                     .accessibilityAddTraits(.isButton)
                     .accessibilityHint("Renames this note")
@@ -1258,53 +1259,192 @@ struct NoteEditorView: View {
 /// Inline text field used to rename a note title or file tree entry.
 struct InlineRenameField: View {
     let text: String
-    var font: Font = .body
+    var font: NSFont = .systemFont(ofSize: NSFont.systemFontSize)
+    var commitOnDisappear: Bool
+    var onChange: (String) -> Void
     var onCommit: (String) -> Void
     var onCancel: () -> Void
     @State private var draft: String
-    @State private var finished = false
-    @FocusState private var focused: Bool
 
     init(
         text: String,
-        font: Font = .body,
+        font: NSFont = .systemFont(ofSize: NSFont.systemFontSize),
+        commitOnDisappear: Bool = false,
+        onChange: @escaping (String) -> Void = { _ in },
         onCommit: @escaping (String) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.text = text
         self.font = font
+        self.commitOnDisappear = commitOnDisappear
+        self.onChange = onChange
         self.onCommit = onCommit
         self.onCancel = onCancel
         _draft = State(initialValue: text)
     }
 
     var body: some View {
-        TextField("Name", text: $draft)
-            .textFieldStyle(.plain)
-            .font(font)
-            .focused($focused)
-            .onAppear { focused = true }
-            .onSubmit { commit() }
-            .onExitCommand { cancel() }
-            .onChange(of: focused) { _, on in
-                if !on { commit() }
-            }
+        InlineRenameTextField(
+            text: $draft,
+            font: font,
+            commitOnDismantle: commitOnDisappear,
+            onChange: onChange,
+            onCommit: onCommit,
+            onCancel: onCancel
+        )
+    }
+}
+
+/// An NSTextField with field-editor access scoped to this specific control.
+final class InlineRenameNSTextField: NSTextField {
+    @discardableResult
+    func focusAndSelectAll() -> Bool {
+        guard let window,
+              window.makeFirstResponder(self),
+              let editor = currentEditor()
+        else { return false }
+        editor.selectAll(nil)
+        return true
+    }
+}
+
+/// Native backing for InlineRenameField. AppKit exposes the owning control's currentEditor(),
+/// avoiding accidental selection in the window's shared field editor for another text field.
+struct InlineRenameTextField: NSViewRepresentable {
+    @Binding var text: String
+    var font: NSFont
+    var commitOnDismantle: Bool = false
+    var onChange: (String) -> Void = { _ in }
+    var onCommit: (String) -> Void
+    var onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
     }
 
-    private func commit() {
-        guard !finished else { return }
-        finished = true
-        let value = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.isEmpty {
-            onCancel()
-        } else {
-            onCommit(value)
+    func makeNSView(context: Context) -> InlineRenameNSTextField {
+        let field = InlineRenameNSTextField(string: text)
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.isEditable = true
+        field.isSelectable = true
+        field.placeholderString = "Name"
+        field.setAccessibilityLabel("Name")
+        field.font = font
+        field.lineBreakMode = .byTruncatingTail
+        field.cell?.usesSingleLineMode = true
+        field.delegate = context.coordinator
+        context.coordinator.attach(field)
+        return field
+    }
+
+    func updateNSView(_ nsView: InlineRenameNSTextField, context: Context) {
+        context.coordinator.parent = self
+        nsView.font = font
+        if nsView.currentEditor() == nil, nsView.stringValue != text {
+            nsView.stringValue = text
         }
+        context.coordinator.requestFocus()
     }
 
-    private func cancel() {
-        guard !finished else { return }
-        finished = true
-        onCancel()
+    static func dismantleNSView(_ nsView: InlineRenameNSTextField, coordinator: Coordinator) {
+        coordinator.prepareForDismantle()
+        nsView.delegate = nil
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: InlineRenameTextField
+        weak var textField: InlineRenameNSTextField?
+        private var finished = false
+        private var dismantling = false
+        private var focusRequested = false
+
+        init(parent: InlineRenameTextField) {
+            self.parent = parent
+        }
+
+        func attach(_ textField: InlineRenameNSTextField) {
+            self.textField = textField
+            requestFocus()
+        }
+
+        func requestFocus(remainingAttempts: Int = 8) {
+            guard !focusRequested, !finished, !dismantling else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let textField = self.textField,
+                      !self.finished, !self.dismantling
+                else { return }
+                if textField.focusAndSelectAll() {
+                    self.focusRequested = true
+                } else if remainingAttempts > 1 {
+                    self.requestFocus(remainingAttempts: remainingAttempts - 1)
+                }
+            }
+        }
+
+        func prepareForDismantle() {
+            if parent.commitOnDismantle {
+                complete(commit: true)
+            }
+            dismantling = true
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let textField = notification.object as? NSTextField else { return }
+            parent.text = textField.stringValue
+            parent.onChange(textField.stringValue)
+        }
+
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            textField?.currentEditor()?.selectAll(nil)
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            // Defer until AppKit/SwiftUI have finished their responder and hierarchy updates.
+            // A normal blur leaves the field attached and commits. Teardown behavior is chosen by
+            // the caller so a document title can save during navigation without changing tree edits.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let textField = self.textField,
+                      textField.window != nil, textField.superview != nil,
+                      !self.dismantling
+                else { return }
+                self.complete(commit: true)
+            }
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                complete(commit: false)
+                control.window?.makeFirstResponder(nil)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                complete(commit: true)
+                control.window?.makeFirstResponder(nil)
+                return true
+            }
+            return false
+        }
+
+        private func complete(commit: Bool) {
+            guard !finished, !dismantling else { return }
+            finished = true
+            guard commit else {
+                parent.onCancel()
+                return
+            }
+            let value = (textField?.stringValue ?? parent.text)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.isEmpty {
+                parent.onCancel()
+            } else {
+                parent.onCommit(value)
+            }
+        }
     }
 }

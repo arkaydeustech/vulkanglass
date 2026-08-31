@@ -49,6 +49,30 @@ final class FileServiceTests: XCTestCase {
         XCTAssertTrue(FileService.index(at: root).isEmpty)
     }
 
+    func testContainedURLCanonicalizesTemporaryPathAliasesAndRejectsFinalSymlinkEscape() throws {
+        let parent = try temporaryDirectory()
+        let root = parent.appendingPathComponent("vault")
+        let outside = parent.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let existing = root.appendingPathComponent("Existing.md")
+        let outsideTarget = outside.appendingPathComponent("Target.md")
+        try "inside".write(to: existing, atomically: true, encoding: .utf8)
+        try "outside".write(to: outsideTarget, atomically: true, encoding: .utf8)
+
+        let contained = try FileService.containedURL(root: root, relativePath: "Existing.md")
+        XCTAssertEqual(contained.path, FileService.canonicalURL(existing).path)
+        XCTAssertTrue(contained.path.hasPrefix(FileService.canonicalURL(root).path + "/"))
+
+        let escape = root.appendingPathComponent("Escape.md")
+        try FileManager.default.createSymbolicLink(at: escape, withDestinationURL: outsideTarget)
+        XCTAssertThrowsError(try FileService.containedURL(root: root, relativePath: "Escape.md")) { error in
+            guard case FileServiceError.outsideRoot = error else {
+                return XCTFail("Expected outsideRoot, got \(error)")
+            }
+        }
+    }
+
     func testIndexUsesAnchoredRelativePathAndSkipsUnreadableEncoding() throws {
         let parent = try temporaryDirectory()
         let root = parent.appendingPathComponent("vault")

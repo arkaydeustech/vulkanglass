@@ -146,6 +146,7 @@ struct NoteTab: Identifiable, Equatable, Sendable {
     var content: String
     var originalContent: String
     var isStandalone: Bool
+    var editorMode: EditorMode = .preview
 
     var dirty: Bool { content != originalContent }
 }
