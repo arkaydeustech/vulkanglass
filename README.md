@@ -26,7 +26,34 @@ For other Debug launch methods, pass `--disable-auth` as a launch argument or se
 `VULKANGLASS_DISABLE_AUTH=1` in the scheme environment. Both switches are compiled
 out of Release builds, so a shipped app always authenticates normally.
 
+To build a Release app and install it in `/Applications`, replacing an existing
+copy of Vulkan Glass there, run:
+
+```bash
+python3 scripts/install.py
+```
+
+The installer asks the copy running from `/Applications` to quit, waits for it to
+close, and leaves the installed app closed. If Vulkan Glass declines to quit (for
+example, because unsaved changes could not be written), installation stops without
+force-quitting it. Save or discard those changes, quit the app, and rerun the command.
+
+Run the installer from an administrator account when installing into `/Applications`.
+Do not run the entire script with `sudo`; build and app-termination work must remain
+in your login session. If needed, install into a writable per-user directory instead:
+
+```bash
+mkdir -p ~/Applications
+python3 scripts/install.py --applications-dir ~/Applications
+```
+
 ## Tests
+
+Run the installer unit tests with:
+
+```bash
+python3 -m unittest scripts.test_install
+```
 
 The generated project includes the `VulkanGlassTests` XCTest target:
 
