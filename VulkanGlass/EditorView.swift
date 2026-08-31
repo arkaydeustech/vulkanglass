@@ -287,6 +287,12 @@ struct SourceEditor: NSViewRepresentable {
 /// Forwards movement keys to wiki-link completion while the popup is open.
 final class SourceTextView: NSTextView {
     private static let legacyStringPasteboardType = NSPasteboard.PasteboardType("NSStringPboardType")
+    private static let maximumRichPasteboardBytes = 2 * 1_024 * 1_024
+    private static let richPasteboardTypes: [(NSPasteboard.PasteboardType, NSAttributedString.DocumentType)] = [
+        (.html, .html),
+        (.rtf, .rtf),
+        (.rtfd, .rtfd),
+    ]
     static let tableControlThickness: CGFloat = 28
 
     weak var wikiHandler: WikiLinkKeyHandling?
@@ -393,15 +399,14 @@ final class SourceTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
-        pastePlainText(from: .general)
+        pasteMarkdown(from: .general)
     }
 
-    /// Inserts a pasteboard's plain-text representation through the normal text-system
-    /// change hooks. Both the Edit menu (including its keyboard shortcut) and the
-    /// contextual Paste item arrive through `paste(_:)` above.
+    /// Converts rich clipboard content to Markdown, with plain Markdown text as a fallback,
+    /// and inserts it through the normal text-system change hooks.
     @discardableResult
-    func pastePlainText(from pasteboard: NSPasteboard) -> Bool {
-        guard isEditable, let pastedText = plainText(from: pasteboard) else { return false }
+    func pasteMarkdown(from pasteboard: NSPasteboard) -> Bool {
+        guard isEditable, let pastedText = markdownText(from: pasteboard) else { return false }
         let replacementRange = selectedRange()
         guard shouldChangeText(in: replacementRange, replacementString: pastedText) else { return false }
 
@@ -420,7 +425,17 @@ final class SourceTextView: NSTextView {
     override var writablePasteboardTypes: [NSPasteboard.PasteboardType] { [.string] }
 
     override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
-        [.string, Self.legacyStringPasteboardType]
+        Self.richPasteboardTypes.map(\.0) + [.string, Self.legacyStringPasteboardType]
+    }
+
+    override func readSelection(
+        from pasteboard: NSPasteboard,
+        type: NSPasteboard.PasteboardType
+    ) -> Bool {
+        if Self.richPasteboardTypes.contains(where: { $0.0 == type }) {
+            return pasteMarkdown(from: pasteboard)
+        }
+        return super.readSelection(from: pasteboard, type: type)
     }
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
@@ -441,11 +456,39 @@ final class SourceTextView: NSTextView {
         return true
     }
 
+    private func markdownText(from pasteboard: NSPasteboard) -> String? {
+        for (pasteboardType, documentType) in Self.richPasteboardTypes {
+            if let data = pasteboard.data(forType: pasteboardType) {
+                guard data.count <= Self.maximumRichPasteboardBytes else { break }
+                guard let markdown = RichTextMarkdownConverter.markdown(
+                    from: data,
+                    documentType: documentType
+                ) else { continue }
+                if let plain = plainText(from: pasteboard) {
+                    return markdownPreservingBoundaryWhitespace(markdown, from: plain)
+                }
+                return markdown
+            }
+        }
+        return plainText(from: pasteboard)
+    }
+
     private func plainText(from pasteboard: NSPasteboard) -> String? {
-        for type in readablePasteboardTypes {
+        for type in [NSPasteboard.PasteboardType.string, Self.legacyStringPasteboardType] {
             if let text = pasteboard.string(forType: type) { return text }
         }
         return nil
+    }
+
+    private func markdownPreservingBoundaryWhitespace(_ markdown: String, from plainText: String) -> String {
+        guard let firstContent = plainText.firstIndex(where: { !$0.isWhitespace }),
+              let lastContent = plainText.lastIndex(where: { !$0.isWhitespace }) else {
+            return markdown
+        }
+        let leading = plainText[..<firstContent]
+        let trailing = plainText[plainText.index(after: lastContent)...]
+        let body = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(leading) + body + String(trailing)
     }
 
     override func changeFont(_ sender: Any?) {}

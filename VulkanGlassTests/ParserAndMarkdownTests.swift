@@ -879,6 +879,212 @@ final class LivePreviewTests: XCTestCase {
 }
 
 @MainActor
+final class RichTextMarkdownConverterTests: XCTestCase {
+    func testPreservesBoundaryWhitespaceFromHTMLAndRTF() throws {
+        let htmlPasteboard = makePasteboard()
+        htmlPasteboard.setData(Data("<span> word </span>".utf8), forType: .html)
+        htmlPasteboard.setString(" word ", forType: .string)
+        defer { htmlPasteboard.clearContents() }
+
+        let htmlView = SourceTextView()
+        htmlView.string = "AB"
+        htmlView.setSelectedRange(NSRange(location: 1, length: 0))
+        XCTAssertTrue(htmlView.pasteMarkdown(from: htmlPasteboard))
+        XCTAssertEqual(htmlView.string, "A word B")
+
+        let rtfPasteboard = makePasteboard()
+        let attributed = NSAttributedString(string: " word ")
+        rtfPasteboard.setData(try data(from: attributed, as: .rtf), forType: .rtf)
+        rtfPasteboard.setString(" word ", forType: .string)
+        defer { rtfPasteboard.clearContents() }
+
+        let rtfView = SourceTextView()
+        rtfView.string = "AB"
+        rtfView.setSelectedRange(NSRange(location: 1, length: 0))
+        XCTAssertTrue(rtfView.pasteMarkdown(from: rtfPasteboard))
+        XCTAssertEqual(rtfView.string, "A word B")
+    }
+
+    func testPlainParagraphsNeutralizeMarkdownBlockMarkers() {
+        let source = NSAttributedString(string: "1. Introduction\n1) Appendix\n# literal\n- literal\n---")
+        XCTAssertEqual(
+            RichTextMarkdownConverter.markdown(from: source),
+            "1\\. Introduction\n\n1\\) Appendix\n\n\\# literal\n\n\\- literal\n\n\\---"
+        )
+    }
+
+    func testOrdinaryProsePunctuationIsNotNeedlesslyEscaped() {
+        let prose = "Our state-of-the-art plan uses file_name and issue #1"
+        XCTAssertEqual(
+            RichTextMarkdownConverter.markdown(from: NSAttributedString(string: prose)),
+            prose
+        )
+    }
+
+    func testAttachmentsAreRemovedWithoutLeavingObjectReplacementCharacters() throws {
+        let attributed = NSMutableAttributedString(string: "a")
+        attributed.append(NSAttributedString(attachment: NSTextAttachment()))
+        attributed.append(NSAttributedString(string: "b"))
+        let converted = RichTextMarkdownConverter.markdown(from: attributed)
+        XCTAssertEqual(converted, "ab")
+        XCTAssertFalse(converted.contains("\u{FFFC}"))
+
+        let mixedHTML = Data(#"<p>a<img src="https://example.com/x.png">b</p>"#.utf8)
+        let mixedConversion = try XCTUnwrap(
+            RichTextMarkdownConverter.markdown(from: mixedHTML, documentType: .html)
+        )
+        XCTAssertEqual(mixedConversion, "ab")
+        XCTAssertFalse(mixedConversion.contains("\u{FFFC}"))
+
+        let pasteboard = makePasteboard()
+        pasteboard.setData(Data(#"<img src="https://example.com/x.png">"#.utf8), forType: .html)
+        pasteboard.setString("image fallback", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(textView.string, "image fallback")
+    }
+
+    func testUTF8HTMLWithoutCharsetPreservesUnicode() throws {
+        let html = "<p>café — “quoted”</p>"
+        XCTAssertEqual(
+            try XCTUnwrap(RichTextMarkdownConverter.markdown(from: Data(html.utf8), documentType: .html)),
+            "café — “quoted”"
+        )
+    }
+
+    func testExplicitHTMLCharsetIsNotOverridden() {
+        let unspecified = RichTextMarkdownConverter.readingOptions(
+            for: Data("<p>café</p>".utf8),
+            documentType: .html
+        )
+        XCTAssertEqual(
+            unspecified[.characterEncoding] as? UInt,
+            String.Encoding.utf8.rawValue
+        )
+
+        let declared = RichTextMarkdownConverter.readingOptions(
+            for: Data(#"<meta charset="windows-1252"><p>text</p>"#.utf8),
+            documentType: .html
+        )
+        XCTAssertNil(declared[.characterEncoding])
+    }
+
+    func testNestedOrderedListsCodeBlocksSeparatorsAndLinkEscaping() throws {
+        let listHTML = "<ol><li>First<ol><li>Nested</li></ol></li><li>Second</li></ol>"
+        let listMarkdown = try XCTUnwrap(
+            RichTextMarkdownConverter.markdown(from: Data(listHTML.utf8), documentType: .html)
+        )
+        XCTAssertEqual(listMarkdown, "1. First\n  1. Nested\n1. Second")
+
+        let codeStyle = NSMutableParagraphStyle()
+        codeStyle.paragraphSpacing = 0
+        let code = NSMutableAttributedString(string: "let x = 1\nprint(x)")
+        code.addAttributes([
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            .paragraphStyle: codeStyle,
+        ], range: NSRange(location: 0, length: code.length))
+        XCTAssertEqual(
+            RichTextMarkdownConverter.markdown(from: code),
+            "```\nlet x = 1\nprint(x)\n```"
+        )
+
+        let linked = NSMutableAttributedString(string: "First\nLink\nLast")
+        linked.addAttribute(
+            .link,
+            value: "https://example.com/a b(c)",
+            range: NSRange(location: 6, length: 4)
+        )
+        XCTAssertEqual(
+            RichTextMarkdownConverter.markdown(from: linked),
+            "First\n\n[Link](https://example.com/a%20b\\(c\\))\n\nLast"
+        )
+    }
+
+    func testRTFAndRTFDPasteRepresentationsConvertFormatting() throws {
+        let bold = NSMutableAttributedString(string: "Bold")
+        bold.addAttribute(
+            .font,
+            value: NSFont.boldSystemFont(ofSize: 13),
+            range: NSRange(location: 0, length: bold.length)
+        )
+
+        for (pasteboardType, documentType) in [
+            (NSPasteboard.PasteboardType.rtf, NSAttributedString.DocumentType.rtf),
+            (.rtfd, .rtfd),
+        ] {
+            let pasteboard = makePasteboard()
+            pasteboard.setData(try data(from: bold, as: documentType), forType: pasteboardType)
+            pasteboard.setString("fallback", forType: .string)
+
+            let textView = SourceTextView()
+            XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+            XCTAssertEqual(textView.string, "**Bold**")
+            pasteboard.clearContents()
+        }
+    }
+
+    func testRichSelectionReadingUsesMarkdownConversion() {
+        let pasteboard = makePasteboard()
+        pasteboard.setData(Data("<p><strong>Dragged</strong></p>".utf8), forType: .html)
+        pasteboard.setString("Dragged", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        textView.string = "AB"
+        textView.setSelectedRange(NSRange(location: 1, length: 0))
+        XCTAssertTrue(textView.readSelection(from: pasteboard, type: .html))
+        XCTAssertEqual(textView.string, "A**Dragged**B")
+    }
+
+    func testOversizedRichPayloadFallsBackToPlainText() {
+        let pasteboard = makePasteboard()
+        pasteboard.setData(Data(repeating: 0x20, count: 2 * 1_024 * 1_024 + 1), forType: .html)
+        pasteboard.setString("plain fallback", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(textView.string, "plain fallback")
+    }
+
+    func testHTMLReadingOptionsInstallAResourceBlockingDelegate() throws {
+        let options = RichTextMarkdownConverter.readingOptions(
+            for: Data("<p>text</p>".utf8),
+            documentType: .html
+        )
+        let delegate = try XCTUnwrap(
+            options[.webResourceLoadDelegate] as? RichTextMarkdownConverter.BlockingResourceLoadDelegate
+        )
+        let request = try XCTUnwrap(URLRequest(url: URL(string: "https://example.com/image.png")!))
+        XCTAssertNil(delegate.rejectExternalResource(
+            NSObject(),
+            resource: NSObject(),
+            request: request,
+            redirectResponse: nil,
+            dataSource: NSObject()
+        ))
+    }
+
+    private func makePasteboard() -> NSPasteboard {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        return pasteboard
+    }
+
+    private func data(
+        from attributed: NSAttributedString,
+        as documentType: NSAttributedString.DocumentType
+    ) throws -> Data {
+        try attributed.data(
+            from: NSRange(location: 0, length: attributed.length),
+            documentAttributes: [.documentType: documentType]
+        )
+    }
+}
+
+@MainActor
 final class EditorLifecycleTests: XCTestCase {
     func testPasteInsertsMarkdownAtTheCaretAndNotifiesTheEditor() {
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
@@ -893,7 +1099,7 @@ final class EditorLifecycleTests: XCTestCase {
         textView.string = "Before  after"
         textView.setSelectedRange(NSRange(location: 7, length: 0))
 
-        XCTAssertTrue(textView.pastePlainText(from: pasteboard))
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
         XCTAssertEqual(textView.string, "Before # Pasted\n\n- markdown after")
         XCTAssertEqual(textView.selectedRange(), NSRange(location: 27, length: 0))
         XCTAssertEqual(changes.last, textView.string)
@@ -909,7 +1115,7 @@ final class EditorLifecycleTests: XCTestCase {
         textView.string = "Replace old text"
         textView.setSelectedRange(NSRange(location: 8, length: 3))
 
-        XCTAssertTrue(textView.pastePlainText(from: pasteboard))
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
         XCTAssertEqual(textView.string, "Replace **new** text")
         XCTAssertEqual(textView.selectedRange(), NSRange(location: 15, length: 0))
     }
@@ -924,8 +1130,46 @@ final class EditorLifecycleTests: XCTestCase {
         textView.string = "Unchanged"
         textView.setSelectedRange(NSRange(location: 9, length: 0))
 
-        XCTAssertFalse(textView.pastePlainText(from: pasteboard))
+        XCTAssertFalse(textView.pasteMarkdown(from: pasteboard))
         XCTAssertEqual(textView.string, "Unchanged")
+    }
+
+    func testPastePrefersChromeHTMLAndConvertsFormattingToMarkdown() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let html = """
+        <h2>Release notes</h2>
+        <p>Use <strong>bold</strong>, <em>italics</em>, and <a href="https://example.com/docs">links</a>.</p>
+        <ul><li>First item</li><li>Run <code>swift test</code></li></ul>
+        """
+        pasteboard.setData(Data(html.utf8), forType: .html)
+        pasteboard.setString("Release notes Use bold, italics, and links. First item Run swift test", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        var changes: [String] = []
+        let coordinator = SourceEditor.Coordinator(onChange: { changes.append($0) })
+        let textView = SourceTextView()
+        textView.delegate = coordinator
+
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(
+            textView.string,
+            "## Release notes\n\nUse **bold**, *italics*, and [links](https://example.com/docs).\n\n- First item\n- Run `swift test`"
+        )
+        XCTAssertEqual(changes.last, textView.string)
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: (textView.string as NSString).length, length: 0))
+    }
+
+    func testPasteFallsBackToPlainTextWhenRichRepresentationIsInvalid() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.setData(Data([0xFF, 0xFE, 0x00]), forType: .html)
+        pasteboard.setString("**existing markdown**", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(textView.string, "**existing markdown**")
     }
 
     func testEditorContextMenuRoutesPasteToTheNativePasteAction() throws {
