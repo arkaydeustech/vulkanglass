@@ -114,6 +114,7 @@ final class GitHubCLIServiceTests: XCTestCase {
         let settings = try JSONDecoder().decode(AppSettings.self, from: json)
         XCTAssertTrue(settings.useGitHubCLI)
         XCTAssertFalse(settings.loadRemoteImages)
+        XCTAssertEqual(settings.appearanceMode, .dark)
         XCTAssertEqual(settings.vaultsRoot, "/tmp/vaults")
         XCTAssertEqual(settings.rightSidebarWidth, VGTheme.sidebarWidth)
     }
@@ -126,6 +127,79 @@ final class GitHubCLIServiceTests: XCTestCase {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
         XCTAssertFalse(decoded.useGitHubCLI)
         XCTAssertTrue(decoded.loadRemoteImages)
+        XCTAssertEqual(decoded.appearanceMode, .inherit)
+    }
+
+    func testSettingsRoundTripPreservesExplicitAppearanceModes() throws {
+        for appearanceMode in [AppearanceMode.light, .dark] {
+            var settings = AppSettings.default()
+            settings.appearanceMode = appearanceMode
+
+            let data = try JSONEncoder().encode(settings)
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
+
+            XCTAssertEqual(decoded.appearanceMode, appearanceMode)
+        }
+    }
+
+    func testAppearanceModeWinsOverConflictingLegacyDarkMode() throws {
+        let json = """
+        {
+          "recentVaults": [],
+          "vaultsRoot": "/tmp/vaults",
+          "autoSync": true,
+          "appearanceMode": "light",
+          "darkMode": true
+        }
+        """.data(using: .utf8)!
+
+        let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+
+        XCTAssertEqual(settings.appearanceMode, .light)
+    }
+
+    func testEncodedSettingsRemainReadableByPreviousDecoder() throws {
+        var settings = AppSettings.default()
+        settings.recentVaults = [
+            RecentVault(
+                name: "Notes",
+                path: "/tmp/notes",
+                remote: "git@example.com:notes.git",
+                lastOpened: 42
+            )
+        ]
+        settings.vaultsRoot = "/tmp/vaults"
+        settings.autoSync = false
+        settings.appearanceMode = .dark
+        settings.useGitHubCLI = false
+        settings.loadRemoteImages = true
+        settings.leftSidebarWidth = 222
+        settings.rightSidebarWidth = 333
+
+        let data = try JSONEncoder().encode(settings)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let legacy = try JSONDecoder().decode(LegacyAppSettings.self, from: data)
+
+        XCTAssertEqual(json["appearanceMode"] as? String, "dark")
+        XCTAssertEqual(json["darkMode"] as? Bool, true)
+        XCTAssertEqual(legacy.recentVaults, settings.recentVaults)
+        XCTAssertEqual(legacy.vaultsRoot, settings.vaultsRoot)
+        XCTAssertEqual(legacy.autoSync, settings.autoSync)
+        XCTAssertTrue(legacy.darkMode)
+        XCTAssertEqual(legacy.useGitHubCLI, settings.useGitHubCLI)
+        XCTAssertEqual(legacy.loadRemoteImages, settings.loadRemoteImages)
+        XCTAssertEqual(legacy.leftSidebarWidth, settings.leftSidebarWidth)
+        XCTAssertEqual(legacy.rightSidebarWidth, settings.rightSidebarWidth)
+    }
+
+    func testLegacyLightAppearanceMigratesToExplicitLight() throws {
+        let json = """
+        {"recentVaults":[],"vaultsRoot":"/tmp/vaults","autoSync":true,"darkMode":false}
+        """.data(using: .utf8)!
+
+        let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+
+        XCTAssertEqual(settings.appearanceMode, .light)
     }
 
     func testMissingTokenErrorMentionsGitHubCLI() {
@@ -139,4 +213,15 @@ final class GitHubCLIServiceTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
     }
+}
+
+private struct LegacyAppSettings: Decodable {
+    var recentVaults: [RecentVault]
+    var vaultsRoot: String
+    var autoSync: Bool
+    var darkMode: Bool
+    var useGitHubCLI: Bool
+    var loadRemoteImages: Bool
+    var leftSidebarWidth: CGFloat
+    var rightSidebarWidth: CGFloat
 }

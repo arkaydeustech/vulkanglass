@@ -72,7 +72,6 @@ struct WorkspaceView: View {
             StatusBarView()
         }
         .background(VGTheme.backgroundPrimary(dark: model.dark))
-        .preferredColorScheme(model.dark ? .dark : .light)
         .alert(
             "Vulkan Glass",
             isPresented: Binding(
@@ -303,8 +302,19 @@ struct RootView: View {
                     .padding(8)
                     .background(.ultraThinMaterial)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .padding(.bottom, 36)
+                .padding(.bottom, 36)
             }
+        }
+        .preferredColorScheme(model.settings.appearanceMode.preferredColorScheme)
+    }
+}
+
+extension AppearanceMode {
+    var preferredColorScheme: ColorScheme? {
+        switch self {
+        case .inherit: nil
+        case .light: .light
+        case .dark: .dark
         }
     }
 }

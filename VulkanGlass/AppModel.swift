@@ -65,6 +65,30 @@ enum DevelopmentAuthentication {
     }
 }
 
+@MainActor
+struct SystemAppearanceProvider {
+    var currentDarkMode: () -> Bool
+    var observeDarkMode: (@escaping @MainActor @Sendable (Bool) -> Void) -> NSKeyValueObservation?
+
+    static let live = SystemAppearanceProvider(
+        currentDarkMode: {
+            isDark(NSApplication.shared.effectiveAppearance)
+        },
+        observeDarkMode: { handler in
+            let application = NSApplication.shared
+            return application.observe(\.effectiveAppearance, options: [.new]) { _, change in
+                guard let appearance = change.newValue else { return }
+                let isDarkMode = isDark(appearance)
+                Task { @MainActor in handler(isDarkMode) }
+            }
+        }
+    )
+
+    nonisolated static func isDark(_ appearance: NSAppearance) -> Bool {
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+}
+
 /// Central application state for vaults, tabs, and GitHub sync.
 @MainActor
 @Observable
@@ -94,12 +118,19 @@ final class AppModel {
     var busyMessage: String?
     var githubCLIStatus = GitHubCLIStatus()
     var githubAuthSource: GitHubAuthSource?
+    private(set) var systemDarkMode: Bool
 
     /// True when this launch runs local-only: no Keychain, no `gh`, no GitHub network calls.
     var authenticationDisabled: Bool { dependencies.authenticationDisabled() }
 
     var inWorkspace: Bool { vault != nil || !tabs.isEmpty }
-    var dark: Bool { settings.darkMode }
+    var dark: Bool {
+        switch settings.appearanceMode {
+        case .inherit: systemDarkMode
+        case .light: false
+        case .dark: true
+        }
+    }
     var token: String? { activeToken }
     var gitCredential: GitCredential? {
         guard let activeToken, let githubAuthSource else { return nil }
@@ -115,6 +146,7 @@ final class AppModel {
     private var activeToken: String?
     private let dependencies: AppModelDependencies
     private var githubConnectionGeneration = 0
+    @ObservationIgnored private var systemAppearanceObservation: NSKeyValueObservation?
 
     var activeTab: NoteTab? { tabs.first { $0.id == activeTabID } }
     var wordCount: Int { Markdown.wordCount(activeTab?.content ?? "") }
@@ -124,14 +156,27 @@ final class AppModel {
 
     init(
         settings: AppSettings? = nil,
+        systemDarkMode: Bool? = nil,
         bootstrapOnLaunch: Bool = true,
-        dependencies: AppModelDependencies = .live
+        dependencies: AppModelDependencies = .live,
+        systemAppearanceProvider: SystemAppearanceProvider? = nil
     ) {
+        let appearanceProvider = systemAppearanceProvider ?? .live
         self.settings = settings ?? SettingsStore.load()
+        self.systemDarkMode = systemDarkMode ?? appearanceProvider.currentDarkMode()
         self.dependencies = dependencies
+        if systemDarkMode == nil {
+            systemAppearanceObservation = appearanceProvider.observeDarkMode { [weak self] isDark in
+                self?.updateSystemDarkMode(isDark)
+            }
+        }
         if bootstrapOnLaunch {
             Task { await bootstrap() }
         }
+    }
+
+    func updateSystemDarkMode(_ isDark: Bool) {
+        systemDarkMode = isDark
     }
 
     /// Loads GitHub identity from GitHub CLI or a saved PAT, then opens `--vault`.

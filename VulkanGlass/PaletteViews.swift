@@ -198,13 +198,14 @@ struct SettingsSheet: View {
             HStack {
                 Text("Appearance")
                 Spacer()
-                Picker("", selection: Bindable(model).settings.darkMode) {
-                    Text("Dark").tag(true)
-                    Text("Light").tag(false)
+                Picker("", selection: Bindable(model).settings.appearanceMode) {
+                    Text("Inherit").tag(AppearanceMode.inherit)
+                    Text("Light").tag(AppearanceMode.light)
+                    Text("Dark").tag(AppearanceMode.dark)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 160)
-                .onChange(of: model.settings.darkMode) { _, _ in
+                .frame(width: 240)
+                .onChange(of: model.settings.appearanceMode) { _, _ in
                     SettingsStore.save(model.settings)
                 }
             }

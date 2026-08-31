@@ -1,5 +1,11 @@
 import Foundation
 
+enum AppearanceMode: String, Codable, CaseIterable, Sendable {
+    case inherit
+    case light
+    case dark
+}
+
 struct RecentVault: Codable, Identifiable, Hashable, Sendable {
     var id: String { path }
     var name: String
@@ -12,7 +18,7 @@ struct AppSettings: Codable, Sendable {
     var recentVaults: [RecentVault]
     var vaultsRoot: String
     var autoSync: Bool
-    var darkMode: Bool
+    var appearanceMode: AppearanceMode
     var useGitHubCLI: Bool
     var loadRemoteImages: Bool
     var leftSidebarWidth: CGFloat
@@ -25,7 +31,7 @@ struct AppSettings: Codable, Sendable {
             recentVaults: [],
             vaultsRoot: root,
             autoSync: true,
-            darkMode: true,
+            appearanceMode: .inherit,
             useGitHubCLI: true,
             loadRemoteImages: false,
             leftSidebarWidth: VGTheme.sidebarWidth,
@@ -37,7 +43,7 @@ struct AppSettings: Codable, Sendable {
         recentVaults: [RecentVault],
         vaultsRoot: String,
         autoSync: Bool,
-        darkMode: Bool,
+        appearanceMode: AppearanceMode = .inherit,
         useGitHubCLI: Bool = true,
         loadRemoteImages: Bool = false,
         leftSidebarWidth: CGFloat = VGTheme.sidebarWidth,
@@ -46,7 +52,7 @@ struct AppSettings: Codable, Sendable {
         self.recentVaults = recentVaults
         self.vaultsRoot = vaultsRoot
         self.autoSync = autoSync
-        self.darkMode = darkMode
+        self.appearanceMode = appearanceMode
         self.useGitHubCLI = useGitHubCLI
         self.loadRemoteImages = loadRemoteImages
         self.leftSidebarWidth = leftSidebarWidth
@@ -58,11 +64,44 @@ struct AppSettings: Codable, Sendable {
         recentVaults = try container.decode([RecentVault].self, forKey: .recentVaults)
         vaultsRoot = try container.decode(String.self, forKey: .vaultsRoot)
         autoSync = try container.decode(Bool.self, forKey: .autoSync)
-        darkMode = try container.decode(Bool.self, forKey: .darkMode)
+        if let savedAppearance = try container.decodeIfPresent(AppearanceMode.self, forKey: .appearanceMode) {
+            appearanceMode = savedAppearance
+        } else if let legacyDarkMode = try container.decodeIfPresent(Bool.self, forKey: .darkMode) {
+            appearanceMode = legacyDarkMode ? .dark : .light
+        } else {
+            appearanceMode = .inherit
+        }
         useGitHubCLI = try container.decodeIfPresent(Bool.self, forKey: .useGitHubCLI) ?? true
         loadRemoteImages = try container.decodeIfPresent(Bool.self, forKey: .loadRemoteImages) ?? false
         leftSidebarWidth = try container.decodeIfPresent(CGFloat.self, forKey: .leftSidebarWidth) ?? VGTheme.sidebarWidth
         rightSidebarWidth = try container.decodeIfPresent(CGFloat.self, forKey: .rightSidebarWidth) ?? VGTheme.sidebarWidth
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(recentVaults, forKey: .recentVaults)
+        try container.encode(vaultsRoot, forKey: .vaultsRoot)
+        try container.encode(autoSync, forKey: .autoSync)
+        try container.encode(appearanceMode, forKey: .appearanceMode)
+        // Keep settings readable by the previous release during the migration window.
+        // Inherit has no legacy representation, so use the non-dark fallback.
+        try container.encode(appearanceMode == .dark, forKey: .darkMode)
+        try container.encode(useGitHubCLI, forKey: .useGitHubCLI)
+        try container.encode(loadRemoteImages, forKey: .loadRemoteImages)
+        try container.encode(leftSidebarWidth, forKey: .leftSidebarWidth)
+        try container.encode(rightSidebarWidth, forKey: .rightSidebarWidth)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case recentVaults
+        case vaultsRoot
+        case autoSync
+        case appearanceMode
+        case darkMode
+        case useGitHubCLI
+        case loadRemoteImages
+        case leftSidebarWidth
+        case rightSidebarWidth
     }
 }
 

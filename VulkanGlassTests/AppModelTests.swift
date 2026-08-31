@@ -1,8 +1,93 @@
 import XCTest
+import AppKit
+import SwiftUI
 @testable import VulkanGlass
 
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testDefaultAppearanceInheritsDarkSystemMode() {
+        let model = AppModel(
+            settings: .default(),
+            systemDarkMode: true,
+            bootstrapOnLaunch: false
+        )
+
+        XCTAssertEqual(model.settings.appearanceMode, .inherit)
+        XCTAssertTrue(model.dark)
+    }
+
+    func testDefaultAppearanceInheritsLightSystemMode() {
+        let model = AppModel(
+            settings: .default(),
+            systemDarkMode: false,
+            bootstrapOnLaunch: false
+        )
+
+        XCTAssertEqual(model.settings.appearanceMode, .inherit)
+        XCTAssertFalse(model.dark)
+    }
+
+    func testExplicitAppearanceIgnoresSystemMode() {
+        var settings = AppSettings.default()
+        settings.appearanceMode = .light
+        let model = AppModel(
+            settings: settings,
+            systemDarkMode: true,
+            bootstrapOnLaunch: false
+        )
+        XCTAssertFalse(model.dark)
+
+        model.settings.appearanceMode = .dark
+        model.updateSystemDarkMode(false)
+        XCTAssertTrue(model.dark)
+    }
+
+    func testDefaultAppearanceUsesSystemValueBeforeRootViewAppears() {
+        let feed = SystemAppearanceFeed(currentDarkMode: true)
+        let model = AppModel(
+            settings: .default(),
+            bootstrapOnLaunch: false,
+            systemAppearanceProvider: feed.provider
+        )
+
+        XCTAssertTrue(model.systemDarkMode)
+        XCTAssertTrue(model.dark)
+        XCTAssertNotNil(feed.handler)
+    }
+
+    func testSystemAppearanceKeepsTrackingWhileExplicitOverrideIsActive() {
+        let feed = SystemAppearanceFeed(currentDarkMode: false)
+        let model = AppModel(
+            settings: .default(),
+            bootstrapOnLaunch: false,
+            systemAppearanceProvider: feed.provider
+        )
+        model.settings.appearanceMode = .dark
+
+        feed.send(isDark: true)
+        XCTAssertTrue(model.dark)
+
+        model.settings.appearanceMode = .inherit
+        XCTAssertTrue(model.dark)
+
+        feed.send(isDark: false)
+        XCTAssertFalse(model.dark)
+    }
+
+    func testSystemAppearanceProviderClassifiesAquaAppearances() throws {
+        let light = try XCTUnwrap(NSAppearance(named: .aqua))
+        let dark = try XCTUnwrap(NSAppearance(named: .darkAqua))
+
+        XCTAssertFalse(SystemAppearanceProvider.isDark(light))
+        XCTAssertTrue(SystemAppearanceProvider.isDark(dark))
+    }
+
+    func testRootViewAppearancePreferenceMapsEveryMode() {
+        XCTAssertNil(AppearanceMode.inherit.preferredColorScheme)
+        XCTAssertEqual(AppearanceMode.light.preferredColorScheme, ColorScheme.light)
+        XCTAssertEqual(AppearanceMode.dark.preferredColorScheme, ColorScheme.dark)
+    }
+
     func testDevelopmentAuthenticationCanBeDisabledForAutomatedLaunches() {
         XCTAssertTrue(DevelopmentAuthentication.isDisabled(environment: [:], arguments: ["VulkanGlass", "--disable-auth"]))
         XCTAssertTrue(DevelopmentAuthentication.isDisabled(environment: ["VULKANGLASS_DISABLE_AUTH": "yes"], arguments: []))
@@ -478,5 +563,30 @@ final class AppModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+}
+
+@MainActor
+private final class SystemAppearanceFeed {
+    var currentDarkMode: Bool
+    var handler: (@MainActor @Sendable (Bool) -> Void)?
+
+    init(currentDarkMode: Bool) {
+        self.currentDarkMode = currentDarkMode
+    }
+
+    var provider: SystemAppearanceProvider {
+        SystemAppearanceProvider(
+            currentDarkMode: { [unowned self] in currentDarkMode },
+            observeDarkMode: { [unowned self] handler in
+                self.handler = handler
+                return nil
+            }
+        )
+    }
+
+    func send(isDark: Bool) {
+        currentDarkMode = isDark
+        handler?(isDark)
     }
 }

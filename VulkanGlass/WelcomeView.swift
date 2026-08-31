@@ -22,7 +22,6 @@ struct WelcomeView: View {
             Spacer()
         }
         .background(VGTheme.backgroundPrimary(dark: model.dark))
-        .preferredColorScheme(model.dark ? .dark : .light)
     }
 
     private var leftColumn: some View {
