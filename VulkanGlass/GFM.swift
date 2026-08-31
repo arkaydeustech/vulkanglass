@@ -7,6 +7,11 @@ enum GFM {
         var selectionOffset: Int
     }
 
+    struct HTMLTable: Equatable {
+        var rows: [[String]]
+        var hasHeader: Bool
+    }
+
     enum AlertKind: String, Equatable, CaseIterable {
         case note = "NOTE"
         case tip = "TIP"
@@ -49,7 +54,7 @@ enum GFM {
     }
 
     static func isTableSeparator(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isHorizontalRule(trimmed) else { return false }
         guard trimmed.contains("-") else { return false }
         let cells = splitTableRow(trimmed)
@@ -61,7 +66,7 @@ enum GFM {
     }
 
     static func looksLikeTableRow(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.contains("|") else { return false }
         if isHorizontalRule(trimmed) { return false }
         return splitTableRow(trimmed).count >= 2 || trimmed.hasPrefix("|")
@@ -70,34 +75,162 @@ enum GFM {
     static func splitTableRow(_ line: String) -> [String] {
         var cells: [String] = []
         var current = ""
-        var escaped = false
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        let body: Substring
-        if trimmed.hasPrefix("|") {
-            body = trimmed.dropFirst()
-        } else {
-            body = Substring(trimmed)
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        var start = trimmed.startIndex
+        var end = trimmed.endIndex
+        if start < end, trimmed[start] == "|" {
+            start = trimmed.index(after: start)
         }
-        let usable = body.hasSuffix("|") && !body.hasSuffix("\\|") ? body.dropLast() : body
-        for ch in usable {
-            if escaped {
-                current.append(ch)
-                escaped = false
-            } else if ch == "\\" {
-                escaped = true
-            } else if ch == "|" {
+        if start < end {
+            let last = trimmed.index(before: end)
+            if trimmed[last] == "|", !isEscapedPipe(at: last, in: trimmed) {
+                end = last
+            }
+        }
+
+        var index = start
+        while index < end {
+            if trimmed[index] == "\\" {
+                let slashStart = index
+                while index < end, trimmed[index] == "\\" {
+                    index = trimmed.index(after: index)
+                }
+                let slashCount = trimmed.distance(from: slashStart, to: index)
+                if index < end, trimmed[index] == "|", !slashCount.isMultiple(of: 2) {
+                    current += String(repeating: "\\", count: slashCount - 1)
+                    current.append("|")
+                    index = trimmed.index(after: index)
+                } else {
+                    current += String(repeating: "\\", count: slashCount)
+                }
+                continue
+            }
+            if trimmed[index] == "|" {
                 cells.append(current)
                 current = ""
             } else {
-                current.append(ch)
+                current.append(trimmed[index])
             }
+            index = trimmed.index(after: index)
         }
         cells.append(current)
-        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+        return cells.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    static func normalizedTableRow(_ line: String, columnCount: Int) -> [String] {
+        guard columnCount > 0 else { return [] }
+        var cells = Array(splitTableRow(line).prefix(columnCount))
+        if cells.count < columnCount {
+            cells.append(contentsOf: repeatElement("", count: columnCount - cells.count))
+        }
+        return cells
+    }
+
+    /// Parses the raw HTML form GitHub recommends for tables without a header.
+    /// This intentionally handles table structure only; unsupported HTML remains source text.
+    static func parseHTMLTable(_ source: String) -> HTMLTable? {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.range(of: #"^<table(?:\s|>)"#, options: [.regularExpression, .caseInsensitive]) != nil,
+              trimmed.range(of: #"</table\s*>$"#, options: [.regularExpression, .caseInsensitive]) != nil
+        else { return nil }
+
+        let rowRegex = try! NSRegularExpression(
+            pattern: #"<tr(?:\s[^>]*)?>([\s\S]*?)</tr\s*>"#,
+            options: .caseInsensitive
+        )
+        let cellRegex = try! NSRegularExpression(
+            pattern: #"<(td|th)(?:\s[^>]*)?>([\s\S]*?)</\1\s*>"#,
+            options: .caseInsensitive
+        )
+        let ns = trimmed as NSString
+        var rows: [[String]] = []
+        var firstRowIsHeader = false
+        for rowMatch in rowRegex.matches(
+            in: trimmed,
+            range: NSRange(location: 0, length: ns.length)
+        ) {
+            let rowSource = ns.substring(with: rowMatch.range(at: 1))
+            let rowNS = rowSource as NSString
+            let matches = cellRegex.matches(
+                in: rowSource,
+                range: NSRange(location: 0, length: rowNS.length)
+            )
+            guard !matches.isEmpty else { continue }
+            if rows.isEmpty {
+                firstRowIsHeader = matches.allSatisfy {
+                    rowNS.substring(with: $0.range(at: 1)).caseInsensitiveCompare("th") == .orderedSame
+                }
+            }
+            rows.append(matches.map { htmlCellText(rowNS.substring(with: $0.range(at: 2))) })
+        }
+        guard !rows.isEmpty else { return nil }
+        let columns = rows.map(\.count).max() ?? 0
+        rows = rows.map { row in
+            var normalized = Array(row.prefix(columns))
+            normalized.append(contentsOf: repeatElement("", count: columns - normalized.count))
+            return normalized
+        }
+        return HTMLTable(rows: rows, hasHeader: firstRowIsHeader)
+    }
+
+    private static func isEscapedPipe(at index: String.Index, in text: String) -> Bool {
+        var cursor = index
+        var slashCount = 0
+        while cursor > text.startIndex {
+            let previous = text.index(before: cursor)
+            guard text[previous] == "\\" else { break }
+            slashCount += 1
+            cursor = previous
+        }
+        return !slashCount.isMultiple(of: 2)
+    }
+
+    private static func htmlCellText(_ source: String) -> String {
+        let withoutTags = source
+            .replacingOccurrences(of: #"<br\s*/?>"#, with: " ", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+        return decodeHTMLEntitiesOnce(withoutTags)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    /// Decodes each entity present in the source exactly once. In particular,
+    /// `&amp;lt;` becomes `&lt;`, not `<`.
+    private static func decodeHTMLEntitiesOnce(_ source: String) -> String {
+        let replacements = [
+            "amp": "&",
+            "lt": "<",
+            "gt": ">",
+            "quot": "\"",
+            "apos": "'",
+            "#39": "'"
+        ]
+        var result = ""
+        var index = source.startIndex
+        while index < source.endIndex {
+            guard source[index] == "&",
+                  let semicolon = source[index...].firstIndex(of: ";"),
+                  source.distance(from: index, to: semicolon) <= 8
+            else {
+                result.append(source[index])
+                index = source.index(after: index)
+                continue
+            }
+            let nameStart = source.index(after: index)
+            let name = String(source[nameStart..<semicolon])
+            if let replacement = replacements[name] {
+                result += replacement
+                index = source.index(after: semicolon)
+            } else {
+                result.append(source[index])
+                index = source.index(after: index)
+            }
+        }
+        return result
     }
 
     static func isHorizontalRule(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.range(of: #"^(\*{3,}|-{3,}|_{3,})$"#, options: .regularExpression) != nil
     }
 

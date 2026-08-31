@@ -36,6 +36,75 @@ final class InlineParserTests: XCTestCase {
             [.image(alt: "cell", url: "pic.png")]
         )
     }
+
+    func testGitHubTableInlineFormattingIsParsed() {
+        XCTAssertEqual(
+            InlineRunsView.parse("**bold** *italic* _also italic_ `git status` ~~old~~"),
+            [
+                .bold("bold"), .text(" "), .italic("italic"), .text(" "),
+                .italic("also italic"), .text(" "), .code("git status"), .text(" "),
+                .strikethrough("old")
+            ]
+        )
+        XCTAssertEqual(
+            InlineRunsView.parse("\\*literal\\* and ***important***"),
+            [.text("*literal* and "), .boldItalic("important")]
+        )
+    }
+
+    func testEmphasisDelimitersRespectWordAndWhitespaceBoundaries() {
+        for value in [
+            "snake_case_name",
+            "use my_file_name.md here",
+            "https://x.com/a_b_c/d_e",
+            "2 * 3 * 4",
+            "cost: 3*4 and 5*6",
+            "__init__",
+            "not _ italic_ or _italic _"
+        ] {
+            XCTAssertEqual(InlineRunsView.parse(value), [.text(value)], value)
+        }
+
+        XCTAssertEqual(InlineRunsView.parse("(_italic_)"), [.text("("), .italic("italic"), .text(")")])
+        XCTAssertEqual(InlineRunsView.parse("__two words__"), [.bold("two words")])
+    }
+
+    func testEscapedClosingDelimiterDoesNotEndEmphasis() {
+        XCTAssertEqual(
+            InlineRunsView.parse("*not closed\\*"),
+            [.text("*not closed*")]
+        )
+        XCTAssertEqual(
+            InlineRunsView.parse("*closed* and \\_literal\\_"),
+            [.italic("closed"), .text(" and _literal_")]
+        )
+    }
+
+    func testNestedEmphasisCombinesTextStyles() {
+        XCTAssertEqual(
+            InlineRunsView.parse("**bold and _italic_**"),
+            [.bold("bold and "), .boldItalic("italic")]
+        )
+        XCTAssertEqual(
+            InlineRunsView.parse("_italic and **bold**_"),
+            [.italic("italic and "), .boldItalic("bold")]
+        )
+    }
+
+    func testStyledTextRunsShareOneLayoutElement() {
+        let runs = InlineRunsView.parse("before **bold**, _italic_, and ~~old~~")
+        XCTAssertEqual(InlineRunsView.layoutGroups(for: runs), [.text(runs)])
+
+        let withCode = InlineRunsView.parse("before **bold** `code` after")
+        XCTAssertEqual(
+            InlineRunsView.layoutGroups(for: withCode),
+            [
+                .text([.text("before "), .bold("bold"), .text(" ")]),
+                .element(.code("code")),
+                .text([.text(" after")])
+            ]
+        )
+    }
 }
 
 final class MarkdownBlockTests: XCTestCase {
@@ -60,7 +129,7 @@ final class MarkdownBlockTests: XCTestCase {
         XCTAssertEqual(MDBlock.parse("> quoted"), [.quote(["quoted"])])
         XCTAssertEqual(
             MDBlock.parse("| A | B |\n| --- | --- |\n| 1 | 2 |"),
-            [.table([["A", "B"], ["1", "2"]], [.left, .left])]
+            [.table([["A", "B"], ["1", "2"]], [.left, .left], hasHeader: true)]
         )
         XCTAssertEqual(MDBlock.parse("## Heading"), [.heading(2, "Heading")])
         XCTAssertEqual(MDBlock.parse("1. first\n- second"), [.lines(["1. first", "- second"])])
@@ -72,6 +141,199 @@ final class MarkdownBlockTests: XCTestCase {
             MDBlock.parse("A | B\n| --- |\nnext"),
             [.lines(["A | B", "| --- |", "next"])]
         )
+    }
+
+    func testGitHubTableSyntaxAlignmentAndOptionalOuterPipes() {
+        XCTAssertEqual(
+            MDBlock.parse("Left | Centre | Right\n:--- | :---: | ---:\nA | B | C"),
+            [.table(
+                [["Left", "Centre", "Right"], ["A", "B", "C"]],
+                [.left, .center, .right],
+                hasHeader: true
+            )]
+        )
+        XCTAssertEqual(
+            MDBlock.parse("| Header |\n| --- |"),
+            [.table([["Header"]], [.left], hasHeader: true)]
+        )
+    }
+
+    func testGitHubTableRowsArePaddedOrTruncatedToTheHeader() {
+        XCTAssertEqual(
+            MDBlock.parse("| A | B |\n| --- | --- |\n| one |\n| 1 | 2 | ignored |"),
+            [.table(
+                [["A", "B"], ["one", ""], ["1", "2"]],
+                [.left, .left],
+                hasHeader: true
+            )]
+        )
+    }
+
+    func testEscapedPipesStayInsideCellsAndOtherEscapesArePreserved() {
+        XCTAssertEqual(
+            GFM.splitTableRow(#"| `A \| B` | \*literal\* |"#),
+            ["`A | B`", #"\*literal\*"#]
+        )
+        XCTAssertEqual(
+            MDBlock.parse("| Expression | Meaning |\n| --- | --- |\n| `A \\| B` | A or B |"),
+            [.table(
+                [["Expression", "Meaning"], ["`A | B`", "A or B"]],
+                [.left, .left],
+                hasHeader: true
+            )]
+        )
+    }
+
+    func testBlankLineEndsTableAndEmptyCellsAreRetained() {
+        XCTAssertEqual(
+            MDBlock.parse("Intro\n\n| Name | Email |\n| --- | --- |\n| Sam | |\n\nAfter | prose"),
+            [
+                .lines(["Intro"]),
+                .table(
+                    [["Name", "Email"], ["Sam", ""]],
+                    [.left, .left],
+                    hasHeader: true
+                ),
+                .lines(["After | prose"])
+            ]
+        )
+    }
+
+    func testHeaderlessHTMLTableUsesDataCells() {
+        let html = """
+        <table>
+          <tr>
+            <td>Row 1 Col 1</td>
+            <td>Row 1 Col 2</td>
+          </tr>
+          <tr>
+            <td>Row 2 Col 1</td>
+            <td>Row 2 Col 2</td>
+          </tr>
+        </table>
+        """
+        XCTAssertEqual(
+            MDBlock.parse(html),
+            [.table(
+                [["Row 1 Col 1", "Row 1 Col 2"], ["Row 2 Col 1", "Row 2 Col 2"]],
+                [.left, .left],
+                hasHeader: false
+            )]
+        )
+    }
+
+    func testHTMLTableHeadersAttributesRaggedRowsAndMixedCells() {
+        let headerTable = """
+        <table class="data">
+          <tr></tr>
+          <tr class="heading"><th scope="col">Name</th><th>Value</th></tr>
+          <tr><td>A</td></tr>
+        </table>
+        """
+        XCTAssertEqual(
+            GFM.parseHTMLTable(headerTable),
+            GFM.HTMLTable(rows: [["Name", "Value"], ["A", ""]], hasHeader: true)
+        )
+
+        let mixedTable = """
+        <table>
+          <tr><th>Name</th><td>Value</td></tr>
+          <tr><td>A</td><td>1</td></tr>
+        </table>
+        """
+        XCTAssertEqual(GFM.parseHTMLTable(mixedTable)?.hasHeader, false)
+        XCTAssertNil(GFM.parseHTMLTable("<table><tr><th>broken</td></tr></table>"))
+    }
+
+    func testHTMLCellTextDecodesEntitiesOnceAndNormalizesMarkup() {
+        let html = """
+        <table><tr><td>
+          Hello<br> <em>wide</em> world &amp;lt; &lt; &gt; &quot; &#39; &apos; &unknown;
+        </td></tr></table>
+        """
+        XCTAssertEqual(
+            GFM.parseHTMLTable(html)?.rows,
+            [["Hello wide world &lt; < > \" ' ' &unknown;"]]
+        )
+    }
+
+    func testHTMLTableStartsAfterProseWithoutARequiredBlankLine() {
+        let markdown = """
+        Intro
+        <table>
+        <tr><td>A</td></tr>
+        </table>
+        """
+        XCTAssertEqual(
+            MDBlock.parse(markdown),
+            [
+                .lines(["Intro"]),
+                .table([["A"]], [.left], hasHeader: false)
+            ]
+        )
+    }
+
+    func testHTMLTableScannerDoesNotConsumeProseOrCrossBlockBoundaries() {
+        let proseThenTable = """
+        <table> is an HTML element.
+
+        Keep this paragraph.
+
+        <table>
+        <tr><td>A</td></tr>
+        </table>
+        """
+        XCTAssertEqual(
+            MDBlock.parse(proseThenTable),
+            [
+                .lines(["<table> is an HTML element."]),
+                .lines(["Keep this paragraph."]),
+                .table([["A"]], [.left], hasHeader: false)
+            ]
+        )
+
+        let interrupted = """
+        <table>
+        <tr><td>A</td></tr>
+
+        Keep this paragraph.
+        </table>
+        """
+        XCTAssertEqual(
+            MDBlock.parse(interrupted),
+            [
+                .lines(["<table>", "<tr><td>A</td></tr>"]),
+                .lines(["Keep this paragraph.", "</table>"])
+            ]
+        )
+    }
+
+    func testMalformedAndFencedHTMLTablesRemainSourceText() {
+        XCTAssertEqual(
+            MDBlock.parse("<table>\n<tr><td>A</td></tr>"),
+            [.lines(["<table>", "<tr><td>A</td></tr>"])]
+        )
+        XCTAssertEqual(
+            MDBlock.parse("```html\n<table>\n<tr><td>A</td></tr>\n</table>\n```"),
+            [.code(language: "html", code: "<table>\n<tr><td>A</td></tr>\n</table>")]
+        )
+    }
+
+    func testCRLFTablesAndRulesAreRecognized() {
+        XCTAssertEqual(
+            MDBlock.parse("A | B\r\n--- | ---\r\n1 | 2\r\n\r\n---\r\n"),
+            [
+                .table([["A", "B"], ["1", "2"]], [.left, .left], hasHeader: true),
+                .rule
+            ]
+        )
+    }
+
+    func testDelimiterRequiresThreeDashesAndMatchingColumnCount() {
+        XCTAssertFalse(GFM.isTable(header: "A | B", separator: "-- | ---"))
+        XCTAssertFalse(GFM.isTable(header: "A | B", separator: "---"))
+        XCTAssertFalse(GFM.isTable(header: "A | B", separator: "--- | --- | ---"))
+        XCTAssertTrue(GFM.isTable(header: "A | B", separator: "--- | ---"))
     }
 }
 
