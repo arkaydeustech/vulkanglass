@@ -922,7 +922,7 @@ final class LivePreviewTests: XCTestCase {
     func testLiveTableCellsAreRegularLeadingAlignedAndVerticallyCentered() throws {
         let table = "|       |       Header       |\n| --- | --- |\n| value | second |"
         let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 320))
-        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainerInset = NSSize(width: VGTheme.documentHorizontalPadding, height: 8)
         textView.textContainer?.lineFragmentPadding = 0
         textView.string = table
         textView.liveDecorations = LivePreview.apply(
@@ -1600,7 +1600,7 @@ final class EditorLifecycleTests: XCTestCase {
     func testTableGlyphsStayInsideTheGridBandsAndClicksClampToTheirCell() throws {
         let table = "| Alpha | Beta |\n| --- | --- |\n| one | two |"
         let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 320))
-        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainerInset = NSSize(width: VGTheme.documentHorizontalPadding, height: 8)
         textView.textContainer?.lineFragmentPadding = 0
         textView.string = table
         textView.liveDecorations = LivePreview.apply(
@@ -1649,7 +1649,7 @@ final class EditorLifecycleTests: XCTestCase {
             defer: false
         )
         let textView = SourceTextView(frame: window.contentView!.bounds)
-        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainerInset = NSSize(width: VGTheme.documentHorizontalPadding, height: 8)
         textView.textContainer?.lineFragmentPadding = 0
         textView.string = table
         textView.liveDecorations = LivePreview.apply(
@@ -1841,7 +1841,7 @@ final class EditorLifecycleTests: XCTestCase {
             defer: false
         )
         let textView = SourceTextView(frame: window.contentView!.bounds)
-        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainerInset = NSSize(width: VGTheme.documentHorizontalPadding, height: 8)
         textView.string = table
         textView.liveDecorations = LivePreview.apply(
             to: textView.textStorage!,
@@ -1962,6 +1962,65 @@ final class EditorLifecycleTests: XCTestCase {
         }
     }
 
+    func testDocumentLeadingEdgeStaysAlignedWhenSwitchingFromPreviewToSource() async throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-leading-inset-test.md"
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Aligned Title",
+                content: "Body",
+                originalContent: "Body",
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = .preview
+
+        let titleReported = expectation(description: "Title leading edge is laid out")
+        let previewReported = expectation(description: "Preview body leading edge is laid out")
+        let sourceReported = expectation(description: "Source body leading edge is laid out")
+        var titleLeading: CGFloat?
+        var previewLeading: CGFloat?
+        var sourceDidLayout = false
+
+        let view = NoteEditorView(onDocumentLeading: { element, leading in
+            switch element {
+            case .title where titleLeading == nil:
+                titleLeading = leading
+                titleReported.fulfill()
+            case .previewBody where previewLeading == nil:
+                previewLeading = leading
+                previewReported.fulfill()
+            case .sourceBody where !sourceDidLayout:
+                sourceDidLayout = true
+                DispatchQueue.main.async {
+                    sourceReported.fulfill()
+                }
+            default:
+                break
+            }
+        })
+            .environment(model)
+            .frame(width: 600, height: 400, alignment: .topLeading)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        await fulfillment(of: [titleReported, previewReported], timeout: 2)
+        let resolvedTitleLeading = try XCTUnwrap(titleLeading)
+        XCTAssertEqual(resolvedTitleLeading, VGTheme.documentHorizontalPadding, accuracy: 1)
+        XCTAssertEqual(try XCTUnwrap(previewLeading), resolvedTitleLeading, accuracy: 1)
+
+        model.editorMode = .source
+        await fulfillment(of: [sourceReported], timeout: 2)
+        hostingView.layoutSubtreeIfNeeded()
+        let textView = try XCTUnwrap(firstSubview(of: NSTextView.self, in: hostingView))
+        let sourceLeading = textView.convert(textView.textContainerOrigin, to: hostingView).x
+        XCTAssertEqual(sourceLeading, resolvedTitleLeading, accuracy: 1)
+        withExtendedLifetime(hostingView) {}
+    }
+
     private func readingPreviewMetrics(paneWidth: CGFloat) async throws -> MarkdownPreviewLayoutMetrics {
         let reported = expectation(description: "Preview reports layout at \(paneWidth) points")
         var result: MarkdownPreviewLayoutMetrics?
@@ -2035,13 +2094,13 @@ final class EditorLifecycleTests: XCTestCase {
         let reported = expectation(description: "Note editor reports \(mode) layout")
         var result: CGSize?
         var fulfilled = false
-        let view = NoteEditorView { size in
+        let view = NoteEditorView(onLayout: { size in
             result = size
             if !fulfilled {
                 fulfilled = true
                 reported.fulfill()
             }
-        }
+        })
         .environment(model)
         .frame(width: paneSize.width, height: paneSize.height, alignment: .topLeading)
         let hostingView = NSHostingView(rootView: view)
@@ -2051,6 +2110,14 @@ final class EditorLifecycleTests: XCTestCase {
         await fulfillment(of: [reported], timeout: 2)
         withExtendedLifetime(hostingView) {}
         return try XCTUnwrap(result)
+    }
+
+    private func firstSubview<T: NSView>(of type: T.Type, in root: NSView) -> T? {
+        if let match = root as? T { return match }
+        for subview in root.subviews {
+            if let match = firstSubview(of: type, in: subview) { return match }
+        }
+        return nil
     }
 
     func testKeyboardNavigationConfirmsSelectedWikiSuggestion() {

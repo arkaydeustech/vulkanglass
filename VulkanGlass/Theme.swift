@@ -56,7 +56,7 @@ enum VGTheme {
     static let splitGlowDuration: TimeInterval = 0.18
     static let editorMinWidth: CGFloat = 320
     static let readingColumnMaxWidth: CGFloat = 780
-    static let readingHorizontalPadding: CGFloat = 56
+    static let documentHorizontalPadding: CGFloat = 56
     static let readingBottomPadding: CGFloat = 96
     static let collapsedLeftTitleBarInset = max(0, trafficLightsInset - ribbonWidth)
 

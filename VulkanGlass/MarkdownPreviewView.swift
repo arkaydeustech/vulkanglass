@@ -4,6 +4,7 @@ import SwiftUI
 struct MarkdownPreviewLayoutMetrics: Equatable {
     var scrollSurfaceSize: CGSize?
     var readingColumnSize: CGSize?
+    var contentLeading: CGFloat?
     var tableCells: [MarkdownPreviewTableCellLayout] = []
 }
 
@@ -30,6 +31,7 @@ private enum MarkdownPreviewLayoutPreferenceKey: PreferenceKey {
         let next = nextValue()
         value.scrollSurfaceSize = next.scrollSurfaceSize ?? value.scrollSurfaceSize
         value.readingColumnSize = next.readingColumnSize ?? value.readingColumnSize
+        value.contentLeading = next.contentLeading ?? value.contentLeading
         for cell in next.tableCells {
             value.tableCells.removeAll {
                 $0.table == cell.table && $0.row == cell.row && $0.column == cell.column
@@ -46,6 +48,7 @@ struct MarkdownPreviewView: View {
     var baseURL: URL? = nil
     var dark = true
     var loadRemoteImages = false
+    var layoutCoordinateSpace: String? = nil
     var onLayout: ((MarkdownPreviewLayoutMetrics) -> Void)? = nil
     var onWiki: (String) -> Void
 
@@ -58,7 +61,21 @@ struct MarkdownPreviewView: View {
                         blockView(block, blockIndex: blockIndex)
                     }
                 }
-                .padding(.horizontal, VGTheme.readingHorizontalPadding)
+                .background {
+                    if onLayout != nil {
+                        GeometryReader { contentGeometry in
+                            Color.clear.preference(
+                                key: MarkdownPreviewLayoutPreferenceKey.self,
+                                value: MarkdownPreviewLayoutMetrics(
+                                    contentLeading: contentGeometry.frame(
+                                        in: .named(layoutCoordinateSpace ?? "MarkdownPreviewLayout")
+                                    ).minX
+                                )
+                            )
+                        }
+                    }
+                }
+                .padding(.horizontal, VGTheme.documentHorizontalPadding)
                 .padding(.bottom, VGTheme.readingBottomPadding)
                 .frame(
                     width: VGTheme.readingColumnWidth(paneWidth: paneWidth),
@@ -93,6 +110,7 @@ struct MarkdownPreviewView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .coordinateSpace(name: "MarkdownPreviewLayout")
         .onPreferenceChange(MarkdownPreviewLayoutPreferenceKey.self) { metrics in
             guard metrics.scrollSurfaceSize != nil, metrics.readingColumnSize != nil else { return }
             onLayout?(metrics)

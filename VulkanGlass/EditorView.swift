@@ -8,6 +8,7 @@ struct SourceEditor: NSViewRepresentable {
     var dark: Bool
     var baseURL: URL?
     var loadRemoteImages = false
+    var onLeadingLayout: ((CGFloat) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onChange: { text = $0 })
@@ -33,7 +34,7 @@ struct SourceEditor: NSViewRepresentable {
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isAutomaticDataDetectionEnabled = false
         textView.font = .systemFont(ofSize: 16)
-        textView.textContainerInset = NSSize(width: 40, height: 8)
+        textView.textContainerInset = NSSize(width: VGTheme.documentHorizontalPadding, height: 8)
         textView.textContainer?.lineFragmentPadding = 0
         textView.drawsBackground = false
         textView.minSize = NSSize(width: 0, height: 0)
@@ -58,6 +59,7 @@ struct SourceEditor: NSViewRepresentable {
         }
         applyChrome(textView)
         context.coordinator.restyle()
+        onLeadingLayout?(textView.textContainerOrigin.x)
         return scroll
     }
 
@@ -78,6 +80,7 @@ struct SourceEditor: NSViewRepresentable {
         }
         applyChrome(textView)
         context.coordinator.refreshWikiPopup()
+        onLeadingLayout?(textView.textContainerOrigin.x)
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
@@ -1168,8 +1171,15 @@ private enum NoteEditorLayoutPreferenceKey: PreferenceKey {
     }
 }
 
+enum NoteEditorLeadingElement {
+    case title
+    case previewBody
+    case sourceBody
+}
+
 struct NoteEditorView: View {
     @Environment(AppModel.self) private var model
+    var onDocumentLeading: ((NoteEditorLeadingElement, CGFloat) -> Void)? = nil
     var onLayout: ((CGSize) -> Void)? = nil
 
     var body: some View {
@@ -1182,7 +1192,13 @@ struct NoteEditorView: View {
                         noteTitles: Set(model.notes.map { $0.title.lowercased() }),
                         baseURL: URL(fileURLWithPath: tab.path).deletingLastPathComponent(),
                         dark: model.dark,
-                        loadRemoteImages: model.settings.loadRemoteImages
+                        loadRemoteImages: model.settings.loadRemoteImages,
+                        layoutCoordinateSpace: "NoteEditorLayout",
+                        onLayout: onDocumentLeading == nil ? nil : { metrics in
+                            if let leading = metrics.contentLeading {
+                                onDocumentLeading?(.previewBody, leading)
+                            }
+                        }
                     ) { target in
                         Task { await model.followWikiLink(target) }
                     }
@@ -1192,7 +1208,10 @@ struct NoteEditorView: View {
                         notes: model.notes,
                         dark: model.dark,
                         baseURL: URL(fileURLWithPath: tab.path).deletingLastPathComponent(),
-                        loadRemoteImages: model.settings.loadRemoteImages
+                        loadRemoteImages: model.settings.loadRemoteImages,
+                        onLeadingLayout: { leading in
+                            onDocumentLeading?(.sourceBody, leading)
+                        }
                     )
                         .onChange(of: model.tabs[index].content) { _, newValue in
                             model.updateContent(tab.id, newValue)
@@ -1213,6 +1232,7 @@ struct NoteEditorView: View {
             .onPreferenceChange(NoteEditorLayoutPreferenceKey.self) { size in
                 if let size { onLayout?(size) }
             }
+            .coordinateSpace(name: "NoteEditorLayout")
         } else {
             Text("No file is open. Create a note or open a Markdown file.")
                 .foregroundStyle(VGTheme.textFaint(dark: model.dark))
@@ -1249,7 +1269,23 @@ struct NoteEditorView: View {
             }
         }
         .tracking(-0.4)
-        .padding(.horizontal, 56)
+        .background {
+            if onDocumentLeading != nil {
+                GeometryReader { geometry in
+                    Color.clear
+                        .onAppear {
+                            onDocumentLeading?(
+                                .title,
+                                geometry.frame(in: .named("NoteEditorLayout")).minX
+                            )
+                        }
+                        .onChange(of: geometry.frame(in: .named("NoteEditorLayout")).minX) { _, leading in
+                            onDocumentLeading?(.title, leading)
+                        }
+                }
+            }
+        }
+        .padding(.horizontal, VGTheme.documentHorizontalPadding)
         .padding(.top, 24)
         .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
