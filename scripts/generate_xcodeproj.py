@@ -20,6 +20,7 @@ QUICK_LOOK_SHARED_SOURCES = (
     "CodeHighlight.swift",
     "GFM.swift",
     "MarkdownPreviewView.swift",
+    "SemanticHTML.swift",
     "Theme.swift",
 )
 

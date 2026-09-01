@@ -16,9 +16,30 @@ enum GFM {
         var selectionOffset: Int
     }
 
-    struct HTMLTable: Equatable {
+    struct DefinitionItem: Equatable, Sendable {
+        var term: String
+        var definitions: [String]
+    }
+
+    struct HTMLTableCell: Equatable, Sendable {
+        var row: Int
+        var column: Int
+        var rowSpan: Int
+        var columnSpan: Int
+        var content: String
+        var isHeader: Bool
+        var alignment: Alignment
+    }
+
+    struct HTMLTable: Equatable, Sendable {
         var rows: [[String]]
         var hasHeader: Bool
+        var caption: String? = nil
+        var cells: [HTMLTableCell] = []
+
+        var columnCount: Int { rows.map(\.count).max() ?? 0 }
+        var rowCount: Int { rows.count }
+        var hasSpans: Bool { cells.contains { $0.rowSpan > 1 || $0.columnSpan > 1 } }
     }
 
     enum AlertKind: String, Equatable, CaseIterable, Sendable {
@@ -285,51 +306,108 @@ enum GFM {
         return cells
     }
 
-    /// Parses the raw HTML form GitHub recommends for tables without a header.
-    /// This intentionally handles table structure only; unsupported HTML remains source text.
+    /// Parses the safe, semantic subset of an HTML table that GitHub renders.
     static func parseHTMLTable(_ source: String) -> HTMLTable? {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.range(of: #"^<table(?:\s|>)"#, options: [.regularExpression, .caseInsensitive]) != nil,
               trimmed.range(of: #"</table\s*>$"#, options: [.regularExpression, .caseInsensitive]) != nil
         else { return nil }
 
-        let rowRegex = try! NSRegularExpression(
-            pattern: #"<tr(?:\s[^>]*)?>([\s\S]*?)</tr\s*>"#,
-            options: .caseInsensitive
-        )
-        let cellRegex = try! NSRegularExpression(
-            pattern: #"<(td|th)(?:\s[^>]*)?>([\s\S]*?)</\1\s*>"#,
-            options: .caseInsensitive
-        )
-        let ns = trimmed as NSString
-        var rows: [[String]] = []
-        var firstRowIsHeader = false
-        for rowMatch in rowRegex.matches(
-            in: trimmed,
-            range: NSRange(location: 0, length: ns.length)
-        ) {
-            let rowSource = ns.substring(with: rowMatch.range(at: 1))
-            let rowNS = rowSource as NSString
-            let matches = cellRegex.matches(
-                in: rowSource,
-                range: NSRange(location: 0, length: rowNS.length)
-            )
-            guard !matches.isEmpty else { continue }
-            if rows.isEmpty {
-                firstRowIsHeader = matches.allSatisfy {
-                    rowNS.substring(with: $0.range(at: 1)).caseInsensitiveCompare("th") == .orderedSame
+        // Reject mismatched cell tags instead of silently changing the table's shape.
+        guard hasBalancedTableCellTags(trimmed),
+              let tableNode = SemanticHTML.firstElement(named: "table", in: SemanticHTML.parseFragment(trimmed))
+        else { return nil }
+
+        var rowNodes = tableNode.children.filter { $0.name == "tr" }
+        for section in tableNode.children where ["thead", "tbody", "tfoot"].contains(section.name ?? "") {
+            rowNodes.append(contentsOf: section.children.filter { $0.name == "tr" })
+        }
+        rowNodes = rowNodes.filter { $0.children.contains { $0.name == "td" || $0.name == "th" } }
+        guard !rowNodes.isEmpty else { return nil }
+
+        var cells: [HTMLTableCell] = []
+        var occupied: Set<String> = []
+        var maximumColumn = 0
+        for (row, rowNode) in rowNodes.enumerated() {
+            var column = 0
+            for cellNode in rowNode.children where cellNode.name == "td" || cellNode.name == "th" {
+                while occupied.contains("\(row):\(column)") { column += 1 }
+                let rowSpan = min(max(Int(cellNode.attributes["rowspan"] ?? "") ?? 1, 1), 100)
+                let columnSpan = min(max(Int(cellNode.attributes["colspan"] ?? "") ?? 1, 1), 100)
+                let alignment: Alignment
+                switch cellNode.attributes["align"]?.lowercased() {
+                case "center": alignment = .center
+                case "right": alignment = .right
+                default: alignment = .left
                 }
+                let content: String
+                if cellNode.children.contains(where: { $0.name == "table" }) {
+                    content = SemanticHTML.embeddedMarkdown(from: cellNode.children) ?? ""
+                } else {
+                    content = SemanticHTML.safeInlineMarkdown(from: cellNode.children)
+                }
+                cells.append(HTMLTableCell(
+                    row: row,
+                    column: column,
+                    rowSpan: rowSpan,
+                    columnSpan: columnSpan,
+                    content: content,
+                    isHeader: cellNode.name == "th",
+                    alignment: alignment
+                ))
+                for coveredRow in row..<(row + rowSpan) {
+                    for coveredColumn in column..<(column + columnSpan) {
+                        occupied.insert("\(coveredRow):\(coveredColumn)")
+                    }
+                }
+                maximumColumn = max(maximumColumn, column + columnSpan)
+                column += columnSpan
             }
-            rows.append(matches.map { htmlCellText(rowNS.substring(with: $0.range(at: 2))) })
         }
-        guard !rows.isEmpty else { return nil }
-        let columns = rows.map(\.count).max() ?? 0
-        rows = rows.map { row in
-            var normalized = Array(row.prefix(columns))
-            normalized.append(contentsOf: repeatElement("", count: columns - normalized.count))
-            return normalized
+
+        var rows = Array(
+            repeating: Array(repeating: "", count: maximumColumn),
+            count: rowNodes.count
+        )
+        for cell in cells where rows.indices.contains(cell.row) && rows[cell.row].indices.contains(cell.column) {
+            rows[cell.row][cell.column] = cell.content
         }
-        return HTMLTable(rows: rows, hasHeader: firstRowIsHeader)
+        let firstRowCells = cells.filter { $0.row == 0 }
+        let firstRowIsHeader = !firstRowCells.isEmpty && firstRowCells.allSatisfy(\.isHeader)
+        let caption = tableNode.children.first(where: { $0.name == "caption" })
+            .map { SemanticHTML.safeInlineMarkdown(from: $0.children) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        return HTMLTable(
+            rows: rows,
+            hasHeader: firstRowIsHeader,
+            caption: caption,
+            cells: cells
+        )
+    }
+
+    private static func hasBalancedTableCellTags(_ source: String) -> Bool {
+        var stack: [String] = []
+        var index = source.startIndex
+        while index < source.endIndex {
+            guard let opening = source[index...].firstIndex(of: "<"),
+                  let closing = SemanticHTML.closingAngleBracket(in: source, after: opening) else { break }
+            var content = source[source.index(after: opening)..<closing]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            index = source.index(after: closing)
+            guard !content.isEmpty, !content.hasPrefix("!"), !content.hasPrefix("?") else { continue }
+            let isClosing = content.hasPrefix("/")
+            if isClosing { content.removeFirst() }
+            let selfClosing = content.hasSuffix("/")
+            let name = content.prefix { !$0.isWhitespace && $0 != "/" }.lowercased()
+            guard name == "td" || name == "th" else { continue }
+            if isClosing {
+                guard stack.last == name else { return false }
+                stack.removeLast()
+            } else if !selfClosing {
+                stack.append(name)
+            }
+        }
+        return stack.isEmpty
     }
 
     private static func isEscapedPipe(at index: String.Index, in text: String) -> Bool {
@@ -342,50 +420,6 @@ enum GFM {
             cursor = previous
         }
         return !slashCount.isMultiple(of: 2)
-    }
-
-    private static func htmlCellText(_ source: String) -> String {
-        let withoutTags = source
-            .replacingOccurrences(of: #"<br\s*/?>"#, with: " ", options: [.regularExpression, .caseInsensitive])
-            .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
-        return decodeHTMLEntitiesOnce(withoutTags)
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-    }
-
-    /// Decodes each entity present in the source exactly once. In particular,
-    /// `&amp;lt;` becomes `&lt;`, not `<`.
-    private static func decodeHTMLEntitiesOnce(_ source: String) -> String {
-        let replacements = [
-            "amp": "&",
-            "lt": "<",
-            "gt": ">",
-            "quot": "\"",
-            "apos": "'",
-            "#39": "'"
-        ]
-        var result = ""
-        var index = source.startIndex
-        while index < source.endIndex {
-            guard source[index] == "&",
-                  let semicolon = source[index...].firstIndex(of: ";"),
-                  source.distance(from: index, to: semicolon) <= 8
-            else {
-                result.append(source[index])
-                index = source.index(after: index)
-                continue
-            }
-            let nameStart = source.index(after: index)
-            let name = String(source[nameStart..<semicolon])
-            if let replacement = replacements[name] {
-                result += replacement
-                index = source.index(after: semicolon)
-            } else {
-                result.append(source[index])
-                index = source.index(after: index)
-            }
-        }
-        return result
     }
 
     static func isHorizontalRule(_ line: String) -> Bool {
@@ -560,7 +594,7 @@ enum MarkdownResourceResolver {
 
     static func linkURL(_ raw: String, relativeTo baseURL: URL?) -> URL? {
         if let absolute = URL(string: raw), let scheme = absolute.scheme?.lowercased() {
-            guard scheme == "http" || scheme == "https" || scheme == "file" else { return nil }
+            guard scheme == "http" || scheme == "https" || scheme == "file" || scheme == "mailto" else { return nil }
             return absolute
         }
         guard let baseURL else { return nil }

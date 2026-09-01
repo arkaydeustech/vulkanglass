@@ -29,6 +29,9 @@ enum RichTextMarkdownConverter {
         let bold: Bool
         let italic: Bool
         let code: Bool
+        let strikethrough: Bool
+        let underline: Bool
+        let superscript: Int
         let link: String?
     }
 
@@ -46,6 +49,7 @@ enum RichTextMarkdownConverter {
         case normal
         case list(ListKind)
         case code
+        case htmlTable
     }
 
     private struct Block {
@@ -53,7 +57,30 @@ enum RichTextMarkdownConverter {
         let kind: BlockKind
     }
 
+    private struct TableCellKey: Hashable {
+        let row: Int
+        let column: Int
+    }
+
+    private struct ImportedTableCell {
+        var paragraphs: [String]
+        var rowSpan: Int
+        var columnSpan: Int
+        var isBold: Bool
+    }
+
+    private struct ImportedHTMLTable {
+        let html: String
+        let endLocation: Int
+    }
+
     static func markdown(from data: Data, documentType: NSAttributedString.DocumentType) -> String? {
+        if documentType == .html,
+           let html = decodedHTML(data),
+           needsSemanticHTMLImport(html),
+           let semantic = SemanticHTML.markdown(from: html) {
+            return semantic
+        }
         let options = readingOptions(for: data, documentType: documentType)
         guard let attributed = try? NSAttributedString(
             data: data,
@@ -66,6 +93,33 @@ enum RichTextMarkdownConverter {
             return nil
         }
         return converted
+    }
+
+    static func decodedHTML(_ data: Data) -> String? {
+        if data.starts(with: [0xEF, 0xBB, 0xBF]) {
+            return String(data: data.dropFirst(3), encoding: .utf8)
+        }
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {
+            guard data.count.isMultiple(of: 2) else { return nil }
+            return String(data: data, encoding: .utf16)
+        }
+        if let charset = declaredHTMLCharset(in: data) {
+            guard let encoding = stringEncoding(forHTMLCharset: charset) else { return nil }
+            guard let decoded = String(data: data, encoding: encoding), !decoded.contains("\0") else { return nil }
+            return decoded
+        }
+        if let utf8 = String(data: data, encoding: .utf8), !utf8.contains("\0") { return utf8 }
+        guard let fallback = String(data: data, encoding: .windowsCP1252), !fallback.contains("\0") else {
+            return nil
+        }
+        return fallback
+    }
+
+    private static func needsSemanticHTMLImport(_ html: String) -> Bool {
+        html.range(
+            of: #"<(?:table|blockquote|br|hr|img|picture|details|summary|dl|dt|dd|kbd|mark|input|figure|figcaption)(?:\s|/?>)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
     }
 
     static func readingOptions(
@@ -107,7 +161,16 @@ enum RichTextMarkdownConverter {
                 effectiveRange: nil
             ) as? NSParagraphStyle
 
-            if contentRange.length == 0 {
+            if let tableBlock = paragraphStyle?.textBlocks.compactMap({ $0 as? NSTextTableBlock }).last,
+               let table = importedHTMLTable(
+                   from: attributed,
+                   startingAt: location,
+                   table: tableBlock.table
+               ) {
+                blocks.append(Block(text: table.html, kind: .htmlTable))
+                location = table.endLocation
+                continue
+            } else if contentRange.length == 0 {
                 blocks.append(Block(text: "", kind: .normal))
             } else if isCodeBlock(attributed, range: contentRange, paragraphStyle: paragraphStyle) {
                 blocks.append(Block(
@@ -158,6 +221,9 @@ enum RichTextMarkdownConverter {
                 bold: !isHeading && traits.contains(.bold),
                 italic: traits.contains(.italic),
                 code: traits.contains(.monoSpace),
+                strikethrough: (attributes[.strikethroughStyle] as? Int ?? 0) != 0,
+                underline: link == nil && (attributes[.underlineStyle] as? Int ?? 0) != 0,
+                superscript: attributes[.superscript] as? Int ?? 0,
                 link: link
             )
             // NSTextAttachment runs use U+FFFC as a placeholder. There is no stable,
@@ -191,6 +257,181 @@ enum RichTextMarkdownConverter {
         return output
     }
 
+    /// AppKit imports each HTML table cell as a paragraph whose text block records
+    /// the source table and its row/column coordinates. Rebuild that semantic
+    /// structure as safe, portable HTML instead of flattening every cell into an
+    /// unrelated Markdown paragraph.
+    private static func importedHTMLTable(
+        from attributed: NSAttributedString,
+        startingAt start: Int,
+        table: NSTextTable
+    ) -> ImportedHTMLTable? {
+        let source = attributed.string as NSString
+        var cells: [TableCellKey: ImportedTableCell] = [:]
+        var location = start
+
+        while location < source.length {
+            let lineRange = source.lineRange(for: NSRange(location: location, length: 0))
+            let attributesLocation = min(lineRange.location, attributed.length - 1)
+            let paragraphStyle = attributed.attribute(
+                .paragraphStyle,
+                at: attributesLocation,
+                effectiveRange: nil
+            ) as? NSParagraphStyle
+            guard let tableBlock = paragraphStyle?.textBlocks
+                .compactMap({ $0 as? NSTextTableBlock })
+                .last(where: { $0.table === table }) else { break }
+
+            var contentEnd = NSMaxRange(lineRange)
+            while contentEnd > lineRange.location,
+                  isNewline(source.character(at: contentEnd - 1)) {
+                contentEnd -= 1
+            }
+            let contentRange = NSRange(
+                location: lineRange.location,
+                length: contentEnd - lineRange.location
+            )
+            let key = TableCellKey(row: tableBlock.startingRow, column: tableBlock.startingColumn)
+            let paragraph = inlineHTML(from: attributed, range: contentRange)
+            let paragraphIsBold = allMeaningfulTextIsBold(in: attributed, range: contentRange)
+            if var cell = cells[key] {
+                cell.paragraphs.append(paragraph)
+                cell.rowSpan = max(cell.rowSpan, tableBlock.rowSpan)
+                cell.columnSpan = max(cell.columnSpan, tableBlock.columnSpan)
+                cell.isBold = cell.isBold && paragraphIsBold
+                cells[key] = cell
+            } else {
+                cells[key] = ImportedTableCell(
+                    paragraphs: [paragraph],
+                    rowSpan: tableBlock.rowSpan,
+                    columnSpan: tableBlock.columnSpan,
+                    isBold: paragraphIsBold
+                )
+            }
+            location = NSMaxRange(lineRange)
+        }
+
+        guard !cells.isEmpty else { return nil }
+        let rowNumbers = Set(cells.keys.map(\.row)).sorted()
+        let firstRowCells = cells
+            .filter { $0.key.row == rowNumbers.first }
+            .sorted { $0.key.column < $1.key.column }
+        let coveredHeaderColumns = firstRowCells.reduce(0) { $0 + $1.value.columnSpan }
+        let hasHeader = rowNumbers.first == 0
+            && !firstRowCells.isEmpty
+            && coveredHeaderColumns >= table.numberOfColumns
+            && firstRowCells.allSatisfy(\.value.isBold)
+
+        var lines = ["<table>"]
+        if hasHeader, let headerRow = rowNumbers.first {
+            lines.append("  <thead>")
+            lines.append(contentsOf: htmlTableRow(headerRow, cells: cells, header: true))
+            lines.append("  </thead>")
+        }
+
+        let bodyRows = hasHeader ? Array(rowNumbers.dropFirst()) : rowNumbers
+        if !bodyRows.isEmpty {
+            lines.append("  <tbody>")
+            for row in bodyRows {
+                lines.append(contentsOf: htmlTableRow(row, cells: cells, header: false))
+            }
+            lines.append("  </tbody>")
+        }
+        lines.append("</table>")
+        return ImportedHTMLTable(html: lines.joined(separator: "\n"), endLocation: location)
+    }
+
+    private static func htmlTableRow(
+        _ row: Int,
+        cells: [TableCellKey: ImportedTableCell],
+        header: Bool
+    ) -> [String] {
+        let rowCells = cells
+            .filter { $0.key.row == row }
+            .sorted { $0.key.column < $1.key.column }
+        guard !rowCells.isEmpty else { return [] }
+
+        let tag = header ? "th" : "td"
+        var lines = ["    <tr>"]
+        for (_, cell) in rowCells {
+            var attributes = ""
+            if cell.rowSpan > 1 { attributes += " rowspan=\"\(cell.rowSpan)\"" }
+            if cell.columnSpan > 1 { attributes += " colspan=\"\(cell.columnSpan)\"" }
+            let content = cell.paragraphs.joined(separator: "<br>")
+            lines.append("      <\(tag)\(attributes)>\(content)</\(tag)>")
+        }
+        lines.append("    </tr>")
+        return lines
+    }
+
+    private static func inlineHTML(from attributed: NSAttributedString, range: NSRange) -> String {
+        guard range.length > 0 else { return "" }
+        var output = ""
+        attributed.enumerateAttributes(in: range) { attributes, runRange, _ in
+            let rawText = removingAttachmentCharacters(
+                from: (attributed.string as NSString).substring(with: runRange)
+            )
+            guard !rawText.isEmpty else { return }
+
+            let font = attributes[.font] as? NSFont
+            let traits = font?.fontDescriptor.symbolicTraits ?? []
+            let link = (attributes[.link] as? URL)?.absoluteString
+                ?? (attributes[.link] as? String)
+            var text = escapeHTML(rawText)
+            if traits.contains(.monoSpace) { text = "<code>\(text)</code>" }
+            if traits.contains(.bold) { text = "<strong>\(text)</strong>" }
+            if traits.contains(.italic) { text = "<em>\(text)</em>" }
+            if (attributes[.strikethroughStyle] as? Int ?? 0) != 0 {
+                text = "<del>\(text)</del>"
+            }
+            if link == nil, (attributes[.underlineStyle] as? Int ?? 0) != 0 {
+                text = "<ins>\(text)</ins>"
+            }
+            let superscript = attributes[.superscript] as? Int ?? 0
+            if superscript > 0 {
+                text = "<sup>\(text)</sup>"
+            } else if superscript < 0 {
+                text = "<sub>\(text)</sub>"
+            }
+            if let link, let safeLink = SemanticHTML.safeURL(link, image: false) {
+                text = "<a href=\"\(escapeHTML(safeLink))\">\(text)</a>"
+            }
+            output += text
+        }
+        return output
+    }
+
+    private static func allMeaningfulTextIsBold(
+        in attributed: NSAttributedString,
+        range: NSRange
+    ) -> Bool {
+        guard range.length > 0 else { return false }
+        var sawText = false
+        var allBold = true
+        attributed.enumerateAttribute(.font, in: range) { value, fontRange, stop in
+            let text = removingAttachmentCharacters(
+                from: (attributed.string as NSString).substring(with: fontRange)
+            )
+            guard text.contains(where: { !$0.isWhitespace }) else { return }
+            sawText = true
+            guard let font = value as? NSFont,
+                  font.fontDescriptor.symbolicTraits.contains(.bold) else {
+                allBold = false
+                stop.pointee = true
+                return
+            }
+        }
+        return sawText && allBold
+    }
+
+    private static func escapeHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
     private static func styledText(_ run: InlineRun) -> String {
         guard !run.text.isEmpty else { return "" }
         if run.style.code {
@@ -210,14 +451,22 @@ enum RichTextMarkdownConverter {
             return delimiter + (padding ? " " : "") + run.text + (padding ? " " : "") + delimiter
         }
 
-        let escaped = escapeMarkdown(run.text)
-        guard run.text.contains(where: { !$0.isWhitespace }) else { return escaped }
+        var styled = escapeMarkdown(run.text)
+        guard run.text.contains(where: { !$0.isWhitespace }) else { return styled }
         switch (run.style.bold, run.style.italic) {
-        case (true, true): return "***\(escaped)***"
-        case (true, false): return "**\(escaped)**"
-        case (false, true): return "*\(escaped)*"
-        case (false, false): return escaped
+        case (true, true): styled = "***\(styled)***"
+        case (true, false): styled = "**\(styled)**"
+        case (false, true): styled = "*\(styled)*"
+        case (false, false): break
         }
+        if run.style.strikethrough { styled = "~~\(styled)~~" }
+        if run.style.underline { styled = "<ins>\(styled)</ins>" }
+        if run.style.superscript > 0 {
+            styled = "<sup>\(styled)</sup>"
+        } else if run.style.superscript < 0 {
+            styled = "<sub>\(styled)</sub>"
+        }
+        return styled
     }
 
     private static func listDetails(
@@ -363,12 +612,40 @@ enum RichTextMarkdownConverter {
             return true
         }
 
+        return declaredHTMLCharset(in: data) != nil
+    }
+
+    private static func declaredHTMLCharset(in data: Data) -> String? {
         let prefix = data.prefix(8_192)
-        guard let header = String(data: prefix, encoding: .isoLatin1) else { return false }
-        return header.range(
-            of: #"(?:charset\s*=|<\?xml[^>]+encoding\s*=)"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) != nil
+        guard let header = String(data: prefix, encoding: .isoLatin1) else { return nil }
+        let expression = try! NSRegularExpression(
+            pattern: #"(?:charset|encoding)\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)"#,
+            options: .caseInsensitive
+        )
+        let range = NSRange(location: 0, length: (header as NSString).length)
+        guard let match = expression.firstMatch(in: header, range: range), match.numberOfRanges > 1 else {
+            return nil
+        }
+        return (header as NSString).substring(with: match.range(at: 1)).lowercased()
+    }
+
+    private static func stringEncoding(forHTMLCharset charset: String) -> String.Encoding? {
+        switch charset.replacingOccurrences(of: "_", with: "-").lowercased() {
+        case "utf-8", "utf8":
+            return .utf8
+        case "windows-1252", "cp1252", "x-cp1252":
+            return .windowsCP1252
+        case "iso-8859-1", "iso8859-1", "latin1", "latin-1":
+            return .isoLatin1
+        case "us-ascii", "ascii":
+            return .ascii
+        case "utf-16le":
+            return .utf16LittleEndian
+        case "utf-16be":
+            return .utf16BigEndian
+        default:
+            return nil
+        }
     }
 
     private static func escapedLinkDestination(_ destination: String) -> String {

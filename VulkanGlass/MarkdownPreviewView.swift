@@ -241,6 +241,51 @@ struct MarkdownPreviewView: View {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 6))
+        case .richTable(let table):
+            HTMLSpanningTableView(
+                table: table,
+                noteTitles: noteTitles,
+                baseURL: baseURL,
+                dark: dark,
+                loadRemoteImages: loadRemoteImages,
+                onWiki: onWiki
+            )
+        case .details(let summary, let body, let initiallyOpen):
+            HTMLDetailsView(initiallyOpen: initiallyOpen) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(MDBlock.parse(body).enumerated()), id: \.offset) { nestedIndex, block in
+                        erasedBlockView(block, blockIndex: blockIndex * 1_000 + nestedIndex)
+                    }
+                }
+                .padding(.leading, 20)
+                .padding(.top, 4)
+            } label: {
+                InlineRunsView(
+                    text: summary,
+                    noteTitles: noteTitles,
+                    baseURL: baseURL,
+                    loadRemoteImages: loadRemoteImages,
+                    onWiki: onWiki
+                )
+                .fontWeight(.semibold)
+            }
+        case .definitionList(let items):
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    VStack(alignment: .leading, spacing: 4) {
+                        InlineRunsView(text: item.term, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+                            .fontWeight(.semibold)
+                        ForEach(Array(item.definitions.enumerated()), id: \.offset) { _, definition in
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(Array(MDBlock.parse(definition).enumerated()), id: \.offset) { nestedIndex, block in
+                                    erasedBlockView(block, blockIndex: blockIndex * 1_000 + nestedIndex)
+                                }
+                            }
+                                .padding(.leading, 20)
+                        }
+                    }
+                }
+            }
         case .rule:
             VGTheme.divider(dark: dark).frame(height: 1).padding(.vertical, 8)
         case .lines(let lines):
@@ -283,6 +328,10 @@ struct MarkdownPreviewView: View {
         }
     }
 
+    private func erasedBlockView(_ block: MDBlock, blockIndex: Int) -> AnyView {
+        AnyView(blockView(block, blockIndex: blockIndex))
+    }
+
     private func headingFont(_ level: Int) -> Font {
         switch level {
         case 1: return .largeTitle
@@ -311,12 +360,190 @@ struct MarkdownPreviewView: View {
     }
 }
 
+private struct HTMLDetailsView<Content: View, Label: View>: View {
+    @State private var isExpanded: Bool
+    private let content: Content
+    private let label: Label
+
+    init(
+        initiallyOpen: Bool,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder label: () -> Label
+    ) {
+        _isExpanded = State(initialValue: initiallyOpen)
+        self.content = content()
+        self.label = label()
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            content
+        } label: {
+            label
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+private struct HTMLSpanningTableView: View {
+    let table: GFM.HTMLTable
+    let noteTitles: Set<String>
+    let baseURL: URL?
+    let dark: Bool
+    let loadRemoteImages: Bool
+    let onWiki: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let caption = table.caption {
+                InlineRunsView(
+                    text: caption,
+                    noteTitles: noteTitles,
+                    baseURL: baseURL,
+                    loadRemoteImages: loadRemoteImages,
+                    onWiki: onWiki
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            SpanningTableLayout(cells: table.cells, columns: table.columnCount, rows: table.rowCount) {
+                ForEach(Array(table.cells.enumerated()), id: \.offset) { _, cell in
+                    InlineRunsView(
+                        text: cell.content,
+                        noteTitles: noteTitles,
+                        baseURL: baseURL,
+                        loadRemoteImages: loadRemoteImages,
+                        onWiki: onWiki
+                    )
+                    .fontWeight(cell.isHeader ? .semibold : .regular)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: swiftUIAlignment(cell.alignment))
+                    .background(MarkdownPreviewTableStyle.background(dark: dark, isHeader: cell.isHeader))
+                    .border(VGTheme.divider(dark: dark), width: 0.5)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func swiftUIAlignment(_ alignment: GFM.Alignment) -> Alignment {
+        switch alignment {
+        case .left: return .leading
+        case .center: return .center
+        case .right: return .trailing
+        }
+    }
+}
+
+struct SpanningTableLayout: Layout {
+    let cells: [GFM.HTMLTableCell]
+    let columns: Int
+    let rows: Int
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Void
+    ) -> CGSize {
+        metrics(proposal: proposal, subviews: subviews).size
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Void
+    ) {
+        let measurement = metrics(
+            proposal: ProposedViewSize(width: bounds.width, height: proposal.height),
+            subviews: subviews
+        )
+        for index in subviews.indices where cells.indices.contains(index) {
+            let cell = cells[index]
+            guard let frame = Self.frame(
+                for: cell,
+                in: bounds,
+                columnCount: columns,
+                rowHeights: measurement.rowHeights
+            ) else { continue }
+            subviews[index].place(
+                at: frame.origin,
+                anchor: .topLeading,
+                proposal: ProposedViewSize(width: frame.width, height: frame.height)
+            )
+        }
+    }
+
+    static func frame(
+        for cell: GFM.HTMLTableCell,
+        in bounds: CGRect,
+        columnCount: Int,
+        rowHeights: [CGFloat]
+    ) -> CGRect? {
+        guard columnCount > 0,
+              cell.row >= 0, cell.row < rowHeights.count,
+              cell.column >= 0, cell.column < columnCount else { return nil }
+        let endRow = min(rowHeights.count, cell.row + max(1, cell.rowSpan))
+        let endColumn = min(columnCount, cell.column + max(1, cell.columnSpan))
+        let columnWidth = bounds.width / CGFloat(columnCount)
+        return CGRect(
+            x: bounds.minX + CGFloat(cell.column) * columnWidth,
+            y: bounds.minY + rowHeights.prefix(cell.row).reduce(0, +),
+            width: CGFloat(endColumn - cell.column) * columnWidth,
+            height: rowHeights[cell.row..<endRow].reduce(0, +)
+        )
+    }
+
+    private func metrics(proposal: ProposedViewSize, subviews: Subviews) -> (
+        size: CGSize,
+        columnWidth: CGFloat,
+        rowHeights: [CGFloat]
+    ) {
+        guard columns > 0, rows > 0 else { return (.zero, 0, []) }
+        let intrinsicWidths = subviews.map { $0.sizeThatFits(.unspecified).width }
+        let proposedWidth = proposal.width.flatMap { $0.isFinite ? max($0, 1) : nil }
+        let naturalColumnWidth = max(80, (intrinsicWidths.max() ?? 80) + 16)
+        let totalWidth = proposedWidth ?? naturalColumnWidth * CGFloat(columns)
+        let columnWidth = totalWidth / CGFloat(columns)
+        var rowHeights = Array(repeating: CGFloat(0), count: rows)
+
+        for index in subviews.indices where cells.indices.contains(index) {
+            let cell = cells[index]
+            guard cell.row < rows else { continue }
+            let width = columnWidth * CGFloat(cell.columnSpan)
+            let height = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+            if cell.rowSpan == 1 {
+                rowHeights[cell.row] = max(rowHeights[cell.row], height)
+            }
+        }
+        for index in subviews.indices where cells.indices.contains(index) {
+            let cell = cells[index]
+            guard cell.row < rows, cell.rowSpan > 1 else { continue }
+            let end = min(rows, cell.row + cell.rowSpan)
+            let width = columnWidth * CGFloat(cell.columnSpan)
+            let required = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+            let current = rowHeights[cell.row..<end].reduce(0, +)
+            if required > current {
+                let addition = (required - current) / CGFloat(end - cell.row)
+                for row in cell.row..<end { rowHeights[row] += addition }
+            }
+        }
+        rowHeights = rowHeights.map { max($0, 34) }
+        return (CGSize(width: totalWidth, height: rowHeights.reduce(0, +)), columnWidth, rowHeights)
+    }
+}
+
 enum MDBlock: Equatable, Sendable {
     case code(language: String, code: String)
     case heading(Int, String)
     case quote([String])
     case alert(GFM.AlertKind, [String])
     case table([[String]], [GFM.Alignment], hasHeader: Bool)
+    case richTable(GFM.HTMLTable)
+    case details(summary: String, body: String, initiallyOpen: Bool)
+    case definitionList([GFM.DefinitionItem])
     case rule
     case lines([String])
 
@@ -328,54 +555,110 @@ enum MDBlock: Equatable, Sendable {
         var i = 0
         while i < raw.count {
             let line = raw[i]
-            if line.hasPrefix("```") {
+            if let openingFence = codeFenceOpening(line) {
                 var buffer = [line]
                 var closed = false
                 i += 1
                 while i < raw.count {
                     buffer.append(raw[i])
-                    if raw[i].hasPrefix("```") {
+                    if isCodeFenceClosing(raw[i], minimumLength: openingFence.length) {
                         closed = true
                         i += 1
                         break
                     }
                     i += 1
                 }
-                let language = String(buffer[0].dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                let language = openingFence.info
                 let content = closed ? buffer.dropFirst().dropLast() : buffer.dropFirst()[...]
                 let code = content.joined(separator: "\n")
                 result.append(.code(language: language, code: code))
                 continue
             }
-            if isHTMLTableStartLine(line) {
-                var htmlLines: [String] = []
-                var cursor = i
-                var foundEnd = false
-                while cursor < raw.count {
-                    let candidate = raw[cursor]
-                    if cursor > i {
-                        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if trimmed.isEmpty || trimmed.hasPrefix("```") {
-                            break
-                        }
-                    }
-                    htmlLines.append(candidate)
-                    cursor += 1
-                    if isHTMLTableEndLine(candidate) {
-                        foundEnd = true
-                        break
-                    }
-                }
-                if foundEnd, let table = GFM.parseHTMLTable(htmlLines.joined(separator: "\n")) {
-                    let columns = table.rows.first?.count ?? 0
-                    result.append(.table(
-                        table.rows,
-                        Array(repeating: .left, count: columns),
-                        hasHeader: table.hasHeader
+            if isHTMLElementStartLine(line, tag: "details"),
+               let collected = collectHTMLElement(raw, startingAt: i, tag: "details") {
+                let root = SemanticHTML.parseFragment(collected.source)
+                if let details = SemanticHTML.firstElement(named: "details", in: root) {
+                    let summaryNode = details.children.first { $0.name == "summary" }
+                    let summary = summaryNode.flatMap { SemanticHTML.embeddedMarkdown(from: $0.children) }
+                        ?? "Details"
+                    let bodyNodes = summaryNode.map { summary in
+                        details.children.filter { $0 !== summary }
+                    } ?? details.children
+                    let body = SemanticHTML.embeddedMarkdown(from: bodyNodes) ?? ""
+                    result.append(.details(
+                        summary: summary.isEmpty ? "Details" : summary,
+                        body: body,
+                        initiallyOpen: details.attributes["open"] != nil
                     ))
-                    i = cursor
+                    i = collected.nextIndex
                     continue
                 }
+            }
+            if isHTMLElementStartLine(line, tag: "dl"),
+               let collected = collectHTMLElement(raw, startingAt: i, tag: "dl") {
+                let root = SemanticHTML.parseFragment(collected.source)
+                if let list = SemanticHTML.firstElement(named: "dl", in: root) {
+                    var items: [GFM.DefinitionItem] = []
+                    for child in list.children where child.name == "dt" || child.name == "dd" {
+                        let content = SemanticHTML.embeddedMarkdown(from: child.children) ?? ""
+                        if child.name == "dt" {
+                            items.append(.init(term: content, definitions: []))
+                        } else if !items.isEmpty {
+                            items[items.count - 1].definitions.append(content)
+                        } else {
+                            items.append(.init(term: "", definitions: [content]))
+                        }
+                    }
+                    if !items.isEmpty {
+                        result.append(.definitionList(items))
+                        i = collected.nextIndex
+                        continue
+                    }
+                }
+            }
+            if isHTMLTableStartLine(line) {
+                if let collected = collectHTMLElement(
+                    raw,
+                    startingAt: i,
+                    tag: "table",
+                    stopsAtBlankLine: true
+                ),
+                   let table = GFM.parseHTMLTable(collected.source) {
+                    if table.hasSpans || table.caption != nil {
+                        result.append(.richTable(table))
+                    } else {
+                        var alignments = table.cells
+                            .filter { $0.row == 0 }
+                            .sorted { $0.column < $1.column }
+                            .map(\.alignment)
+                        if alignments.count < table.columnCount {
+                            alignments.append(contentsOf: repeatElement(.left, count: table.columnCount - alignments.count))
+                        }
+                        result.append(.table(
+                            table.rows,
+                            alignments,
+                            hasHeader: table.hasHeader
+                        ))
+                    }
+                    i = collected.nextIndex
+                    continue
+                }
+            }
+            if let tag = semanticContainerTag(line),
+               let collected = collectHTMLElement(raw, startingAt: i, tag: tag),
+               let normalized = SemanticHTML.markdown(from: collected.source),
+               normalized != collected.source {
+                result.append(contentsOf: parse(normalized))
+                i = collected.nextIndex
+                continue
+            }
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).range(
+                of: #"^<hr(?:\s[^>]*)?/?>$"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil {
+                result.append(.rule)
+                i += 1
+                continue
             }
             if GFM.isHorizontalRule(line) {
                 result.append(.rule)
@@ -430,7 +713,7 @@ enum MDBlock: Equatable, Sendable {
                 if current.hasPrefix("```") || current.hasPrefix("> ") || GFM.isHorizontalRule(current) { break }
                 if let _ = heading(current) { break }
                 if i + 1 < raw.count, GFM.isTable(header: current, separator: raw[i + 1]) { break }
-                if !lines.isEmpty, isHTMLTableStartLine(current) { break }
+                if !lines.isEmpty, isSemanticHTMLBlockStart(current) { break }
                 lines.append(current)
                 i += 1
             }
@@ -441,14 +724,107 @@ enum MDBlock: Equatable, Sendable {
 
     private static func isHTMLTableStartLine(_ line: String) -> Bool {
         line.trimmingCharacters(in: .whitespacesAndNewlines).range(
-            of: #"^<table(?:\s+[^>]*)?>$"#,
+            of: #"^<table(?:\s+[^>]*)?>"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }
 
-    private static func isHTMLTableEndLine(_ line: String) -> Bool {
+    private static func isHTMLElementStartLine(_ line: String, tag: String) -> Bool {
         line.trimmingCharacters(in: .whitespacesAndNewlines).range(
-            of: #"^</table\s*>$"#,
+            of: "^<\(tag)(?:\\s|>)",
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func collectHTMLElement(
+        _ lines: [String],
+        startingAt start: Int,
+        tag: String,
+        stopsAtBlankLine: Bool = false
+    ) -> (source: String, nextIndex: Int)? {
+        var collected: [String] = []
+        var index = start
+        while index < lines.count {
+            if stopsAtBlankLine,
+               index > start,
+               lines[index].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return nil
+            }
+            collected.append(lines[index])
+            index += 1
+            let source = collected.joined(separator: "\n")
+            if containsCompleteElement(source, named: tag) {
+                return (source, index)
+            }
+        }
+        return nil
+    }
+
+    private static func containsCompleteElement(_ source: String, named target: String) -> Bool {
+        var index = source.startIndex
+        var depth = 0
+        var sawOpening = false
+        while index < source.endIndex {
+            guard let opening = source[index...].firstIndex(of: "<") else { break }
+            if source[opening...].hasPrefix("<!--") {
+                guard let commentEnd = source.range(of: "-->", range: opening..<source.endIndex) else {
+                    return false
+                }
+                index = commentEnd.upperBound
+                continue
+            }
+            guard let closing = SemanticHTML.closingAngleBracket(in: source, after: opening) else {
+                return false
+            }
+            var content = source[source.index(after: opening)..<closing]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            index = source.index(after: closing)
+            guard !content.isEmpty, !content.hasPrefix("!"), !content.hasPrefix("?") else { continue }
+            let isClosing = content.hasPrefix("/")
+            if isClosing { content.removeFirst() }
+            let selfClosing = content.hasSuffix("/")
+            let name = content.prefix { !$0.isWhitespace && $0 != "/" }.lowercased()
+            guard name == target.lowercased() else { continue }
+            if isClosing {
+                if sawOpening { depth -= 1 }
+                if sawOpening && depth == 0 { return true }
+            } else {
+                sawOpening = true
+                if !selfClosing { depth += 1 }
+            }
+        }
+        return false
+    }
+
+    private static func codeFenceOpening(_ line: String) -> (length: Int, info: String)? {
+        let length = line.prefix { $0 == "`" }.count
+        guard length >= 3 else { return nil }
+        return (length, String(line.dropFirst(length)).trimmingCharacters(in: .whitespaces))
+    }
+
+    private static func isCodeFenceClosing(_ line: String, minimumLength: Int) -> Bool {
+        let length = line.prefix { $0 == "`" }.count
+        guard length >= minimumLength else { return false }
+        return line.dropFirst(length).allSatisfy(\.isWhitespace)
+    }
+
+    private static func semanticContainerTag(_ line: String) -> String? {
+        for tag in ["blockquote", "figure", "p", "div", "ul", "ol", "pre"]
+        where isHTMLElementStartLine(line, tag: tag) {
+            return tag
+        }
+        return nil
+    }
+
+    private static func isSemanticHTMLBlockStart(_ line: String) -> Bool {
+        if isHTMLTableStartLine(line)
+            || isHTMLElementStartLine(line, tag: "details")
+            || isHTMLElementStartLine(line, tag: "dl")
+            || semanticContainerTag(line) != nil {
+            return true
+        }
+        return line.trimmingCharacters(in: .whitespacesAndNewlines).range(
+            of: #"^<hr(?:\s[^>]*)?/?>$"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }
@@ -471,6 +847,10 @@ enum InlineRun: Identifiable, Equatable {
     case boldItalic(String)
     case strikethrough(String)
     case underline(String)
+    case subscriptText(String)
+    case superscriptText(String)
+    case keyboard(String)
+    case highlight(String)
     case wiki(target: String, label: String)
     case tag(String)
     case link(label: String, url: String)
@@ -487,6 +867,10 @@ enum InlineRun: Identifiable, Equatable {
         case .boldItalic(let value): return "bi-\(value)"
         case .strikethrough(let value): return "s-\(value)"
         case .underline(let value): return "u-\(value)"
+        case .subscriptText(let value): return "sub-\(value)"
+        case .superscriptText(let value): return "sup-\(value)"
+        case .keyboard(let value): return "kbd-\(value)"
+        case .highlight(let value): return "mark-\(value)"
         case .wiki(let target, let label): return "w-\(target)-\(label)"
         case .tag(let value): return "g-\(value)"
         case .link(let label, let url): return "l-\(label)-\(url)"
@@ -568,6 +952,18 @@ struct InlineRunsView: View {
                 .font(.system(.body, design: .monospaced))
                 .padding(.horizontal, 4)
                 .background(Color.gray.opacity(0.18))
+        case .keyboard(let value):
+            Text(value)
+                .font(.system(.body, design: .monospaced).weight(.medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.12))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.35)))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        case .highlight(let value):
+            Text(value)
+                .padding(.horizontal, 2)
+                .background(Color.yellow.opacity(0.38))
         case .footnote(let value):
             Text(value)
                 .font(.system(size: 10))
@@ -581,7 +977,8 @@ struct InlineRunsView: View {
                 loadLocalImages: loadLocalImages,
                 loadRemoteImages: loadRemoteImages
             )
-        case .text, .bold, .italic, .boldItalic, .strikethrough, .underline, .emoji:
+        case .text, .bold, .italic, .boldItalic, .strikethrough, .underline,
+             .subscriptText, .superscriptText, .emoji:
             Self.composedText([run])
         }
     }
@@ -598,9 +995,10 @@ struct InlineRunsView: View {
 
         for run in runs {
             switch run {
-            case .text, .bold, .italic, .boldItalic, .strikethrough, .underline, .emoji:
+            case .text, .bold, .italic, .boldItalic, .strikethrough, .underline,
+                 .subscriptText, .superscriptText, .emoji:
                 textRuns.append(run)
-            case .wiki, .tag, .link, .code, .footnote, .image:
+            case .wiki, .tag, .link, .code, .footnote, .image, .keyboard, .highlight:
                 flushText()
                 result.append(.element(run))
             }
@@ -629,7 +1027,11 @@ struct InlineRunsView: View {
             return Text(value).strikethrough()
         case .underline(let value):
             return Text(value).underline()
-        case .wiki, .tag, .link, .code, .footnote, .image:
+        case .subscriptText(let value):
+            return Text(value).font(.system(size: 11)).baselineOffset(-3)
+        case .superscriptText(let value):
+            return Text(value).font(.system(size: 11)).baselineOffset(5)
+        case .wiki, .tag, .link, .code, .footnote, .image, .keyboard, .highlight:
             return Text("")
         }
     }
@@ -657,8 +1059,20 @@ struct InlineRunsView: View {
                     continue
                 }
             }
+            if input[index] == "<", let parsed = parseHTMLInline(input, from: index) {
+                result.append(contentsOf: parsed.runs)
+                index = parsed.end
+                continue
+            }
             if input[index] == "<", let parsed = parseUnderline(input, from: index) {
                 result.append(.underline(parsed.content))
+                index = parsed.end
+                continue
+            }
+            if input[index] == "<", let parsed = parseScript(input, from: index) {
+                result.append(parsed.superscript
+                    ? .superscriptText(parsed.content)
+                    : .subscriptText(parsed.content))
                 index = parsed.end
                 continue
             }
@@ -786,6 +1200,67 @@ struct InlineRunsView: View {
             index = input.index(after: index)
         }
         return result
+    }
+
+    private static func parseHTMLInline(
+        _ input: String,
+        from index: String.Index
+    ) -> (runs: [InlineRun], end: String.Index)? {
+        guard input[index] == "<",
+              let openingEnd = SemanticHTML.closingAngleBracket(in: input, after: index) else { return nil }
+        let opening = String(input[input.index(after: index)..<openingEnd])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !opening.hasPrefix("/"), !opening.hasPrefix("!"), !opening.hasPrefix("?") else { return nil }
+        let tag = opening.prefix { !$0.isWhitespace && $0 != "/" }.lowercased()
+        let supported: Set<String> = [
+            "strong", "b", "em", "i", "del", "s", "strike", "code", "a",
+            "kbd", "mark", "br", "img"
+        ]
+        guard supported.contains(tag) else { return nil }
+
+        if tag == "br" || tag == "img" {
+            let end = input.index(after: openingEnd)
+            let fragment = String(input[index..<end])
+            let root = SemanticHTML.parseFragment(fragment)
+            if tag == "br" { return ([.text("\n")], end) }
+            guard let image = SemanticHTML.firstElement(named: "img", in: root),
+                  let src = image.attributes["src"],
+                  let safe = SemanticHTML.safeURL(src, image: true) else {
+                return ([], end)
+            }
+            return ([.image(alt: SemanticHTML.decodeEntities(image.attributes["alt"] ?? ""), url: safe)], end)
+        }
+
+        let contentStart = input.index(after: openingEnd)
+        guard let closingStart = input.range(
+            of: "</\(tag)",
+            options: .caseInsensitive,
+            range: contentStart..<input.endIndex
+        )?.lowerBound,
+              let closingEnd = input[closingStart...].firstIndex(of: ">") else { return nil }
+        let end = input.index(after: closingEnd)
+        let fragment = String(input[index..<end])
+        let root = SemanticHTML.parseFragment(fragment)
+        guard let element = SemanticHTML.firstElement(named: tag, in: root) else { return nil }
+        let content = SemanticHTML.inlineMarkdown(from: element.children)
+        let plain = element.children.map(\.plainText).joined()
+        let runs: [InlineRun]
+        switch tag {
+        case "strong", "b": runs = applying(.bold, to: content)
+        case "em", "i": runs = applying(.italic, to: content)
+        case "del", "s", "strike": runs = [.strikethrough(plain)]
+        case "code": runs = [.code(plain)]
+        case "kbd": runs = [.keyboard(plain)]
+        case "mark": runs = [.highlight(plain)]
+        case "a":
+            if let href = element.attributes["href"], let safe = SemanticHTML.safeURL(href, image: false) {
+                runs = [.link(label: plain, url: safe)]
+            } else {
+                runs = [.text(plain)]
+            }
+        default: return nil
+        }
+        return (runs, end)
     }
 
     private enum EmphasisStyle {
@@ -985,6 +1460,27 @@ struct InlineRunsView: View {
             let content = String(input[openingEnd..<closingRange.lowerBound])
             guard !content.isEmpty, !content.contains("\n"), !content.contains("\r") else { continue }
             return (content, closingRange.upperBound)
+        }
+        return nil
+    }
+
+    private static func parseScript(
+        _ input: String,
+        from index: String.Index
+    ) -> (content: String, superscript: Bool, end: String.Index)? {
+        for (tag, superscript) in [("sub", false), ("sup", true)] {
+            let opening = "<\(tag)>"
+            let closing = "</\(tag)>"
+            guard let openingEnd = input.index(index, offsetBy: opening.count, limitedBy: input.endIndex),
+                  String(input[index..<openingEnd]).caseInsensitiveCompare(opening) == .orderedSame,
+                  let closingRange = input.range(
+                      of: closing,
+                      options: .caseInsensitive,
+                      range: openingEnd..<input.endIndex
+                  ) else { continue }
+            let content = String(input[openingEnd..<closingRange.lowerBound])
+            guard !content.isEmpty, !content.contains("\n"), !content.contains("\r") else { continue }
+            return (content, superscript, closingRange.upperBound)
         }
         return nil
     }

@@ -115,6 +115,47 @@ final class InlineParserTests: XCTestCase {
         XCTAssertEqual(InlineRunsView.layoutGroups(for: runs), [.text(runs)])
     }
 
+    func testSubscriptAndSuperscriptHTMLAreRenderedInTheReadingPreview() {
+        XCTAssertEqual(
+            InlineRunsView.parse("H<sub>2</sub>O and x<SUP>3</sup>"),
+            [
+                .text("H"), .subscriptText("2"), .text("O and x"),
+                .superscriptText("3")
+            ]
+        )
+    }
+
+    func testCoreRawHTMLInlineElementsRenderSemantically() {
+        XCTAssertEqual(
+            InlineRunsView.parse("<strong>bold</strong> <em>italic</em> <del>old</del> <code>x</code> <kbd>⌘K</kbd> <mark>new</mark> <a href=\"https://example.com\">site</a><br><img alt=\"Glass\" src=\"pic.png\">") ,
+            [
+                .bold("bold"), .text(" "), .italic("italic"), .text(" "),
+                .strikethrough("old"), .text(" "), .code("x"), .text(" "),
+                .keyboard("⌘K"), .text(" "), .highlight("new"), .text(" "),
+                .link(label: "site", url: "https://example.com"), .text("\n"),
+                .image(alt: "Glass", url: "pic.png")
+            ]
+        )
+        XCTAssertEqual(
+            InlineRunsView.parse("<a href=\"javascript:alert(1)\">unsafe</a>"),
+            [.text("unsafe")]
+        )
+        XCTAssertNil(SemanticHTML.safeURL("java\tscript:alert(1)", image: false))
+        XCTAssertNil(SemanticHTML.safeURL("\u{01}javascript:alert(1)", image: false))
+        XCTAssertNil(SemanticHTML.safeURL("java\u{0085}script:alert(1)", image: false))
+    }
+
+    func testVoidHTMLImagesUseAQuoteAwareTagBoundary() {
+        XCTAssertEqual(
+            InlineRunsView.parse(#"<img alt=">" src="pic.png">"#),
+            [.image(alt: ">", url: "pic.png")]
+        )
+        XCTAssertEqual(
+            InlineRunsView.parse(#"<img alt="a>b" src="https://example.com/x.png">"#),
+            [.image(alt: "a>b", url: "https://example.com/x.png")]
+        )
+    }
+
     func testInlineLinksSupportBalancedAndAngleBracketDestinations() {
         let balanced = "[Swift](https://example.com/Swift_(language))"
         XCTAssertEqual(
@@ -578,7 +619,15 @@ final class MarkdownBlockTests: XCTestCase {
         """
         XCTAssertEqual(
             GFM.parseHTMLTable(headerTable),
-            GFM.HTMLTable(rows: [["Name", "Value"], ["A", ""]], hasHeader: true)
+            GFM.HTMLTable(
+                rows: [["Name", "Value"], ["A", ""]],
+                hasHeader: true,
+                cells: [
+                    .init(row: 0, column: 0, rowSpan: 1, columnSpan: 1, content: "Name", isHeader: true, alignment: .left),
+                    .init(row: 0, column: 1, rowSpan: 1, columnSpan: 1, content: "Value", isHeader: true, alignment: .left),
+                    .init(row: 1, column: 0, rowSpan: 1, columnSpan: 1, content: "A", isHeader: false, alignment: .left)
+                ]
+            )
         )
 
         let mixedTable = """
@@ -599,8 +648,174 @@ final class MarkdownBlockTests: XCTestCase {
         """
         XCTAssertEqual(
             GFM.parseHTMLTable(html)?.rows,
-            [["Hello wide world &lt; < > \" ' ' &unknown;"]]
+            [["Hello<br> *wide* world &lt; \\< \\> \" ' ' &unknown;"]]
         )
+    }
+
+    func testPreservedHTMLKeepsEntityEscapedMarkupLiteralAndStable() throws {
+        let html = "<table><tr><td>&lt;b&gt;x&lt;/b&gt;</td></tr></table>"
+        let converted = try XCTUnwrap(SemanticHTML.markdown(from: html))
+        XCTAssertEqual(
+            converted,
+            "<table>\n  <tr>\n    <td>&lt;b&gt;x&lt;/b&gt;</td>\n  </tr>\n</table>"
+        )
+        XCTAssertEqual(SemanticHTML.markdown(from: converted), converted)
+        XCTAssertEqual(GFM.parseHTMLTable(converted)?.rows, [["\\<b\\>x\\</b\\>"]])
+        XCTAssertEqual(InlineRunsView.parse("\\<b\\>x\\</b\\>"), [.text("<b>x</b>")])
+
+        XCTAssertEqual(
+            SemanticHTML.markdown(from: "<details><summary>&lt;em&gt;hi&lt;/em&gt;</summary>x</details>"),
+            "<details>\n<summary>&lt;em&gt;hi&lt;/em&gt;</summary>\nx\n</details>"
+        )
+        let literalDetails = try XCTUnwrap(SemanticHTML.markdown(
+            from: "<details><summary>Markup</summary><p>&lt;b&gt;x&lt;/b&gt;</p></details>"
+        ))
+        guard case .details(_, let literalBody, _) = MDBlock.parse(literalDetails).first else {
+            return XCTFail("Expected details block")
+        }
+        XCTAssertEqual(literalBody, "\\<b\\>x\\</b\\>")
+
+        let codeDetails = try XCTUnwrap(SemanticHTML.markdown(
+            from: "<details><summary>Code</summary><pre><code>&lt;tag&gt;\n````</code></pre></details>"
+        ))
+        guard case .details(_, let codeBody, _) = MDBlock.parse(codeDetails).first else {
+            return XCTFail("Expected code details block")
+        }
+        XCTAssertEqual(MDBlock.parse(codeBody), [.code(language: "", code: "<tag>\n````")])
+        XCTAssertEqual(
+            SemanticHTML.markdown(from: "<dl><dt>&lt;code&gt;x&lt;/code&gt;</dt><dd>value</dd></dl>"),
+            "<dl>\n<dt>&lt;code&gt;x&lt;/code&gt;</dt>\n<dd>value</dd>\n</dl>"
+        )
+    }
+
+    func testHTMLTablePreservesCaptionSpansAlignmentAndLinks() throws {
+        let html = """
+        <table><caption>Release matrix</caption>
+        <tr><th rowspan="2">Version</th><th colspan="2" align="center">Platforms</th></tr>
+        <tr><td><a href="https://example.com/mac">macOS</a></td><td>Linux</td></tr>
+        </table>
+        """
+        let table = try XCTUnwrap(GFM.parseHTMLTable(html))
+        XCTAssertEqual(table.caption, "Release matrix")
+        XCTAssertEqual(table.columnCount, 3)
+        XCTAssertTrue(table.hasSpans)
+        XCTAssertEqual(table.cells[0].rowSpan, 2)
+        XCTAssertEqual(table.cells[1].columnSpan, 2)
+        XCTAssertEqual(table.cells[1].alignment, .center)
+        XCTAssertEqual(table.cells[2].content, "[macOS](https://example.com/mac)")
+        guard case .richTable = MDBlock.parse(html).first else {
+            return XCTFail("Expected a spanning HTML table block")
+        }
+    }
+
+    func testNestedHTMLTableRemainsCellContentInsteadOfBecomingOuterRows() throws {
+        let html = """
+        <table><tr><td>Outer<table><tr><td>Inner 1</td></tr><tr><td>Inner 2</td></tr></table></td></tr></table>
+        """
+        let table = try XCTUnwrap(GFM.parseHTMLTable(html))
+        XCTAssertEqual(table.rowCount, 1)
+        XCTAssertEqual(table.columnCount, 1)
+        XCTAssertTrue(table.rows[0][0].contains("<table>"))
+        XCTAssertTrue(table.rows[0][0].contains("Inner 2"))
+
+        let sanitized = try XCTUnwrap(SemanticHTML.markdown(from: html))
+        let roundTripped = try XCTUnwrap(GFM.parseHTMLTable(sanitized))
+        XCTAssertEqual(roundTripped.rowCount, 1)
+        XCTAssertTrue(roundTripped.rows[0][0].contains("<table>"))
+        XCTAssertTrue(roundTripped.rows[0][0].contains("Inner 2"))
+    }
+
+    func testRaggedHTMLTablePadsAlignmentMetadataToItsWidestRow() {
+        let html = """
+        <table>
+        <tr><td>A</td></tr>
+        <tr><td>B</td><td align="right">C</td></tr>
+        </table>
+        """
+        XCTAssertEqual(
+            MDBlock.parse(html),
+            [.table([["A", ""], ["B", "C"]], [.left, .left], hasHeader: false)]
+        )
+    }
+
+    func testNestedHTMLContainersAreCollectedThroughTheirOuterCloser() {
+        let source = """
+        <div>
+        <div>inner</div>
+        after
+        </div>
+
+        trailing
+        """
+        let blocks = MDBlock.parse(source)
+        XCTAssertFalse(String(describing: blocks).contains("</div>"))
+        XCTAssertTrue(String(describing: blocks).contains("inner"))
+        XCTAssertTrue(String(describing: blocks).contains("after"))
+        XCTAssertTrue(String(describing: blocks).contains("trailing"))
+
+        let nestedDetails = """
+        <details open>
+        <summary>Outer</summary>
+        <details><summary>Inner</summary><p>inside</p></details>
+        after
+        </details>
+        """
+        guard case .details(_, let body, _) = MDBlock.parse(nestedDetails).first else {
+            return XCTFail("Expected outer details block")
+        }
+        XCTAssertTrue(body.contains("<details>"))
+        XCTAssertTrue(body.contains("after"))
+    }
+
+    func testDetailsAndDefinitionsRetainNestedMarkdownBlocks() throws {
+        let source = """
+        <details open>
+        <summary>More</summary>
+        <h2>Heading</h2>
+        <pre><code>let x = 1</code></pre>
+        <blockquote><p>Quote</p></blockquote>
+        <table><tr><td>Cell</td></tr></table>
+        <details><summary>Nested</summary><p>Body</p></details>
+        </details>
+
+        <dl><dt>Term</dt><dd><p>First</p><ul><li>One</li><li>Two</li></ul></dd></dl>
+        """
+        let blocks = MDBlock.parse(source)
+        guard case .details(_, let body, _) = blocks.first else {
+            return XCTFail("Expected details block")
+        }
+        let detailBlocks = MDBlock.parse(body)
+        XCTAssertTrue(detailBlocks.contains { if case .heading(2, "Heading") = $0 { true } else { false } })
+        XCTAssertTrue(detailBlocks.contains { if case .code(_, "let x = 1") = $0 { true } else { false } })
+        XCTAssertTrue(detailBlocks.contains { if case .quote = $0 { true } else { false } })
+        XCTAssertTrue(detailBlocks.contains { if case .table = $0 { true } else { false } })
+        XCTAssertTrue(detailBlocks.contains { if case .details = $0 { true } else { false } })
+
+        guard case .definitionList(let items) = blocks.last else {
+            return XCTFail("Expected definition list")
+        }
+        XCTAssertEqual(items.first?.term, "Term")
+        let definition = try XCTUnwrap(items.first?.definitions.first)
+        let definitionBlocks = MDBlock.parse(definition)
+        XCTAssertTrue(String(describing: definitionBlocks).contains("First"))
+        XCTAssertTrue(String(describing: definitionBlocks).contains("- One"))
+        XCTAssertTrue(String(describing: definitionBlocks).contains("- Two"))
+    }
+
+    func testLongCodeFencesProtectEmbeddedBacktickRuns() throws {
+        let code = "before\n````\nafter"
+        let converted = try XCTUnwrap(SemanticHTML.markdown(from: "<pre><code>\(code)</code></pre>"))
+        XCTAssertTrue(converted.hasPrefix("`````\n"))
+        XCTAssertTrue(converted.hasSuffix("\n`````"))
+        XCTAssertEqual(MDBlock.parse(converted), [.code(language: "", code: code)])
+    }
+
+    func testSemanticHTMLBoundsPathologicalNesting() {
+        let depth = 50_000
+        let html = String(repeating: "<div>", count: depth)
+            + "deep"
+            + String(repeating: "</div>", count: depth)
+        _ = SemanticHTML.markdown(from: html)
     }
 
     func testHTMLTableStartsAfterProseWithoutARequiredBlankLine() {
@@ -1545,7 +1760,7 @@ final class RichTextMarkdownConverterTests: XCTestCase {
         )
     }
 
-    func testAttachmentsAreRemovedWithoutLeavingObjectReplacementCharacters() throws {
+    func testAttributedAttachmentsAreRemovedAndHTMLImagesBecomeMarkdown() throws {
         let attributed = NSMutableAttributedString(string: "a")
         attributed.append(NSAttributedString(attachment: NSTextAttachment()))
         attributed.append(NSAttributedString(string: "b"))
@@ -1557,7 +1772,7 @@ final class RichTextMarkdownConverterTests: XCTestCase {
         let mixedConversion = try XCTUnwrap(
             RichTextMarkdownConverter.markdown(from: mixedHTML, documentType: .html)
         )
-        XCTAssertEqual(mixedConversion, "ab")
+        XCTAssertEqual(mixedConversion, "a![](https://example.com/x.png)b")
         XCTAssertFalse(mixedConversion.contains("\u{FFFC}"))
 
         let pasteboard = makePasteboard()
@@ -1567,7 +1782,7 @@ final class RichTextMarkdownConverterTests: XCTestCase {
 
         let textView = SourceTextView()
         XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
-        XCTAssertEqual(textView.string, "image fallback")
+        XCTAssertEqual(textView.string, "![](https://example.com/x.png)")
     }
 
     func testUTF8HTMLWithoutCharsetPreservesUnicode() throws {
@@ -1576,6 +1791,148 @@ final class RichTextMarkdownConverterTests: XCTestCase {
             try XCTUnwrap(RichTextMarkdownConverter.markdown(from: Data(html.utf8), documentType: .html)),
             "café — “quoted”"
         )
+    }
+
+    func testSemanticHTMLHonorsDeclaredSingleByteAndBOMEncodings() throws {
+        let cp1252HTML = #"<meta charset="windows-1252"><p>café naïve</p><br>"#
+        let cp1252Data = try XCTUnwrap(cp1252HTML.data(using: .windowsCP1252))
+        XCTAssertEqual(
+            try XCTUnwrap(RichTextMarkdownConverter.markdown(from: cp1252Data, documentType: .html)),
+            "café naïve\n\n<br>"
+        )
+
+        let utf16HTML = "<p>雪 café</p><br>"
+        var utf16Data = Data([0xFF, 0xFE])
+        utf16Data.append(try XCTUnwrap(utf16HTML.data(using: .utf16LittleEndian)))
+        XCTAssertEqual(
+            try XCTUnwrap(RichTextMarkdownConverter.markdown(from: utf16Data, documentType: .html)),
+            "雪 café\n\n<br>"
+        )
+
+        XCTAssertNil(RichTextMarkdownConverter.decodedHTML(Data([0xFF, 0xFE, 0x41])))
+        XCTAssertNil(RichTextMarkdownConverter.decodedHTML(
+            try XCTUnwrap(utf16HTML.data(using: .utf16LittleEndian))
+        ))
+    }
+
+    func testSemanticHTMLNeutralizesPlainBlockMarkers() throws {
+        let html = """
+        <p># literal</p><p>> quote</p><p>- item</p><p>1. item</p><p>---</p><br>
+        """
+        let converted = try XCTUnwrap(
+            RichTextMarkdownConverter.markdown(from: Data(html.utf8), documentType: .html)
+        )
+        XCTAssertEqual(
+            converted,
+            "\\# literal\n\n\\> quote\n\n\\- item\n\n1\\. item\n\n\\---\n\n<br>"
+        )
+        XCTAssertFalse(MDBlock.parse(converted).contains { block in
+            if case .heading = block { return true }
+            if case .quote = block { return true }
+            if case .rule = block { return true }
+            return false
+        })
+    }
+
+    func testSemanticHTMLPreservesAllowlistedInlineCSSFormatting() throws {
+        let html = """
+        <p><span style="font-weight: 700">Bold</span>
+        <span style="font-style: italic">Italic</span>
+        <span style="text-decoration: underline">Under</span>
+        <span style="text-decoration-line: line-through">Strike</span>
+        <span style="font-family: ui-monospace, monospace">Mono</span></p><br>
+        """
+        XCTAssertEqual(
+            try XCTUnwrap(RichTextMarkdownConverter.markdown(from: Data(html.utf8), documentType: .html)),
+            "**Bold** *Italic* <ins>Under</ins> ~~Strike~~ `Mono`\n\n<br>"
+        )
+    }
+
+    func testNestedTaskListDoesNotPromoteItsPlainParent() throws {
+        let html = "<ul><li>parent<ul><li><input type=checkbox>kid</li></ul></li></ul>"
+        XCTAssertEqual(
+            try XCTUnwrap(RichTextMarkdownConverter.markdown(from: Data(html.utf8), documentType: .html)),
+            "- parent\n  - [ ] kid"
+        )
+    }
+
+    func testChromeGitHubTablePastePreservesHTMLStructureAndInlineFormatting() throws {
+        let html = """
+        <h2>Styling text</h2>
+        <p>You can indicate emphasis with several styles.</p>
+        <table aria-labelledby="styling-text">
+          <thead><tr><th scope="col">Style</th><th scope="col">Syntax</th><th scope="col">Output</th></tr></thead>
+          <tbody>
+            <tr><td>Bold</td><td><code>** **</code></td><td><strong>This is bold text</strong></td></tr>
+            <tr><td>Strikethrough</td><td><code>~~ ~~</code></td><td><del>This was mistaken text</del></td></tr>
+            <tr><td>All bold and italic</td><td><code>*** ***</code></td><td><em><strong>All this text is important</strong></em></td></tr>
+            <tr><td>Subscript</td><td><code>&lt;sub&gt; &lt;/sub&gt;</code></td><td>This is a <sub>subscript</sub> text</td></tr>
+            <tr><td>Superscript</td><td><code>&lt;sup&gt; &lt;/sup&gt;</code></td><td>This is a <sup>superscript</sup> text</td></tr>
+            <tr><td>Underline</td><td><code>&lt;ins&gt; &lt;/ins&gt;</code></td><td>This is an <ins>underlined</ins> text</td></tr>
+          </tbody>
+        </table>
+        """
+        let pasteboard = makePasteboard()
+        pasteboard.setData(Data(html.utf8), forType: .html)
+        pasteboard.setString(
+            "Styling text\nStyle\tSyntax\tOutput\nBold\t** **\tThis is bold text",
+            forType: .string
+        )
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertTrue(textView.string.hasPrefix("## Styling text\n\nYou can indicate emphasis"))
+        XCTAssertTrue(textView.string.contains("<table>"))
+        XCTAssertTrue(textView.string.contains("<thead>"))
+        XCTAssertTrue(textView.string.contains("<code>** **</code>"))
+        XCTAssertTrue(textView.string.contains("<del>This was mistaken text</del>"))
+        XCTAssertTrue(textView.string.contains("<sub>subscript</sub>"))
+        XCTAssertTrue(textView.string.contains("<sup>superscript</sup>"))
+        XCTAssertTrue(textView.string.contains("<ins>underlined</ins>"))
+        XCTAssertFalse(textView.string.contains("| Style |"))
+
+        let blocks = MDBlock.parse(textView.string)
+        guard case .table(let rows, _, let hasHeader) = blocks.last else {
+            return XCTFail("Expected the preserved HTML table to render as a table")
+        }
+        XCTAssertTrue(hasHeader)
+        XCTAssertEqual(rows[1], ["Bold", "`** **`", "**This is bold text**"])
+        XCTAssertEqual(rows[2][2], "~~This was mistaken text~~")
+        XCTAssertEqual(rows[3][2], "***All this text is important***")
+        XCTAssertEqual(rows[4][2], "This is a <sub>subscript</sub> text")
+        XCTAssertEqual(rows[5][2], "This is a <sup>superscript</sup> text")
+        XCTAssertEqual(rows[6][2], "This is an <ins>underlined</ins> text")
+    }
+
+    func testSemanticHTMLPasteCoversBlocksTasksDetailsDefinitionsAndSafety() throws {
+        let html = """
+        <blockquote><p>Quoted <mark>note</mark><br>next line</p></blockquote>
+        <hr>
+        <ul><li><input type="checkbox" checked>Done</li><li><input type="checkbox">Todo</li></ul>
+        <picture><source srcset="ignored.webp"><img src="https://example.com/p.png" alt="Picture"></picture>
+        <details open><summary>More <kbd>⌘K</kbd></summary><p>Hidden <strong>content</strong></p></details>
+        <dl><dt>Term</dt><dd>A <em>definition</em></dd></dl>
+        <script>alert('no')</script><img src="javascript:alert(1)" alt="Unsafe">
+        """
+        let converted = try XCTUnwrap(
+            RichTextMarkdownConverter.markdown(from: Data(html.utf8), documentType: .html)
+        )
+        XCTAssertTrue(converted.contains("> Quoted <mark>note</mark><br>next line"))
+        XCTAssertTrue(converted.contains("\n\n---\n\n"))
+        XCTAssertTrue(converted.contains("- [x] Done\n- [ ] Todo"))
+        XCTAssertTrue(converted.contains("![Picture](https://example.com/p.png)"))
+        XCTAssertTrue(converted.contains("<details open>"))
+        XCTAssertTrue(converted.contains("<summary>More <kbd>⌘K</kbd></summary>"))
+        XCTAssertTrue(converted.contains("<dl>"))
+        XCTAssertFalse(converted.contains("alert('no')"))
+        XCTAssertFalse(converted.contains("javascript:"))
+
+        let blocks = MDBlock.parse(converted)
+        XCTAssertTrue(blocks.contains { if case .quote = $0 { true } else { false } })
+        XCTAssertTrue(blocks.contains { if case .rule = $0 { true } else { false } })
+        XCTAssertTrue(blocks.contains { if case .details = $0 { true } else { false } })
+        XCTAssertTrue(blocks.contains { if case .definitionList = $0 { true } else { false } })
     }
 
     func testExplicitHTMLCharsetIsNotOverridden() {
@@ -1646,6 +2003,51 @@ final class RichTextMarkdownConverterTests: XCTestCase {
             XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
             XCTAssertEqual(textView.string, "**Bold**")
             pasteboard.clearContents()
+        }
+    }
+
+    func testAttributedTableImportPreservesStructureFormattingAndSafeLinks() throws {
+        let table = NSTextTable()
+        table.numberOfColumns = 2
+        let attributed = NSMutableAttributedString()
+
+        appendTableParagraph("Head A", to: attributed, table: table, row: 0, column: 0, bold: true)
+        appendTableParagraph("Head B", to: attributed, table: table, row: 0, column: 1, bold: true)
+        appendTableParagraph(
+            "First",
+            to: attributed,
+            table: table,
+            row: 1,
+            column: 0,
+            rowSpan: 2,
+            link: "https://example.com/a b"
+        )
+        appendTableParagraph("Second", to: attributed, table: table, row: 1, column: 0, rowSpan: 2)
+        appendTableParagraph(
+            "Unsafe",
+            to: attributed,
+            table: table,
+            row: 1,
+            column: 1,
+            link: "javascript:alert(1)"
+        )
+
+        let converted = RichTextMarkdownConverter.markdown(from: attributed)
+        XCTAssertTrue(converted.contains("<thead>"))
+        XCTAssertTrue(converted.contains("<th><strong>Head A</strong></th>"))
+        XCTAssertTrue(converted.contains("rowspan=\"2\""))
+        XCTAssertTrue(converted.contains("<a href=\"https://example.com/a%20b\">First</a><br>Second"))
+        XCTAssertTrue(converted.contains(">Unsafe</td>"))
+        XCTAssertFalse(converted.contains("javascript:"))
+
+        for documentType in [NSAttributedString.DocumentType.rtf, .rtfd] {
+            let roundTripped = try XCTUnwrap(RichTextMarkdownConverter.markdown(
+                from: data(from: attributed, as: documentType),
+                documentType: documentType
+            ))
+            XCTAssertTrue(roundTripped.contains("<table>"), documentType.rawValue)
+            XCTAssertTrue(roundTripped.contains("Head A"), documentType.rawValue)
+            XCTAssertFalse(roundTripped.contains("javascript:"), documentType.rawValue)
         }
     }
 
@@ -1753,6 +2155,40 @@ final class RichTextMarkdownConverterTests: XCTestCase {
             from: NSRange(location: 0, length: attributed.length),
             documentAttributes: [.documentType: documentType]
         )
+    }
+
+    private func appendTableParagraph(
+        _ text: String,
+        to attributed: NSMutableAttributedString,
+        table: NSTextTable,
+        row: Int,
+        column: Int,
+        rowSpan: Int = 1,
+        columnSpan: Int = 1,
+        bold: Bool = false,
+        link: String? = nil
+    ) {
+        let paragraph = NSMutableAttributedString(string: text + "\n")
+        let style = NSMutableParagraphStyle()
+        style.textBlocks = [NSTextTableBlock(
+            table: table,
+            startingRow: row,
+            rowSpan: rowSpan,
+            startingColumn: column,
+            columnSpan: columnSpan
+        )]
+        paragraph.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: paragraph.length))
+        if bold {
+            paragraph.addAttribute(
+                .font,
+                value: NSFont.boldSystemFont(ofSize: 13),
+                range: NSRange(location: 0, length: text.utf16.count)
+            )
+        }
+        if let link {
+            paragraph.addAttribute(.link, value: link, range: NSRange(location: 0, length: text.utf16.count))
+        }
+        attributed.append(paragraph)
     }
 }
 
@@ -2372,6 +2808,74 @@ final class EditorLifecycleTests: XCTestCase {
             let renderer = ImageRenderer(content: view)
             renderer.proposedSize = ProposedViewSize(width: 700, height: 600)
             XCTAssertNotNil(renderer.nsImage)
+        }
+    }
+
+    func testReadingPreviewRendersSpanningTableDetailsAndDefinitionList() {
+        let markdown = """
+        <table>
+        <caption>Shortcuts</caption>
+        <tr><th rowspan="2">Action</th><th colspan="2">Keys</th></tr>
+        <tr><td><kbd>⌘</kbd></td><td><a href="https://example.com">K</a></td></tr>
+        </table>
+
+        <details open>
+        <summary>More <mark>information</mark></summary>
+        ## Nested heading
+
+        ```swift
+        let x = 1
+        ```
+
+        > Nested quote
+
+        - Nested item
+        </details>
+
+        <dl>
+        <dt>Term</dt>
+        <dd>Definition
+
+        - First
+        - Second</dd>
+        </dl>
+        """
+        let view = MarkdownPreviewView(
+            text: markdown,
+            noteTitles: [],
+            dark: false,
+            onWiki: { _ in }
+        )
+        .frame(width: 700, height: 600)
+        let renderer = ImageRenderer(content: view)
+        renderer.proposedSize = ProposedViewSize(width: 700, height: 600)
+        XCTAssertNotNil(renderer.nsImage)
+    }
+
+    func testSpanningTableGeometryHonorsSpansWithoutOverlapAtNarrowWidths() throws {
+        let cells: [GFM.HTMLTableCell] = [
+            .init(row: 0, column: 0, rowSpan: 2, columnSpan: 1, content: "A", isHeader: true, alignment: .left),
+            .init(row: 0, column: 1, rowSpan: 1, columnSpan: 2, content: "B", isHeader: true, alignment: .center),
+            .init(row: 1, column: 1, rowSpan: 1, columnSpan: 1, content: "C", isHeader: false, alignment: .left),
+            .init(row: 1, column: 2, rowSpan: 1, columnSpan: 1, content: "D", isHeader: false, alignment: .right),
+        ]
+        let bounds = CGRect(x: 12, y: 20, width: 180, height: 74)
+        let frames = try cells.map {
+            try XCTUnwrap(SpanningTableLayout.frame(
+                for: $0,
+                in: bounds,
+                columnCount: 3,
+                rowHeights: [34, 40]
+            ))
+        }
+        XCTAssertEqual(frames[0], CGRect(x: 12, y: 20, width: 60, height: 74))
+        XCTAssertEqual(frames[1], CGRect(x: 72, y: 20, width: 120, height: 34))
+        XCTAssertEqual(frames[2], CGRect(x: 72, y: 54, width: 60, height: 40))
+        XCTAssertEqual(frames[3], CGRect(x: 132, y: 54, width: 60, height: 40))
+        for first in frames.indices {
+            for second in frames.indices where second > first {
+                XCTAssertFalse(frames[first].intersects(frames[second]))
+            }
         }
     }
 
