@@ -286,6 +286,11 @@ struct SourceEditor: NSViewRepresentable {
 
 /// Forwards movement keys to wiki-link completion while the popup is open.
 final class SourceTextView: NSTextView {
+    private struct MarkdownLinePair: Hashable {
+        let header: String
+        let separator: String
+    }
+
     private static let legacyStringPasteboardType = NSPasteboard.PasteboardType("NSStringPboardType")
     private static let maximumRichPasteboardBytes = 2 * 1_024 * 1_024
     private static let richPasteboardTypes: [(NSPasteboard.PasteboardType, NSAttributedString.DocumentType)] = [
@@ -457,6 +462,7 @@ final class SourceTextView: NSTextView {
     }
 
     private func markdownText(from pasteboard: NSPasteboard) -> String? {
+        let plain = plainText(from: pasteboard)
         for (pasteboardType, documentType) in Self.richPasteboardTypes {
             if let data = pasteboard.data(forType: pasteboardType) {
                 guard data.count <= Self.maximumRichPasteboardBytes else { break }
@@ -464,13 +470,65 @@ final class SourceTextView: NSTextView {
                     from: data,
                     documentType: documentType
                 ) else { continue }
-                if let plain = plainText(from: pasteboard) {
+                if let plain {
+                    // Source editors such as VS Code put faithful Markdown beside a
+                    // presentation-oriented rich representation. Prefer that source only
+                    // when conversion demonstrably split a table's header and separator
+                    // into separate paragraphs. Semantic rich code blocks retain adjacent
+                    // lines inside their fence and continue through the rich path.
+                    if richConversionBreaksMarkdownTable(markdown, from: plain) {
+                        return plain
+                    }
                     return markdownPreservingBoundaryWhitespace(markdown, from: plain)
                 }
                 return markdown
             }
         }
-        return plainText(from: pasteboard)
+        return plain
+    }
+
+    private func richConversionBreaksMarkdownTable(_ converted: String, from plain: String) -> Bool {
+        let plainLines = markdownLines(in: plain)
+        guard plainLines.count >= 2 else { return false }
+        let convertedLines = markdownLines(in: converted)
+        var separatedRichLinePairs: Set<MarkdownLinePair> = []
+
+        for convertedHeaderIndex in convertedLines.indices {
+            let convertedHeader = normalizedMarkdownLine(convertedLines[convertedHeaderIndex])
+            guard !convertedHeader.isEmpty else { continue }
+            var nextContentIndex = convertedHeaderIndex + 1
+            while nextContentIndex < convertedLines.count,
+                  normalizedMarkdownLine(convertedLines[nextContentIndex]).isEmpty {
+                nextContentIndex += 1
+            }
+            guard nextContentIndex > convertedHeaderIndex + 1,
+                  nextContentIndex < convertedLines.count else { continue }
+            separatedRichLinePairs.insert(MarkdownLinePair(
+                header: convertedHeader,
+                separator: normalizedMarkdownLine(convertedLines[nextContentIndex])
+            ))
+        }
+
+        for separatorIndex in plainLines.indices.dropFirst() {
+            let header = plainLines[separatorIndex - 1]
+            let separator = plainLines[separatorIndex]
+            guard GFM.isTable(header: header, separator: separator) else { continue }
+            if separatedRichLinePairs.contains(MarkdownLinePair(
+                header: normalizedMarkdownLine(header),
+                separator: normalizedMarkdownLine(separator)
+            )) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func markdownLines(in text: String) -> [String] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
+    }
+
+    private func normalizedMarkdownLine(_ line: String) -> String {
+        line.trimmingCharacters(in: .whitespaces)
     }
 
     private func plainText(from pasteboard: NSPasteboard) -> String? {

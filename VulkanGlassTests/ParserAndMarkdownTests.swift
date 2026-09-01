@@ -1287,6 +1287,54 @@ final class RichTextMarkdownConverterTests: XCTestCase {
         }
     }
 
+    func testSemanticHTMLCodeBlockContainingTableSyntaxRemainsFenced() {
+        let pasteboard = makePasteboard()
+        let table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        let html = "<p><strong>Example</strong></p><pre><code>\(table)</code></pre>"
+        pasteboard.setData(Data(html.utf8), forType: .html)
+        pasteboard.setString("Example\n\(table)", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(textView.string, "**Example**\n\n```\n\(table)\n```")
+    }
+
+    func testRTFAndRTFDChoosePlainOnlyWhenRichConversionBreaksATable() throws {
+        let table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        let codeStyle = NSMutableParagraphStyle()
+        codeStyle.paragraphSpacing = 0
+        let code = NSMutableAttributedString(string: table)
+        code.addAttributes([
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            .paragraphStyle: codeStyle,
+        ], range: NSRange(location: 0, length: code.length))
+
+        for (pasteboardType, documentType) in [
+            (NSPasteboard.PasteboardType.rtf, NSAttributedString.DocumentType.rtf),
+            (.rtfd, .rtfd),
+        ] {
+            let presentationPasteboard = makePasteboard()
+            presentationPasteboard.setData(
+                try data(from: NSAttributedString(string: table), as: documentType),
+                forType: pasteboardType
+            )
+            presentationPasteboard.setString(table, forType: .string)
+            let presentationView = SourceTextView()
+            XCTAssertTrue(presentationView.pasteMarkdown(from: presentationPasteboard))
+            XCTAssertEqual(presentationView.string, table)
+            presentationPasteboard.clearContents()
+
+            let codePasteboard = makePasteboard()
+            codePasteboard.setData(try data(from: code, as: documentType), forType: pasteboardType)
+            codePasteboard.setString(table, forType: .string)
+            let codeView = SourceTextView()
+            XCTAssertTrue(codeView.pasteMarkdown(from: codePasteboard))
+            XCTAssertEqual(codeView.string, "```\n\(table)\n```")
+            codePasteboard.clearContents()
+        }
+    }
+
     func testRichSelectionReadingUsesMarkdownConversion() {
         let pasteboard = makePasteboard()
         pasteboard.setData(Data("<p><strong>Dragged</strong></p>".utf8), forType: .html)
@@ -1420,6 +1468,80 @@ final class EditorLifecycleTests: XCTestCase {
         )
         XCTAssertEqual(changes.last, textView.string)
         XCTAssertEqual(textView.selectedRange(), NSRange(location: (textView.string as NSString).length, length: 0))
+    }
+
+    func testPastePreservesMarkdownTableCopiedFromVSCode() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let markdown = """
+        | Component | Share of the final score |
+        | ----- | ----: |
+        | Track record | 30% |
+        | Career quality | 20% |
+        """
+        let html = #"""
+        <meta charset='utf-8'><div style="font-family: 'FiraCode Nerd Font', Menlo, monospace; font-size: 12px; line-height: 18px; white-space: pre;"><div><span>| Component | Share of the final score |</span></div><div><span>| ----- | ----: |</span></div><div><span>| Track record | 30% |</span></div><div><span>| Career quality | 20% |</span></div></div>
+        """#
+        pasteboard.setData(Data(html.utf8), forType: .html)
+        pasteboard.setString(markdown, forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(textView.string, markdown)
+    }
+
+    func testPastePreservesMixedSourceMarkdownWhenConversionBreaksALaterTable() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let markdown = "Notes\n| A | B |\n| --- | --- |"
+        pasteboard.setData(Data(sourceEditorHTML(for: markdown).utf8), forType: .html)
+        pasteboard.setString(markdown, forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(textView.string, markdown)
+    }
+
+    func testPastePreservesCRLFMarkdownTableFromSourceEditorHTML() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let markdown = "| A | B |\r\n| --- | --- |\r\n| 1 | 2 |"
+        pasteboard.setData(Data(sourceEditorHTML(for: markdown).utf8), forType: .html)
+        pasteboard.setString(markdown, forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(textView.string, markdown)
+    }
+
+    func testTableLikePlainTextWithoutAValidTableStillUsesRichHTML() {
+        let fixtures = [
+            (
+                plain: "A | B",
+                html: "<p><strong>A | B</strong></p>",
+                expected: "**A | B**"
+            ),
+            (
+                plain: "Cost | Benefit\n-- | --",
+                html: "<p><strong>Cost | Benefit</strong></p><p>-- | --</p>",
+                expected: "**Cost | Benefit**\n\n-- | --"
+            ),
+        ]
+
+        for fixture in fixtures {
+            let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+            pasteboard.clearContents()
+            pasteboard.setData(Data(fixture.html.utf8), forType: .html)
+            pasteboard.setString(fixture.plain, forType: .string)
+
+            let textView = SourceTextView()
+            XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+            XCTAssertEqual(textView.string, fixture.expected)
+            pasteboard.clearContents()
+        }
     }
 
     func testPasteFallsBackToPlainTextWhenRichRepresentationIsInvalid() {
@@ -2333,6 +2455,22 @@ final class EditorLifecycleTests: XCTestCase {
             wikiLinks: [],
             headings: []
         )
+    }
+
+    private func sourceEditorHTML(for text: String) -> String {
+        let rows = text
+            .split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .map { line in
+                let escaped = String(line)
+                    .replacingOccurrences(of: "&", with: "&amp;")
+                    .replacingOccurrences(of: "<", with: "&lt;")
+                    .replacingOccurrences(of: ">", with: "&gt;")
+                return "<div><span>\(escaped)</span></div>"
+            }
+            .joined()
+        return #"<meta charset="utf-8"><div style="font-family: 'FiraCode Nerd Font', Menlo, monospace; font-size: 12px; line-height: 18px; white-space: pre;">"#
+            + rows
+            + "</div>"
     }
 
 }
