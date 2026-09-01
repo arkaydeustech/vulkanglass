@@ -1963,8 +1963,89 @@ final class EditorLifecycleTests: XCTestCase {
     }
 
     func testDocumentLeadingEdgeStaysAlignedWhenSwitchingFromPreviewToSource() async throws {
+        for paneWidth: CGFloat in [600, 1_000] {
+            let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+            let path = "/tmp/VulkanGlass-leading-inset-test-\(Int(paneWidth)).md"
+            model.tabs = [
+                NoteTab(
+                    path: path,
+                    title: "Aligned Title",
+                    content: "Body",
+                    originalContent: "Body",
+                    isStandalone: true
+                )
+            ]
+            model.activeTabID = path
+            model.editorMode = .preview
+
+            let titleReported = expectation(description: "Title leading edge at \(paneWidth)")
+            let previewReported = expectation(description: "Preview leading edge at \(paneWidth)")
+            let sourceReported = expectation(description: "Source leading edge at \(paneWidth)")
+            var titleLeading: CGFloat?
+            var previewLeading: CGFloat?
+            var sourceLeading: CGFloat?
+
+            let view = NoteEditorView(onDocumentLeading: { element, leading in
+                switch element {
+                case .title where titleLeading == nil:
+                    titleLeading = leading
+                    titleReported.fulfill()
+                case .previewBody where previewLeading == nil:
+                    previewLeading = leading
+                    previewReported.fulfill()
+                case .sourceBody where sourceLeading == nil:
+                    sourceLeading = leading
+                    sourceReported.fulfill()
+                default:
+                    break
+                }
+            })
+                .environment(model)
+                .frame(width: paneWidth, height: 400, alignment: .topLeading)
+            let hostingView = NSHostingView(rootView: view)
+            hostingView.frame = NSRect(x: 0, y: 0, width: paneWidth, height: 400)
+            hostingView.layoutSubtreeIfNeeded()
+
+            await fulfillment(of: [titleReported, previewReported], timeout: 2)
+            let resolvedTitleLeading = try XCTUnwrap(titleLeading)
+            XCTAssertEqual(
+                resolvedTitleLeading,
+                VGTheme.documentHorizontalPadding,
+                accuracy: 1,
+                "Pane width: \(paneWidth)"
+            )
+            XCTAssertEqual(
+                try XCTUnwrap(previewLeading),
+                resolvedTitleLeading,
+                accuracy: 1,
+                "Pane width: \(paneWidth)"
+            )
+
+            model.editorMode = .source
+            await fulfillment(of: [sourceReported], timeout: 2)
+            hostingView.layoutSubtreeIfNeeded()
+            let resolvedSourceLeading = try XCTUnwrap(sourceLeading)
+            XCTAssertEqual(
+                resolvedSourceLeading,
+                resolvedTitleLeading,
+                accuracy: 1,
+                "Pane width: \(paneWidth)"
+            )
+            let textView = try XCTUnwrap(firstSubview(of: NSTextView.self, in: hostingView))
+            let actualSourceLeading = textView.convert(textView.textContainerOrigin, to: hostingView).x
+            XCTAssertEqual(
+                actualSourceLeading,
+                resolvedSourceLeading,
+                accuracy: 1,
+                "Pane width: \(paneWidth)"
+            )
+            withExtendedLifetime(hostingView) {}
+        }
+    }
+
+    func testTitleGlyphLeadingEdgeStaysAlignedWhileRenaming() async throws {
         let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
-        let path = "/tmp/VulkanGlass-leading-inset-test.md"
+        let path = "/tmp/VulkanGlass-title-rename-leading-test.md"
         model.tabs = [
             NoteTab(
                 path: path,
@@ -1975,28 +2056,21 @@ final class EditorLifecycleTests: XCTestCase {
             )
         ]
         model.activeTabID = path
-        model.editorMode = .preview
+        model.editorMode = .source
+        model.beginEditingTitle(for: path)
 
-        let titleReported = expectation(description: "Title leading edge is laid out")
-        let previewReported = expectation(description: "Preview body leading edge is laid out")
-        let sourceReported = expectation(description: "Source body leading edge is laid out")
+        let titleReported = expectation(description: "Editing title leading edge")
+        let sourceReported = expectation(description: "Source leading edge while renaming")
         var titleLeading: CGFloat?
-        var previewLeading: CGFloat?
-        var sourceDidLayout = false
-
+        var sourceLeading: CGFloat?
         let view = NoteEditorView(onDocumentLeading: { element, leading in
             switch element {
             case .title where titleLeading == nil:
                 titleLeading = leading
                 titleReported.fulfill()
-            case .previewBody where previewLeading == nil:
-                previewLeading = leading
-                previewReported.fulfill()
-            case .sourceBody where !sourceDidLayout:
-                sourceDidLayout = true
-                DispatchQueue.main.async {
-                    sourceReported.fulfill()
-                }
+            case .sourceBody where sourceLeading == nil:
+                sourceLeading = leading
+                sourceReported.fulfill()
             default:
                 break
             }
@@ -2007,17 +2081,14 @@ final class EditorLifecycleTests: XCTestCase {
         hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
         hostingView.layoutSubtreeIfNeeded()
 
-        await fulfillment(of: [titleReported, previewReported], timeout: 2)
-        let resolvedTitleLeading = try XCTUnwrap(titleLeading)
-        XCTAssertEqual(resolvedTitleLeading, VGTheme.documentHorizontalPadding, accuracy: 1)
-        XCTAssertEqual(try XCTUnwrap(previewLeading), resolvedTitleLeading, accuracy: 1)
-
-        model.editorMode = .source
-        await fulfillment(of: [sourceReported], timeout: 2)
+        await fulfillment(of: [titleReported, sourceReported], timeout: 2)
         hostingView.layoutSubtreeIfNeeded()
-        let textView = try XCTUnwrap(firstSubview(of: NSTextView.self, in: hostingView))
-        let sourceLeading = textView.convert(textView.textContainerOrigin, to: hostingView).x
-        XCTAssertEqual(sourceLeading, resolvedTitleLeading, accuracy: 1)
+        let field = try XCTUnwrap(firstSubview(of: InlineRenameNSTextField.self, in: hostingView))
+        let titleRect = try XCTUnwrap(field.cell?.titleRect(forBounds: field.bounds))
+        let actualTitleLeading = field.convert(titleRect.origin, to: hostingView).x
+        let resolvedTitleLeading = try XCTUnwrap(titleLeading)
+        XCTAssertEqual(actualTitleLeading, resolvedTitleLeading, accuracy: 1)
+        XCTAssertEqual(try XCTUnwrap(sourceLeading), resolvedTitleLeading, accuracy: 1)
         withExtendedLifetime(hostingView) {}
     }
 

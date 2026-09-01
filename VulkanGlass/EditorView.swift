@@ -8,7 +8,6 @@ struct SourceEditor: NSViewRepresentable {
     var dark: Bool
     var baseURL: URL?
     var loadRemoteImages = false
-    var onLeadingLayout: ((CGFloat) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onChange: { text = $0 })
@@ -59,7 +58,6 @@ struct SourceEditor: NSViewRepresentable {
         }
         applyChrome(textView)
         context.coordinator.restyle()
-        onLeadingLayout?(textView.textContainerOrigin.x)
         return scroll
     }
 
@@ -80,7 +78,6 @@ struct SourceEditor: NSViewRepresentable {
         }
         applyChrome(textView)
         context.coordinator.refreshWikiPopup()
-        onLeadingLayout?(textView.textContainerOrigin.x)
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
@@ -1208,11 +1205,24 @@ struct NoteEditorView: View {
                         notes: model.notes,
                         dark: model.dark,
                         baseURL: URL(fileURLWithPath: tab.path).deletingLastPathComponent(),
-                        loadRemoteImages: model.settings.loadRemoteImages,
-                        onLeadingLayout: { leading in
-                            onDocumentLeading?(.sourceBody, leading)
-                        }
+                        loadRemoteImages: model.settings.loadRemoteImages
                     )
+                        .background {
+                            if onDocumentLeading != nil {
+                                GeometryReader { geometry in
+                                    let leading = geometry.frame(
+                                        in: .named("NoteEditorLayout")
+                                    ).minX + VGTheme.documentHorizontalPadding
+                                    Color.clear
+                                        .onAppear {
+                                            onDocumentLeading?(.sourceBody, leading)
+                                        }
+                                        .onChange(of: leading) { _, newLeading in
+                                            onDocumentLeading?(.sourceBody, newLeading)
+                                        }
+                                }
+                            }
+                        }
                         .onChange(of: model.tabs[index].content) { _, newValue in
                             model.updateContent(tab.id, newValue)
                         }
@@ -1257,6 +1267,8 @@ struct NoteEditorView: View {
                     Task { model.endEditingTitle(for: tab.id) }
                 }
                 .id(tab.id)
+                // The borderless NSTextField bridge renders two points left of its SwiftUI frame.
+                .padding(.leading, 2)
             } else {
                 Text(tab.title)
                     .font(.system(size: 34, weight: .bold))
