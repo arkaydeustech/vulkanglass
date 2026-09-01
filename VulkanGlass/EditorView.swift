@@ -1934,12 +1934,18 @@ struct InlineRenameTextField: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: InlineRenameTextField
         weak var textField: InlineRenameNSTextField?
+        private let focus: (InlineRenameNSTextField) -> Bool
         private var finished = false
         private var dismantling = false
         private var focusRequested = false
+        private(set) var focusRequestPending = false
 
-        init(parent: InlineRenameTextField) {
+        init(
+            parent: InlineRenameTextField,
+            focus: @escaping (InlineRenameNSTextField) -> Bool = { $0.focusAndSelectAll() }
+        ) {
             self.parent = parent
+            self.focus = focus
         }
 
         func attach(_ textField: InlineRenameNSTextField) {
@@ -1948,15 +1954,26 @@ struct InlineRenameTextField: NSViewRepresentable {
         }
 
         func requestFocus(remainingAttempts: Int = 8) {
-            guard !focusRequested, !finished, !dismantling else { return }
+            guard !focusRequested, !focusRequestPending, !finished, !dismantling else { return }
+            // makeNSView and updateNSView can run before this asynchronous request executes.
+            // Mark it pending now so they cannot enqueue a second makeFirstResponder call, which
+            // would end the field editor session we just started and immediately commit the name.
+            focusRequestPending = true
             DispatchQueue.main.async { [weak self] in
                 guard let self, let textField = self.textField,
                       !self.finished, !self.dismantling
-                else { return }
-                if textField.focusAndSelectAll() {
+                else {
+                    self?.focusRequestPending = false
+                    return
+                }
+                if self.focus(textField) {
                     self.focusRequested = true
-                } else if remainingAttempts > 1 {
-                    self.requestFocus(remainingAttempts: remainingAttempts - 1)
+                    self.focusRequestPending = false
+                } else {
+                    self.focusRequestPending = false
+                    if remainingAttempts > 1 {
+                        self.requestFocus(remainingAttempts: remainingAttempts - 1)
+                    }
                 }
             }
         }

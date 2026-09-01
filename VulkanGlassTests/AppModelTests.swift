@@ -772,6 +772,139 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: tab.title.utf16.count))
     }
 
+    func testInlineRenameFocusRequestIsSingleFlight() async {
+        var focusAttempts = 0
+        let coordinator = InlineRenameTextField.Coordinator(
+            parent: inlineRenameRepresentable(),
+            focus: { _ in
+                focusAttempts += 1
+                return true
+            }
+        )
+        let field = InlineRenameNSTextField(string: "Draft")
+        coordinator.textField = field
+
+        coordinator.requestFocus()
+        coordinator.requestFocus()
+        await drainMainQueue()
+
+        XCTAssertEqual(focusAttempts, 1)
+        XCTAssertFalse(coordinator.focusRequestPending)
+    }
+
+    func testInlineRenameFocusRequestRetriesAfterFailure() async {
+        let attemptedFocus = expectation(description: "Focus retried until it succeeded")
+        attemptedFocus.expectedFulfillmentCount = 3
+        attemptedFocus.assertForOverFulfill = true
+        var focusAttempts = 0
+        let coordinator = InlineRenameTextField.Coordinator(
+            parent: inlineRenameRepresentable(),
+            focus: { _ in
+                focusAttempts += 1
+                attemptedFocus.fulfill()
+                return focusAttempts == 3
+            }
+        )
+        let field = InlineRenameNSTextField(string: "Draft")
+        coordinator.textField = field
+
+        coordinator.requestFocus(remainingAttempts: 3)
+        await fulfillment(of: [attemptedFocus], timeout: 1)
+        await drainMainQueue()
+
+        XCTAssertEqual(focusAttempts, 3)
+        XCTAssertFalse(coordinator.focusRequestPending)
+    }
+
+    func testInlineRenamePendingFocusIsAbandonedDuringDismantle() async {
+        var focusAttempts = 0
+        let coordinator = InlineRenameTextField.Coordinator(
+            parent: inlineRenameRepresentable(),
+            focus: { _ in
+                focusAttempts += 1
+                return true
+            }
+        )
+        let field = InlineRenameNSTextField(string: "Draft")
+        coordinator.textField = field
+
+        coordinator.requestFocus()
+        coordinator.prepareForDismantle()
+        await drainMainQueue()
+
+        XCTAssertEqual(focusAttempts, 0)
+        XCTAssertFalse(coordinator.focusRequestPending)
+    }
+
+    func testInlineRenamePendingFocusIsAbandonedAfterCompletion() async {
+        var committed: String?
+        var focusAttempts = 0
+        let coordinator = InlineRenameTextField.Coordinator(
+            parent: inlineRenameRepresentable(onCommit: { committed = $0 }),
+            focus: { _ in
+                focusAttempts += 1
+                return true
+            }
+        )
+        let field = InlineRenameNSTextField(string: "Draft")
+        coordinator.textField = field
+
+        coordinator.requestFocus()
+        XCTAssertTrue(coordinator.control(
+            field,
+            textView: NSTextView(),
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        ))
+        await drainMainQueue()
+
+        XCTAssertEqual(committed, "Draft")
+        XCTAssertEqual(focusAttempts, 0)
+        XCTAssertFalse(coordinator.focusRequestPending)
+    }
+
+    func testEnteringTitleRenameAfterRenderingKeepsTheFieldEditing() async throws {
+        let root = try temporaryDirectory()
+        let note = root.appendingPathComponent("Existing Note.md")
+        try "body".write(to: note, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        await model.openTab(path: note.path, standalone: true)
+        let tab = try XCTUnwrap(model.activeTab)
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView()
+                .environment(model)
+                .frame(width: 700, height: 400)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 700, height: 400)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+
+        model.beginEditingTitle(for: tab.id)
+        guard let (field, editor) = await waitForInlineRenameEditor(in: hostingView) else {
+            XCTFail("The title rename field did not install its field editor within one second")
+            return
+        }
+        // Let any focus work queued by the same SwiftUI update finish before checking that the
+        // editing session survived. The regression enqueued a second request that ended editing.
+        await drainMainQueue()
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+        XCTAssertTrue(window.firstResponder === editor)
+
+        editor.insertText("Renamed", replacementRange: editor.selectedRange())
+        XCTAssertEqual(field.stringValue, "Renamed")
+        XCTAssertEqual(model.titleEditingDraft, "Renamed")
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+    }
+
     func testInlineRenameDismantleDoesNotCommitDraft() async {
         var draft = "Half typed"
         var committed: String?
@@ -1095,6 +1228,42 @@ final class AppModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+
+    private func inlineRenameRepresentable(
+        onCommit: @escaping (String) -> Void = { _ in }
+    ) -> InlineRenameTextField {
+        return InlineRenameTextField(
+            text: .constant("Draft"),
+            font: .systemFont(ofSize: 13),
+            onCommit: onCommit,
+            onCancel: {}
+        )
+    }
+
+    private func drainMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                continuation.resume()
+            }
+        }
+    }
+
+    private func waitForInlineRenameEditor(
+        in root: NSView,
+        timeout: Duration = .seconds(1)
+    ) async -> (InlineRenameNSTextField, NSTextView)? {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        repeat {
+            root.layoutSubtreeIfNeeded()
+            if let field = firstDescendant(of: InlineRenameNSTextField.self, in: root),
+               let editor = field.currentEditor() as? NSTextView {
+                return (field, editor)
+            }
+            await Task.yield()
+        } while clock.now < deadline
+        return nil
     }
 }
 
