@@ -444,6 +444,7 @@ enum InlineRun: Identifiable, Equatable {
     case italic(String)
     case boldItalic(String)
     case strikethrough(String)
+    case underline(String)
     case wiki(target: String, label: String)
     case tag(String)
     case link(label: String, url: String)
@@ -459,6 +460,7 @@ enum InlineRun: Identifiable, Equatable {
         case .italic(let value): return "it-\(value)"
         case .boldItalic(let value): return "bi-\(value)"
         case .strikethrough(let value): return "s-\(value)"
+        case .underline(let value): return "u-\(value)"
         case .wiki(let target, let label): return "w-\(target)-\(label)"
         case .tag(let value): return "g-\(value)"
         case .link(let label, let url): return "l-\(label)-\(url)"
@@ -551,7 +553,7 @@ struct InlineRunsView: View {
                 baseURL: baseURL,
                 loadRemoteImages: loadRemoteImages
             )
-        case .text, .bold, .italic, .boldItalic, .strikethrough, .emoji:
+        case .text, .bold, .italic, .boldItalic, .strikethrough, .underline, .emoji:
             Self.composedText([run])
         }
     }
@@ -568,7 +570,7 @@ struct InlineRunsView: View {
 
         for run in runs {
             switch run {
-            case .text, .bold, .italic, .boldItalic, .strikethrough, .emoji:
+            case .text, .bold, .italic, .boldItalic, .strikethrough, .underline, .emoji:
                 textRuns.append(run)
             case .wiki, .tag, .link, .code, .footnote, .image:
                 flushText()
@@ -597,6 +599,8 @@ struct InlineRunsView: View {
             return Text(value).bold().italic()
         case .strikethrough(let value):
             return Text(value).strikethrough()
+        case .underline(let value):
+            return Text(value).underline()
         case .wiki, .tag, .link, .code, .footnote, .image:
             return Text("")
         }
@@ -624,6 +628,11 @@ struct InlineRunsView: View {
                     index = input.index(after: next)
                     continue
                 }
+            }
+            if input[index] == "<", let parsed = parseUnderline(input, from: index) {
+                result.append(.underline(parsed.content))
+                index = parsed.end
+                continue
             }
             if suffix.hasPrefix("[[") {
                 let contentStart = input.index(index, offsetBy: 2)
@@ -925,14 +934,31 @@ struct InlineRunsView: View {
     }
 
     private static func parseLink(_ input: String, from index: String.Index) -> (label: String, url: String, end: String.Index)? {
-        guard input[index] == "[",
-              let bracket = input.range(of: "](", range: index..<input.endIndex),
-              let close = input.range(of: ")", range: bracket.upperBound..<input.endIndex)
-        else { return nil }
-        let label = String(input[input.index(after: index)..<bracket.lowerBound])
-        let url = String(input[bracket.upperBound..<close.lowerBound])
-        guard !label.isEmpty, !url.isEmpty else { return nil }
-        return (label, url, close.upperBound)
+        let location = NSRange(index..<index, in: input).location
+        guard let parsed = GFM.inlineLink(in: input, startingAt: location),
+              let range = Range(parsed.range, in: input) else { return nil }
+        return (parsed.label, parsed.destination, range.upperBound)
+    }
+
+    private static func parseUnderline(
+        _ input: String,
+        from index: String.Index
+    ) -> (content: String, end: String.Index)? {
+        for tag in ["u", "ins"] {
+            let opening = "<\(tag)>"
+            let closing = "</\(tag)>"
+            guard let openingEnd = input.index(index, offsetBy: opening.count, limitedBy: input.endIndex),
+                  String(input[index..<openingEnd]).caseInsensitiveCompare(opening) == .orderedSame,
+                  let closingRange = input.range(
+                      of: closing,
+                      options: .caseInsensitive,
+                      range: openingEnd..<input.endIndex
+                  ) else { continue }
+            let content = String(input[openingEnd..<closingRange.lowerBound])
+            guard !content.isEmpty, !content.contains("\n"), !content.contains("\r") else { continue }
+            return (content, closingRange.upperBound)
+        }
+        return nil
     }
 
     private static func parseEmoji(_ input: String, from index: String.Index) -> (glyph: String, end: String.Index)? {

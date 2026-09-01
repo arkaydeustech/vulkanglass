@@ -322,6 +322,7 @@ final class SourceTextView: NSTextView {
     private var imageGeneration = 0
     private(set) var imageLoadAttempts: [URL: Int] = [:]
     var imageLoadHandler: ((URL, Bool) -> Void)?
+    var linkEditErrorHandler: ((String) -> Void)?
     var onGeometryChange: (() -> Void)?
     private var tableTrackingArea: NSTrackingArea?
     private var controlledTableRange: NSRange?
@@ -367,6 +368,101 @@ final class SourceTextView: NSTextView {
     override func doCommand(by selector: Selector) {
         if wikiHandler?.handleCommand(selector) == true { return }
         super.doCommand(by: selector)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard isEditable, window?.firstResponder === self else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let ignoredFlags: NSEvent.ModifierFlags = [.capsLock, .numericPad, .function]
+        let modifiers = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting(ignoredFlags)
+        let key = event.charactersIgnoringModifiers?.lowercased()
+
+        switch (key, modifiers) {
+        case ("b", [.command]):
+            toggleBold(nil)
+        case ("i", [.command]):
+            toggleItalic(nil)
+        case ("u", [.command]):
+            toggleUnderline(nil)
+        case ("k", [.command]):
+            editLink(nil)
+        case ("1", [.command, .option]):
+            applyHeading(level: 1)
+        case ("2", [.command, .option]):
+            applyHeading(level: 2)
+        case ("3", [.command, .option]):
+            applyHeading(level: 3)
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
+        return true
+    }
+
+    @objc func toggleBold(_ sender: Any?) {
+        guard isEditable else { return }
+        toggleAsteriskStyle(markerLength: 2)
+    }
+
+    @objc func toggleItalic(_ sender: Any?) {
+        guard isEditable else { return }
+        toggleAsteriskStyle(markerLength: 1)
+    }
+
+    @objc func toggleUnderline(_ sender: Any?) {
+        guard isEditable else { return }
+        toggleDelimitedStyle(
+            preferred: (opening: "<u>", closing: "</u>"),
+            accepted: [
+                (opening: "<u>", closing: "</u>"),
+                (opening: "<ins>", closing: "</ins>"),
+            ]
+        )
+    }
+
+    @objc func applyHeading1(_ sender: Any?) { applyHeading(level: 1) }
+    @objc func applyHeading2(_ sender: Any?) { applyHeading(level: 2) }
+    @objc func applyHeading3(_ sender: Any?) { applyHeading(level: 3) }
+
+    @objc func editLink(_ sender: Any?) {
+        guard isEditable else { return }
+        let context = linkEditingContext()
+        guard !context.isImage else {
+            reportLinkEditError("Command-K edits links, not image destinations.")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = context.isExistingLink ? "Edit link" : "Add link"
+        alert.informativeText = "Enter the URL for the selected text."
+        alert.addButton(withTitle: context.isExistingLink ? "Update Link" : "Add Link")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        field.stringValue = context.url ?? ""
+        field.placeholderString = "https://example.com"
+        alert.accessoryView = field
+
+        let complete: (NSApplication.ModalResponse) -> Void = { [weak self, weak field] response in
+            guard let self, let field else { return }
+            self.handleLinkResponse(response, url: field.stringValue, context: context)
+        }
+
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: complete)
+            DispatchQueue.main.async {
+                alert.window.makeFirstResponder(field)
+                field.selectText(nil)
+            }
+        } else {
+            complete(alert.runModal())
+        }
+    }
+
+    @discardableResult
+    func applyLink(url: String) -> Bool {
+        completeLinkEdit(url: url, context: linkEditingContext())
     }
 
     override func updateTrackingAreas() {
@@ -547,6 +643,382 @@ final class SourceTextView: NSTextView {
         let trailing = plainText[plainText.index(after: lastContent)...]
         let body = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         return String(leading) + body + String(trailing)
+    }
+
+    private func toggleAsteriskStyle(markerLength: Int) {
+        let source = string as NSString
+        let selection = selectedRange()
+        guard isValid(selection, in: source) else { return }
+        let selected = source.substring(with: selection) as NSString
+        for marker: unichar in [42, 95] {
+            let selectedLeading = delimiterCount(after: 0, marker: marker, in: selected)
+            let selectedTrailing = delimiterCount(before: selected.length, marker: marker, in: selected)
+            if selection.length > markerLength * 2,
+               styleIsActive(markerLength: markerLength, leftCount: selectedLeading, rightCount: selectedTrailing),
+               delimiterRunIsMarkup(
+                   marker: marker,
+                   openingLocation: selection.location,
+                   closingEnd: NSMaxRange(selection),
+                   in: source
+               ) {
+                let innerLength = selection.length - (markerLength * 2)
+                let replacement = selected.substring(
+                    with: NSRange(location: markerLength, length: innerLength)
+                )
+                _ = replaceSource(
+                    in: selection,
+                    with: replacement,
+                    selecting: NSRange(location: selection.location, length: innerLength)
+                )
+                return
+            }
+
+            let leftCount = delimiterCount(before: selection.location, marker: marker, in: source)
+            let rightCount = delimiterCount(after: NSMaxRange(selection), marker: marker, in: source)
+            let openingLocation = selection.location - markerLength
+            if styleIsActive(markerLength: markerLength, leftCount: leftCount, rightCount: rightCount),
+               delimiterRunIsMarkup(
+                   marker: marker,
+                   openingLocation: selection.location - leftCount,
+                   closingEnd: NSMaxRange(selection) + rightCount,
+                   in: source
+               ) {
+                let replacementRange = NSRange(
+                    location: openingLocation,
+                    length: selection.length + (markerLength * 2)
+                )
+                _ = replaceSource(
+                    in: replacementRange,
+                    with: selected as String,
+                    selecting: NSRange(location: replacementRange.location, length: selection.length)
+                )
+                return
+            }
+        }
+
+        let marker = String(repeating: "*", count: markerLength)
+        _ = replaceSource(
+            in: selection,
+            with: marker + (selected as String) + marker,
+            selecting: NSRange(location: selection.location + markerLength, length: selection.length)
+        )
+    }
+
+    private func styleIsActive(markerLength: Int, leftCount: Int, rightCount: Int) -> Bool {
+        if markerLength == 1 {
+            return leftCount % 2 == 1 && rightCount % 2 == 1
+        }
+        return leftCount >= markerLength && rightCount >= markerLength
+    }
+
+    private func delimiterCount(before location: Int, marker: unichar, in source: NSString) -> Int {
+        var index = location
+        while index > 0, source.character(at: index - 1) == marker { index -= 1 }
+        return location - index
+    }
+
+    private func delimiterCount(after location: Int, marker: unichar, in source: NSString) -> Int {
+        var index = location
+        while index < source.length, source.character(at: index) == marker { index += 1 }
+        return index - location
+    }
+
+    private func delimiterRunIsMarkup(
+        marker: unichar,
+        openingLocation: Int,
+        closingEnd: Int,
+        in source: NSString
+    ) -> Bool {
+        guard openingLocation >= 0, closingEnd <= source.length,
+              !isEscaped(openingLocation, in: source) else { return false }
+        guard marker == 95 else { return true }
+        let beforeIsWord = openingLocation > 0 && isMarkdownWordCharacter(source.character(at: openingLocation - 1))
+        let afterIsWord = closingEnd < source.length && isMarkdownWordCharacter(source.character(at: closingEnd))
+        return !beforeIsWord && !afterIsWord
+    }
+
+    private func isEscaped(_ location: Int, in source: NSString) -> Bool {
+        var cursor = location
+        var slashes = 0
+        while cursor > 0, source.character(at: cursor - 1) == 92 {
+            slashes += 1
+            cursor -= 1
+        }
+        return !slashes.isMultiple(of: 2)
+    }
+
+    private func isMarkdownWordCharacter(_ character: unichar) -> Bool {
+        guard character != 95 else { return true }
+        guard let scalar = UnicodeScalar(character) else { return false }
+        return CharacterSet.alphanumerics.contains(scalar)
+    }
+
+    private func toggleDelimitedStyle(
+        preferred: (opening: String, closing: String),
+        accepted: [(opening: String, closing: String)]
+    ) {
+        let source = string as NSString
+        let selection = selectedRange()
+        guard isValid(selection, in: source) else { return }
+
+        for delimiter in accepted {
+            let openingLength = (delimiter.opening as NSString).length
+            let closingLength = (delimiter.closing as NSString).length
+            if selection.length >= openingLength + closingLength {
+                let selected = source.substring(with: selection) as NSString
+                let openingRange = NSRange(location: 0, length: openingLength)
+                let closingRange = NSRange(location: selected.length - closingLength, length: closingLength)
+                if selected.substring(with: openingRange).caseInsensitiveCompare(delimiter.opening) == .orderedSame,
+                   selected.substring(with: closingRange).caseInsensitiveCompare(delimiter.closing) == .orderedSame {
+                    let contentLength = selected.length - openingLength - closingLength
+                    let content = selected.substring(
+                        with: NSRange(location: openingLength, length: contentLength)
+                    )
+                    _ = replaceSource(
+                        in: selection,
+                        with: content,
+                        selecting: NSRange(location: selection.location, length: contentLength)
+                    )
+                    return
+                }
+            }
+
+            let openingRange = NSRange(
+                location: selection.location - openingLength,
+                length: openingLength
+            )
+            let closingRange = NSRange(location: NSMaxRange(selection), length: closingLength)
+            if openingRange.location >= 0,
+               NSMaxRange(closingRange) <= source.length,
+               source.substring(with: openingRange).caseInsensitiveCompare(delimiter.opening) == .orderedSame,
+               source.substring(with: closingRange).caseInsensitiveCompare(delimiter.closing) == .orderedSame {
+                let replacementRange = NSRange(
+                    location: openingRange.location,
+                    length: openingLength + selection.length + closingLength
+                )
+                let content = source.substring(with: selection)
+                _ = replaceSource(
+                    in: replacementRange,
+                    with: content,
+                    selecting: NSRange(location: replacementRange.location, length: selection.length)
+                )
+                return
+            }
+        }
+
+        let content = source.substring(with: selection)
+        _ = replaceSource(
+            in: selection,
+            with: preferred.opening + content + preferred.closing,
+            selecting: NSRange(
+                location: selection.location + (preferred.opening as NSString).length,
+                length: selection.length
+            )
+        )
+    }
+
+    private func applyHeading(level: Int) {
+        guard isEditable, (1...3).contains(level) else { return }
+        let source = string as NSString
+        let selection = selectedRange()
+        guard isValid(selection, in: source) else { return }
+
+        let probe = NSRange(location: selection.location, length: max(0, selection.length - 1))
+        let affectedRange = source.lineRange(for: probe)
+        let replacementPrefix = String(repeating: "#", count: level) + " "
+        let replacementPrefixLength = (replacementPrefix as NSString).length
+        var output = ""
+        var edits: [(location: Int, oldLength: Int, newLength: Int)] = []
+        var cursor = affectedRange.location
+
+        repeat {
+            let lineRange = source.lineRange(for: NSRange(location: cursor, length: 0))
+            let clipped = NSIntersectionRange(lineRange, affectedRange)
+            let line = source.substring(with: clipped) as NSString
+            let visibleLine = (line as String).replacingOccurrences(
+                of: #"[\r\n]+$"#,
+                with: "",
+                options: .regularExpression
+            )
+            if visibleLine.trimmingCharacters(in: CharacterSet.whitespaces).isEmpty {
+                output += line as String
+                edits.append((cursor, 0, 0))
+                cursor = NSMaxRange(clipped)
+                continue
+            }
+            let oldPrefixLength = markdownHeadingPrefixLength(in: line)
+            output += replacementPrefix
+            output += line.substring(from: oldPrefixLength)
+            edits.append((cursor, oldPrefixLength, replacementPrefixLength))
+            cursor = NSMaxRange(clipped)
+        } while cursor < NSMaxRange(affectedRange)
+
+        func mapped(_ position: Int) -> Int {
+            var delta = 0
+            for edit in edits {
+                if position < edit.location { break }
+                if position <= edit.location + edit.oldLength {
+                    return edit.location + delta + edit.newLength
+                }
+                delta += edit.newLength - edit.oldLength
+            }
+            return position + delta
+        }
+
+        let mappedStart = mapped(selection.location)
+        let mappedEnd = mapped(NSMaxRange(selection))
+        _ = replaceSource(
+            in: affectedRange,
+            with: output,
+            selecting: NSRange(location: mappedStart, length: max(0, mappedEnd - mappedStart))
+        )
+    }
+
+    private func markdownHeadingPrefixLength(in line: NSString) -> Int {
+        var hashes = 0
+        while hashes < min(6, line.length), line.character(at: hashes) == 35 { hashes += 1 }
+        guard hashes > 0 else { return 0 }
+        if hashes == line.length { return hashes }
+        let firstWhitespace = line.character(at: hashes)
+        if firstWhitespace == 10 || firstWhitespace == 13 { return hashes }
+        guard firstWhitespace == 32 || firstWhitespace == 9 else { return 0 }
+        var end = hashes + 1
+        while end < line.length {
+            let character = line.character(at: end)
+            guard character == 32 || character == 9 else { break }
+            end += 1
+        }
+        return end
+    }
+
+    struct LinkEditingContext {
+        var range: NSRange
+        var label: String
+        var url: String?
+        var original: String
+        var isExistingLink: Bool
+        var isImage: Bool
+    }
+
+    func linkEditingContext() -> LinkEditingContext {
+        let source = string as NSString
+        let selection = selectedRange()
+        for link in GFM.inlineLinks(in: string, includingImages: true) {
+            let selectionIsInside = selection.length == 0
+                ? selection.location >= link.range.location && selection.location < NSMaxRange(link.range)
+                : selection.location >= link.range.location && NSMaxRange(selection) <= NSMaxRange(link.range)
+            guard selectionIsInside else { continue }
+            return LinkEditingContext(
+                range: link.range,
+                label: link.label,
+                url: link.destination,
+                original: source.substring(with: link.range),
+                isExistingLink: !link.isImage,
+                isImage: link.isImage
+            )
+        }
+        let safeSelection = isValid(selection, in: source) ? selection : NSRange(location: source.length, length: 0)
+        return LinkEditingContext(
+            range: safeSelection,
+            label: source.substring(with: safeSelection),
+            url: nil,
+            original: source.substring(with: safeSelection),
+            isExistingLink: false,
+            isImage: false
+        )
+    }
+
+    @discardableResult
+    func handleLinkResponse(
+        _ response: NSApplication.ModalResponse,
+        url: String,
+        context: LinkEditingContext
+    ) -> Bool {
+        guard response == .alertFirstButtonReturn else { return false }
+        return completeLinkEdit(url: url, context: context)
+    }
+
+    @discardableResult
+    func completeLinkEdit(url: String, context: LinkEditingContext) -> Bool {
+        guard !context.isImage else {
+            reportLinkEditError("Command-K edits links, not image destinations.")
+            return false
+        }
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            guard context.isExistingLink else {
+                reportLinkEditError("Enter a URL before adding the link.")
+                return false
+            }
+            return replaceExistingLinkWithLabel(context)
+        }
+        guard applyLink(url: trimmed, context: context) else {
+            reportLinkEditError("The note changed while the link editor was open. Reopen it and try again.")
+            return false
+        }
+        return true
+    }
+
+    @discardableResult
+    func applyLink(url: String, context: LinkEditingContext) -> Bool {
+        let source = string as NSString
+        guard isValid(context.range, in: source),
+              source.substring(with: context.range) == context.original else { return false }
+        let label = context.label.isEmpty ? url : context.label
+        let replacement = GFM.serializeInlineLink(label: label, destination: url)
+        guard let serialized = GFM.inlineLinks(in: replacement).first else { return false }
+        return replaceSource(
+            in: context.range,
+            with: replacement,
+            selecting: NSRange(
+                location: context.range.location + serialized.labelRange.location,
+                length: serialized.labelRange.length
+            )
+        )
+    }
+
+    private func replaceExistingLinkWithLabel(_ context: LinkEditingContext) -> Bool {
+        let source = string as NSString
+        guard isValid(context.range, in: source),
+              source.substring(with: context.range) == context.original else {
+            reportLinkEditError("The note changed while the link editor was open. Reopen it and try again.")
+            return false
+        }
+        return replaceSource(
+            in: context.range,
+            with: context.label,
+            selecting: NSRange(location: context.range.location, length: (context.label as NSString).length)
+        )
+    }
+
+    private func reportLinkEditError(_ message: String) {
+        if let linkEditErrorHandler {
+            linkEditErrorHandler(message)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Link not changed"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    private func isValid(_ range: NSRange, in source: NSString) -> Bool {
+        range.location != NSNotFound && range.location >= 0 && range.length >= 0 && NSMaxRange(range) <= source.length
+    }
+
+    @discardableResult
+    private func replaceSource(in range: NSRange, with replacement: String, selecting selection: NSRange) -> Bool {
+        guard shouldChangeText(in: range, replacementString: replacement) else { return false }
+        replaceCharacters(in: range, with: replacement)
+        didChangeText()
+        setSelectedRange(selection)
+        scrollRangeToVisible(selection)
+        return true
     }
 
     override func changeFont(_ sender: Any?) {}

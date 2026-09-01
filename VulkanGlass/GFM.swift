@@ -2,6 +2,15 @@ import Foundation
 
 /// GitHub Flavored Markdown helpers shared by live preview and reading view.
 enum GFM {
+    struct InlineLink: Equatable {
+        var range: NSRange
+        var labelRange: NSRange
+        var destinationRange: NSRange
+        var label: String
+        var destination: String
+        var isImage: Bool
+    }
+
     struct TableMutation: Equatable {
         var replacement: String
         var selectionOffset: Int
@@ -51,6 +60,156 @@ enum GFM {
             if trailing { return .right }
             return .left
         }
+    }
+
+    static func inlineLinks(in source: String, includingImages: Bool = false) -> [InlineLink] {
+        let ns = source as NSString
+        var links: [InlineLink] = []
+        var location = 0
+        while location < ns.length {
+            let isImage = ns.character(at: location) == 33
+                && location + 1 < ns.length
+                && ns.character(at: location + 1) == 91
+            let isLink = ns.character(at: location) == 91
+                && (location == 0 || ns.character(at: location - 1) != 33)
+            if (isLink || (includingImages && isImage)),
+               let parsed = inlineLink(in: source, startingAt: location, isImage: isImage) {
+                links.append(parsed)
+                location = NSMaxRange(parsed.range)
+            } else {
+                location += 1
+            }
+        }
+        return links
+    }
+
+    static func inlineLink(
+        in source: String,
+        startingAt location: Int,
+        includingImages: Bool = false
+    ) -> InlineLink? {
+        let ns = source as NSString
+        guard location >= 0, location < ns.length else { return nil }
+        let isImage = ns.character(at: location) == 33
+            && location + 1 < ns.length
+            && ns.character(at: location + 1) == 91
+        let isNormalLink = !isImage
+            && ns.character(at: location) == 91
+            && (location == 0 || ns.character(at: location - 1) != 33)
+        guard (isImage && includingImages) || isNormalLink else { return nil }
+        return inlineLink(in: source, startingAt: location, isImage: isImage)
+    }
+
+    static func serializeInlineLink(label: String, destination: String) -> String {
+        let normalizedLabel = label
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+        let escapedLabel = normalizedLabel
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "]", with: "\\]")
+        let needsAngleBrackets = destination.contains { character in
+            character == "(" || character == ")" || character.isWhitespace
+        }
+        let normalizedDestination = destination
+            .replacingOccurrences(of: " ", with: "%20")
+            .replacingOccurrences(of: "\t", with: "%09")
+            .replacingOccurrences(of: "\r", with: "%0D")
+            .replacingOccurrences(of: "\n", with: "%0A")
+        let serializedDestination: String
+        if needsAngleBrackets {
+            let escapedDestination = normalizedDestination
+                .replacingOccurrences(of: "<", with: "%3C")
+                .replacingOccurrences(of: ">", with: "%3E")
+            serializedDestination = "<\(escapedDestination)>"
+        } else {
+            serializedDestination = normalizedDestination
+        }
+        return "[\(escapedLabel)](\(serializedDestination))"
+    }
+
+    private static func inlineLink(in source: String, startingAt location: Int, isImage: Bool) -> InlineLink? {
+        let ns = source as NSString
+        let openingBracket = location + (isImage ? 1 : 0)
+        guard openingBracket < ns.length, ns.character(at: openingBracket) == 91 else { return nil }
+
+        var cursor = openingBracket + 1
+        var closingBracket: Int?
+        while cursor < ns.length {
+            let character = ns.character(at: cursor)
+            if character == 10 || character == 13 { return nil }
+            if character == 93, !isEscaped(cursor, in: ns) {
+                closingBracket = cursor
+                break
+            }
+            cursor += 1
+        }
+        guard let closingBracket,
+              closingBracket + 1 < ns.length,
+              ns.character(at: closingBracket + 1) == 40 else { return nil }
+
+        let destinationStart = closingBracket + 2
+        guard destinationStart < ns.length else { return nil }
+        let destinationRange: NSRange
+        let closingParenthesis: Int
+        if ns.character(at: destinationStart) == 60 {
+            var end = destinationStart + 1
+            while end < ns.length {
+                let character = ns.character(at: end)
+                if character == 10 || character == 13 { return nil }
+                if character == 62, !isEscaped(end, in: ns) { break }
+                end += 1
+            }
+            guard end < ns.length,
+                  end + 1 < ns.length,
+                  ns.character(at: end + 1) == 41 else { return nil }
+            destinationRange = NSRange(location: destinationStart + 1, length: end - destinationStart - 1)
+            closingParenthesis = end + 1
+        } else {
+            var end = destinationStart
+            var depth = 0
+            while end < ns.length {
+                let character = ns.character(at: end)
+                if character == 10 || character == 13 { return nil }
+                if !isEscaped(end, in: ns) {
+                    if character == 40 {
+                        depth += 1
+                    } else if character == 41 {
+                        if depth == 0 { break }
+                        depth -= 1
+                    }
+                }
+                end += 1
+            }
+            guard end < ns.length, depth == 0 else { return nil }
+            destinationRange = NSRange(location: destinationStart, length: end - destinationStart)
+            closingParenthesis = end
+        }
+
+        let labelRange = NSRange(location: openingBracket + 1, length: closingBracket - openingBracket - 1)
+        guard labelRange.length > 0, destinationRange.length > 0 else { return nil }
+        let rawLabel = ns.substring(with: labelRange)
+        let label = rawLabel
+            .replacingOccurrences(of: "\\]", with: "]")
+            .replacingOccurrences(of: "\\\\", with: "\\")
+        return InlineLink(
+            range: NSRange(location: location, length: closingParenthesis - location + 1),
+            labelRange: labelRange,
+            destinationRange: destinationRange,
+            label: label,
+            destination: ns.substring(with: destinationRange),
+            isImage: isImage
+        )
+    }
+
+    private static func isEscaped(_ location: Int, in source: NSString) -> Bool {
+        var cursor = location
+        var slashes = 0
+        while cursor > 0, source.character(at: cursor - 1) == 92 {
+            slashes += 1
+            cursor -= 1
+        }
+        return !slashes.isMultiple(of: 2)
     }
 
     static func isTableSeparator(_ line: String) -> Bool {

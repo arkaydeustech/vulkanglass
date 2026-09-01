@@ -68,6 +68,37 @@ struct VulkanGlassApp: App {
                     .keyboardShortcut("d", modifiers: .command)
                 Button("Close vault") { Task { await model.closeVault() } }
             }
+            CommandMenu("Format") {
+                Button("Bold") {
+                    NSApp.sendAction(#selector(SourceTextView.toggleBold(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("b", modifiers: .command)
+                Button("Italic") {
+                    NSApp.sendAction(#selector(SourceTextView.toggleItalic(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("i", modifiers: .command)
+                Button("Underline") {
+                    NSApp.sendAction(#selector(SourceTextView.toggleUnderline(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("u", modifiers: .command)
+                Button("Link…") {
+                    NSApp.sendAction(#selector(SourceTextView.editLink(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("k", modifiers: .command)
+                Divider()
+                Button("Heading 1") {
+                    NSApp.sendAction(#selector(SourceTextView.applyHeading1(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("1", modifiers: [.command, .option])
+                Button("Heading 2") {
+                    NSApp.sendAction(#selector(SourceTextView.applyHeading2(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("2", modifiers: [.command, .option])
+                Button("Heading 3") {
+                    NSApp.sendAction(#selector(SourceTextView.applyHeading3(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("3", modifiers: [.command, .option])
+            }
             CommandMenu("Table") {
                 Button("Add Table Column") {
                     NSApp.sendAction(#selector(SourceTextView.addTableColumn(_:)), to: nil, from: nil)

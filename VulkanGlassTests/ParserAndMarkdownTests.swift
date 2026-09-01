@@ -105,6 +105,352 @@ final class InlineParserTests: XCTestCase {
             ]
         )
     }
+
+    func testUnderlineHTMLIsRenderedInTheReadingPreview() {
+        XCTAssertEqual(
+            InlineRunsView.parse("before <u>glass</u> and <INS>clear</ins>"),
+            [.text("before "), .underline("glass"), .text(" and "), .underline("clear")]
+        )
+        let runs = InlineRunsView.parse("<u>glass</u>")
+        XCTAssertEqual(InlineRunsView.layoutGroups(for: runs), [.text(runs)])
+    }
+
+    func testInlineLinksSupportBalancedAndAngleBracketDestinations() {
+        let balanced = "[Swift](https://example.com/Swift_(language))"
+        XCTAssertEqual(
+            InlineRunsView.parse(balanced),
+            [.link(label: "Swift", url: "https://example.com/Swift_(language)")]
+        )
+        XCTAssertEqual(
+            InlineRunsView.parse("[Swift](<https://example.com/Swift_(language)>)"),
+            [.link(label: "Swift", url: "https://example.com/Swift_(language)")]
+        )
+        let token = LivePreview.tokens(in: balanced).filter { $0.kind == .markdownLink }
+        XCTAssertEqual(token.count, 1)
+        XCTAssertEqual(token.first?.fullRange, NSRange(location: 0, length: (balanced as NSString).length))
+    }
+}
+
+@MainActor
+final class SourceTextFormattingTests: XCTestCase {
+    func testBoldAndItalicShortcutsComposeAndToggleAroundTheVisibleSelection() throws {
+        let (_, textView) = focusedTextView()
+        textView.string = "glass"
+        textView.setSelectedRange(NSRange(location: 0, length: 5))
+
+        XCTAssertTrue(textView.performKeyEquivalent(with: try keyEvent("b", keyCode: 11, modifiers: .command)))
+        XCTAssertEqual(textView.string, "**glass**")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 2, length: 5))
+
+        XCTAssertTrue(textView.performKeyEquivalent(with: try keyEvent("i", keyCode: 34, modifiers: .command)))
+        XCTAssertEqual(textView.string, "***glass***")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 3, length: 5))
+
+        textView.toggleBold(nil)
+        XCTAssertEqual(textView.string, "*glass*")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 1, length: 5))
+
+        textView.toggleItalic(nil)
+        XCTAssertEqual(textView.string, "glass")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 0, length: 5))
+    }
+
+    func testFormattingKeyEquivalentsRequireTheEditorToBeFocusedEditableAndExactlyModified() throws {
+        let (window, textView) = focusedTextView()
+        textView.string = "glass"
+        textView.setSelectedRange(NSRange(location: 0, length: 5))
+        let otherField = NSTextField(frame: NSRect(x: 0, y: 40, width: 120, height: 24))
+        window.contentView?.addSubview(otherField)
+
+        XCTAssertTrue(window.makeFirstResponder(otherField))
+        XCTAssertFalse(textView.performKeyEquivalent(with: try keyEvent("b", keyCode: 11, modifiers: .command)))
+        XCTAssertFalse(textView.performKeyEquivalent(with: try keyEvent("k", keyCode: 40, modifiers: .command)))
+        XCTAssertEqual(textView.string, "glass")
+        XCTAssertNil(window.attachedSheet)
+
+        XCTAssertTrue(window.makeFirstResponder(textView))
+        for modifiers: NSEvent.ModifierFlags in [[.command, .shift], [.control], [.command, .option]] {
+            XCTAssertFalse(textView.performKeyEquivalent(with: try keyEvent("b", keyCode: 11, modifiers: modifiers)))
+            XCTAssertEqual(textView.string, "glass")
+        }
+        XCTAssertFalse(textView.performKeyEquivalent(with: try keyEvent("4", keyCode: 21, modifiers: [.command, .option])))
+        XCTAssertEqual(textView.string, "glass")
+
+        textView.isEditable = false
+        XCTAssertFalse(textView.performKeyEquivalent(with: try keyEvent("b", keyCode: 11, modifiers: .command)))
+        XCTAssertEqual(textView.string, "glass")
+    }
+
+    func testBoldAndItalicToggleSupportedUnderscoreMarkupWithoutTouchingLiteralRuns() {
+        let textView = SourceTextView()
+
+        for (source, action, expected) in [
+            ("_glass_", #selector(SourceTextView.toggleItalic(_:)), "glass"),
+            ("__glass__", #selector(SourceTextView.toggleBold(_:)), "glass"),
+            ("___glass___", #selector(SourceTextView.toggleBold(_:)), "_glass_"),
+            ("___glass___", #selector(SourceTextView.toggleItalic(_:)), "__glass__")
+        ] {
+            textView.string = source
+            let content = (source as NSString).range(of: "glass")
+            textView.setSelectedRange(content)
+            textView.doCommand(by: action)
+            XCTAssertEqual(textView.string, expected, source)
+        }
+
+        textView.string = "snake_case_name"
+        textView.setSelectedRange((textView.string as NSString).range(of: "case"))
+        textView.toggleItalic(nil)
+        XCTAssertEqual(textView.string, "snake_*case*_name")
+
+        textView.string = #"\_glass_"#
+        textView.setSelectedRange((textView.string as NSString).range(of: "glass"))
+        textView.toggleItalic(nil)
+        XCTAssertEqual(textView.string, #"\_*glass*_"#)
+    }
+
+    func testUnderlineTogglesExistingUAndInsMarkup() {
+        let textView = SourceTextView()
+        textView.string = "glass"
+        textView.setSelectedRange(NSRange(location: 0, length: 5))
+
+        textView.toggleUnderline(nil)
+        XCTAssertEqual(textView.string, "<u>glass</u>")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 3, length: 5))
+
+        textView.toggleUnderline(nil)
+        XCTAssertEqual(textView.string, "glass")
+
+        textView.string = "<ins>glass</ins>"
+        textView.setSelectedRange(NSRange(location: 5, length: 5))
+        textView.toggleUnderline(nil)
+        XCTAssertEqual(textView.string, "glass")
+
+        for source in ["<INS>glass</INS>", "<U>glass</u>"] {
+            textView.string = source
+            textView.setSelectedRange(NSRange(location: 0, length: (source as NSString).length))
+            textView.toggleUnderline(nil)
+            XCTAssertEqual(textView.string, "glass", source)
+        }
+    }
+
+    func testHeadingShortcutsReplaceExistingHeadingLevelsAcrossSelectedLines() throws {
+        let (_, textView) = focusedTextView()
+        textView.string = "First\n## Second\nThird"
+        textView.setSelectedRange(NSRange(location: 0, length: 15))
+
+        XCTAssertTrue(textView.performKeyEquivalent(with: try keyEvent("3", keyCode: 20, modifiers: [.command, .option])))
+        XCTAssertEqual(textView.string, "### First\n### Second\nThird")
+
+        let second = (textView.string as NSString).range(of: "Second")
+        textView.setSelectedRange(second)
+        textView.applyHeading1(nil)
+        XCTAssertEqual(textView.string, "### First\n# Second\nThird")
+        XCTAssertEqual(
+            (textView.string as NSString).substring(with: textView.selectedRange()),
+            "Second"
+        )
+
+        textView.string = "First\n\nThird"
+        textView.setSelectedRange(NSRange(location: 0, length: (textView.string as NSString).length))
+        textView.applyHeading2(nil)
+        XCTAssertEqual(textView.string, "## First\n\n## Third")
+        XCTAssertEqual(
+            (textView.string as NSString).substring(with: textView.selectedRange()),
+            "First\n\n## Third"
+        )
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 3, length: 15))
+    }
+
+    func testHeadingPrefixBoundariesAndEmptyLines() {
+        let cases: [(String, String)] = [
+            ("##", "# "),
+            ("##\n", "# \n"),
+            ("##\tTitle", "# Title"),
+            ("####### Title", "# ####### Title"),
+            ("##Title", "# ##Title"),
+            ("", ""),
+            ("   \n", "   \n")
+        ]
+        for (source, expected) in cases {
+            let textView = SourceTextView()
+            textView.string = source
+            textView.setSelectedRange(NSRange(location: 0, length: (source as NSString).length))
+            textView.applyHeading1(nil)
+            XCTAssertEqual(textView.string, expected, source)
+        }
+    }
+
+    func testLinkCommandAddsAndEditsTheURLWithoutChangingTheLabel() {
+        let textView = SourceTextView()
+        textView.string = "Read docs"
+        textView.setSelectedRange(NSRange(location: 5, length: 4))
+
+        XCTAssertTrue(textView.applyLink(url: "https://example.com/one"))
+        XCTAssertEqual(textView.string, "Read [docs](https://example.com/one)")
+        XCTAssertEqual(
+            (textView.string as NSString).substring(with: textView.selectedRange()),
+            "docs"
+        )
+
+        XCTAssertTrue(textView.applyLink(url: "https://example.com/two"))
+        XCTAssertEqual(textView.string, "Read [docs](https://example.com/two)")
+        XCTAssertEqual(
+            (textView.string as NSString).substring(with: textView.selectedRange()),
+            "docs"
+        )
+    }
+
+    func testLinkSerializationRoundTripsParenthesesAndEscapedLabelsAcrossBothPreviews() throws {
+        let textView = SourceTextView()
+        textView.string = "Read docs] \\ guide"
+        let labelRange = (textView.string as NSString).range(of: "docs] \\ guide")
+        textView.setSelectedRange(labelRange)
+        let url = "https://en.wikipedia.org/wiki/Swift_(programming_language)"
+
+        XCTAssertTrue(textView.applyLink(url: url))
+        XCTAssertEqual(textView.string, "Read [docs\\] \\\\ guide](<\(url)>)")
+        let parsed = try XCTUnwrap(GFM.inlineLinks(in: textView.string).first)
+        XCTAssertEqual(parsed.label, "docs] \\ guide")
+        XCTAssertEqual(parsed.destination, url)
+        XCTAssertEqual(InlineRunsView.parse(String((textView.string as NSString).substring(from: 5))), [
+            .link(label: "docs] \\ guide", url: url)
+        ])
+        XCTAssertEqual(LivePreview.tokens(in: textView.string).filter { $0.kind == .markdownLink }.count, 1)
+
+        XCTAssertTrue(textView.applyLink(url: "https://example.com/Function_(math)"))
+        XCTAssertEqual(GFM.inlineLinks(in: textView.string).first?.destination, "https://example.com/Function_(math)")
+    }
+
+    func testLinkLabelsCollapseNewlinesAndCaretSelectionsUseTheURLAsLabel() {
+        let textView = SourceTextView()
+        textView.string = "two\nlines"
+        textView.setSelectedRange(NSRange(location: 0, length: 9))
+        XCTAssertTrue(textView.applyLink(url: "https://example.com"))
+        XCTAssertEqual(textView.string, "[two lines](https://example.com)")
+
+        textView.string = ""
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        XCTAssertTrue(textView.applyLink(url: "https://example.com"))
+        XCTAssertEqual(textView.string, "[https://example.com](https://example.com)")
+
+        textView.string = "space"
+        textView.setSelectedRange(NSRange(location: 0, length: 5))
+        XCTAssertTrue(textView.applyLink(url: "https://example.com/two words"))
+        XCTAssertEqual(textView.string, "[space](<https://example.com/two%20words>)")
+        XCTAssertNotNil(MarkdownResourceResolver.linkURL("https://example.com/two%20words", relativeTo: nil))
+    }
+
+    func testLinkCommandRejectsImagesAndDoesNotTreatTheCaretAfterALinkAsInsideIt() {
+        let textView = SourceTextView()
+        var error: String?
+        textView.linkEditErrorHandler = { error = $0 }
+        textView.string = "![alt](img.png)"
+        textView.setSelectedRange((textView.string as NSString).range(of: "alt"))
+
+        XCTAssertFalse(textView.applyLink(url: "https://example.com"))
+        XCTAssertEqual(textView.string, "![alt](img.png)")
+        XCTAssertNotNil(error)
+
+        textView.string = "[docs](https://example.com) next"
+        let link = GFM.inlineLinks(in: textView.string)[0]
+        textView.setSelectedRange(NSRange(location: NSMaxRange(link.range), length: 0))
+        XCTAssertFalse(textView.linkEditingContext().isExistingLink)
+    }
+
+    func testLinkResponseSupportsCancelUnlinkValidationAndStaleContextFeedback() {
+        let textView = SourceTextView()
+        var errors: [String] = []
+        textView.linkEditErrorHandler = { errors.append($0) }
+        textView.string = "[docs](https://example.com)"
+        textView.setSelectedRange((textView.string as NSString).range(of: "docs"))
+        let context = textView.linkEditingContext()
+
+        XCTAssertFalse(textView.handleLinkResponse(.alertSecondButtonReturn, url: "https://new.example", context: context))
+        XCTAssertEqual(textView.string, "[docs](https://example.com)")
+        XCTAssertTrue(textView.handleLinkResponse(.alertFirstButtonReturn, url: "   ", context: context))
+        XCTAssertEqual(textView.string, "docs")
+
+        textView.string = "plain"
+        textView.setSelectedRange(NSRange(location: 0, length: 5))
+        XCTAssertFalse(textView.applyLink(url: " \n "))
+        XCTAssertTrue(errors.last?.contains("Enter a URL") == true)
+
+        textView.string = "[docs](https://example.com)"
+        textView.setSelectedRange((textView.string as NSString).range(of: "docs"))
+        let stale = textView.linkEditingContext()
+        textView.string = "changed"
+        XCTAssertFalse(textView.completeLinkEdit(url: "https://new.example", context: stale))
+        XCTAssertTrue(errors.last?.contains("note changed") == true)
+    }
+
+    func testLinkEditorUsesCancelableSheetAndDetachedModalFallback() throws {
+        let (window, textView) = focusedTextView()
+        textView.string = "docs"
+        textView.setSelectedRange(NSRange(location: 0, length: 4))
+        textView.editLink(nil)
+
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        window.endSheet(sheet, returnCode: .alertSecondButtonReturn)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        XCTAssertEqual(textView.string, "docs")
+        XCTAssertNil(window.attachedSheet)
+
+        let detached = SourceTextView()
+        detached.string = "standalone"
+        detached.setSelectedRange(NSRange(location: 0, length: 10))
+        DispatchQueue.main.async { NSApp.abortModal() }
+        detached.editLink(nil)
+        XCTAssertEqual(detached.string, "standalone")
+    }
+
+    func testCaretFormattingInsertsBalancedDelimiters() {
+        let textView = SourceTextView()
+        textView.string = ""
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        textView.toggleBold(nil)
+        XCTAssertEqual(textView.string, "****")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 2, length: 0))
+
+        textView.string = ""
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        textView.toggleUnderline(nil)
+        XCTAssertEqual(textView.string, "<u></u>")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 3, length: 0))
+    }
+
+    private func focusedTextView() -> (NSWindow, SourceTextView) {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 240),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: window.contentView?.bounds ?? .zero)
+        let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 180))
+        container.addSubview(textView)
+        window.contentView = container
+        XCTAssertTrue(window.makeFirstResponder(textView))
+        return (window, textView)
+    }
+
+    private func keyEvent(
+        _ characters: String,
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags
+    ) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
+        ))
+    }
 }
 
 final class MarkdownBlockTests: XCTestCase {

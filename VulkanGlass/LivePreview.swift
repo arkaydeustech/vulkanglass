@@ -115,7 +115,6 @@ enum LivePreview {
         static let wiki = try! NSRegularExpression(pattern: #"\[\[([^\]|#\r\n]+)(?:#[^\]|\r\n]+)?(?:\|([^\]\r\n]+))?\]\]"#)
         static let image = try! NSRegularExpression(pattern: #"!\[([^\]\r\n]*)\]\(([^)\s]+)(?:\s+\"[^\"\r\n]*\")?\)"#)
         static let footnoteReference = try! NSRegularExpression(pattern: #"\[\^([^\]\r\n]+)\](?!:)"#)
-        static let markdownLink = try! NSRegularExpression(pattern: #"\[([^\]\r\n]+)\]\(([^)\r\n]+)\)"#)
         static let inlineCode = try! NSRegularExpression(pattern: #"`([^`\r\n]+)`"#)
         static let angleLink = try! NSRegularExpression(pattern: #"<(https?://[^>\s]+|mailto:[^>\s]+)>"#)
         static let bareURL = try! NSRegularExpression(pattern: #"https?://[^\s<]+[^\s<.,:;!?)\]]"#)
@@ -1223,10 +1222,10 @@ enum LivePreview {
             ))
         }
 
-        for match in Regex.markdownLink.matches(in: text, range: NSRange(location: 0, length: line.length)) {
-            let full = offset(match.range, by: lineRange.location)
+        for link in GFM.inlineLinks(in: text) {
+            let full = offset(link.range, by: lineRange.location)
             if covered(full.location, by: occupied) { continue }
-            let label = offset(match.range(at: 1), by: lineRange.location)
+            let label = offset(link.labelRange, by: lineRange.location)
             let open = NSRange(location: full.location, length: 1)
             let rest = NSRange(location: NSMaxRange(label), length: NSMaxRange(full) - NSMaxRange(label))
             add(Token(fullRange: full, delimiterRanges: [open, rest], kind: .markdownLink))
