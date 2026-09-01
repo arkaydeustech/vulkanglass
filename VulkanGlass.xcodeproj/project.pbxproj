@@ -32,12 +32,22 @@
 		CF42D3A8DFC1BC74723E57BD /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8D41BB89E6CDA35129B68AF /* WelcomeView.swift */; };
 		8F9C42C1465AF470CC488684 /* WikiLinkSuggest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AB16AB53B5209C8353D89CD /* WikiLinkSuggest.swift */; };
 		6DE92AC11366DCEBCC3EAF78 /* WorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D48A4662A5933F034B907FE /* WorkspaceView.swift */; };
+		C0590E5E40573C635ADC4B37 /* CodeHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 630BBC9E60BBA1CA6FDD1D54 /* CodeHighlight.swift */; };
+		DCC8B74BBE5F0849DB92A04E /* GFM.swift in Sources */ = {isa = PBXBuildFile; fileRef = D31B47CE645C214DECFB9311 /* GFM.swift */; };
+		C4FF2B3F2327C049F671EC65 /* MarkdownPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B562AF0CB8F382BF9B01643 /* MarkdownPreviewView.swift */; };
+		18B9B56D46C7A1E9EADBDBD6 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 911DAA6D3C2457F595D32DC5 /* Theme.swift */; };
+		1EC574DF82CCA4B1D1451A8F /* PreviewViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F681E7978D0947CBDFA29AD /* PreviewViewController.swift */; };
+		695433D745AD0EEE5284117D /* QuickLookPreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */; };
 		3C642F51BDE57C04ED72BD8F /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */; };
 		4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */; };
 		0008B1898EB1B9ACA79DC4A6 /* GitServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E091D111CB3836061C3D76 /* GitServiceTests.swift */; };
 		73429833E75444B2B54E8F58 /* GraphAndFileServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */; };
 		9B2AF4F97D758C0C68D2545A /* ParserAndMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */; };
+		50552FC725A83E7B9687814D /* QuickLookPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */; };
+		EB572FAC6BCE104D8D5E9686 /* PreviewViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F681E7978D0947CBDFA29AD /* PreviewViewController.swift */; };
+		CB7DDC33E0F468D06DE274D9 /* QuickLookPreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */; };
 		20DDA1EF970C365A16F71374 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7DF371221373A897261298A7 /* Assets.xcassets */; };
+		5906E3462BC1FC28CB209C69 /* VulkanGlassQuickLook.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 8289EBE981AA82658B3AAE4A /* VulkanGlassQuickLook.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		DE1439ACCFCEB73E6F9981A5 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -46,6 +56,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
         };
 		6550D9BAA82E03D8548FF5B2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		498065859E07BBE00D52670E /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -89,6 +106,17 @@
 			path = VulkanGlass;
 			sourceTree = "<group>";
         };
+		FE834EBCEA4BA67F3AFEAD57 /* VulkanGlassQuickLook */ = {
+			isa = PBXGroup;
+			children = (
+				0F681E7978D0947CBDFA29AD /* PreviewViewController.swift */,
+				C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */,
+				9B3091D66629C309F2DF132A /* Info.plist */,
+				366B9C4175328DDDE42FCADF /* VulkanGlassQuickLook.entitlements */,
+			);
+			path = VulkanGlassQuickLook;
+			sourceTree = "<group>";
+		};
 		092DEE1B9E766B1416E25C03 /* VulkanGlassTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -97,6 +125,7 @@
 				E5E091D111CB3836061C3D76 /* GitServiceTests.swift */,
 				64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */,
 				4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */,
+				616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */,
 			);
 			path = VulkanGlassTests;
 			sourceTree = "<group>";
@@ -105,6 +134,7 @@
 			isa = PBXGroup;
 			children = (
 				F5BF48AA40CAD7891EB709FC /* VulkanGlass.app */,
+				8289EBE981AA82658B3AAE4A /* VulkanGlassQuickLook.appex */,
 				6835773A78C20D6EB54F02C6 /* VulkanGlassTests.xctest */,
 			);
 			name = Products;
@@ -114,6 +144,7 @@
 			isa = PBXGroup;
 			children = (
 				EFF0382F83C90C0033198163 /* VulkanGlass */,
+				FE834EBCEA4BA67F3AFEAD57 /* VulkanGlassQuickLook */,
 				092DEE1B9E766B1416E25C03 /* VulkanGlassTests */,
 				CC0F68FE2D81F9614883F277 /* Products */,
 			);
@@ -146,16 +177,22 @@
 		D8D41BB89E6CDA35129B68AF /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
 		1AB16AB53B5209C8353D89CD /* WikiLinkSuggest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WikiLinkSuggest.swift; sourceTree = "<group>"; };
 		0D48A4662A5933F034B907FE /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
+		0F681E7978D0947CBDFA29AD /* PreviewViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewViewController.swift; sourceTree = "<group>"; };
+		C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewSupport.swift; sourceTree = "<group>"; };
 		88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
 		7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCLIServiceTests.swift; sourceTree = "<group>"; };
 		E5E091D111CB3836061C3D76 /* GitServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitServiceTests.swift; sourceTree = "<group>"; };
 		64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphAndFileServiceTests.swift; sourceTree = "<group>"; };
 		4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParserAndMarkdownTests.swift; sourceTree = "<group>"; };
+		616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewTests.swift; sourceTree = "<group>"; };
 		F5BF48AA40CAD7891EB709FC /* VulkanGlass.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VulkanGlass.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6835773A78C20D6EB54F02C6 /* VulkanGlassTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VulkanGlassTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		8289EBE981AA82658B3AAE4A /* VulkanGlassQuickLook.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = VulkanGlassQuickLook.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		D76BE393AED47506E6EA937A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		8250F8227BCC59E0B9D94661 /* VulkanGlass.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VulkanGlass.entitlements; sourceTree = "<group>"; };
 		7DF371221373A897261298A7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		9B3091D66629C309F2DF132A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		366B9C4175328DDDE42FCADF /* VulkanGlassQuickLook.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VulkanGlassQuickLook.entitlements; sourceTree = "<group>"; };
 		3B7DFB0747829707F437ED7F /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -199,6 +236,22 @@
 				0008B1898EB1B9ACA79DC4A6 /* GitServiceTests.swift in Sources */,
 				73429833E75444B2B54E8F58 /* GraphAndFileServiceTests.swift in Sources */,
 				9B2AF4F97D758C0C68D2545A /* ParserAndMarkdownTests.swift in Sources */,
+				50552FC725A83E7B9687814D /* QuickLookPreviewTests.swift in Sources */,
+				EB572FAC6BCE104D8D5E9686 /* PreviewViewController.swift in Sources */,
+				CB7DDC33E0F468D06DE274D9 /* QuickLookPreviewSupport.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		129AAFC3B2CEFBD94F350B97 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0590E5E40573C635ADC4B37 /* CodeHighlight.swift in Sources */,
+				DCC8B74BBE5F0849DB92A04E /* GFM.swift in Sources */,
+				C4FF2B3F2327C049F671EC65 /* MarkdownPreviewView.swift in Sources */,
+				18B9B56D46C7A1E9EADBDBD6 /* Theme.swift in Sources */,
+				1EC574DF82CCA4B1D1451A8F /* PreviewViewController.swift in Sources */,
+				695433D745AD0EEE5284117D /* QuickLookPreviewSupport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -210,6 +263,17 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		2CB8BC5B06A095BCDDFB9284 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				5906E3462BC1FC28CB209C69 /* VulkanGlassQuickLook.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		42AEFBAE01D2DFD981F7DA7D /* VulkanGlass */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 23208C597AC3B03D36B6E6C4 /* Build configuration list for PBXNativeTarget "VulkanGlass" */;
@@ -217,16 +281,46 @@
 				3B7DFB0747829707F437ED7F /* Sources */,
 				DE1439ACCFCEB73E6F9981A5 /* Frameworks */,
 				3519654520012F56AC9A0E86 /* Resources */,
+				2CB8BC5B06A095BCDDFB9284 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				270EB56A6FC77DA5A9195309 /* PBXTargetDependency */,
 			);
 			name = VulkanGlass;
 			productName = VulkanGlass;
 			productReference = F5BF48AA40CAD7891EB709FC /* VulkanGlass.app */;
 			productType = "com.apple.product-type.application";
         };
+		D05721A19506B6B71DD9E4CF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4993AD58A942FB527B0A4ECD;
+			remoteInfo = VulkanGlassQuickLook;
+		};
+		270EB56A6FC77DA5A9195309 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4993AD58A942FB527B0A4ECD /* VulkanGlassQuickLook */;
+			targetProxy = D05721A19506B6B71DD9E4CF /* PBXContainerItemProxy */;
+		};
+		4993AD58A942FB527B0A4ECD /* VulkanGlassQuickLook */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BDE574A8BB2D1422BA9106A3 /* Build configuration list for PBXNativeTarget "VulkanGlassQuickLook" */;
+			buildPhases = (
+				129AAFC3B2CEFBD94F350B97 /* Sources */,
+				498065859E07BBE00D52670E /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VulkanGlassQuickLook;
+			productName = VulkanGlassQuickLook;
+			productReference = 8289EBE981AA82658B3AAE4A /* VulkanGlassQuickLook.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		AA9CEEF575B2D450B5A766D0 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
@@ -277,6 +371,7 @@
 			projectRoot = "";
 			targets = (
 				42AEFBAE01D2DFD981F7DA7D /* VulkanGlass */,
+				4993AD58A942FB527B0A4ECD /* VulkanGlassQuickLook */,
 				AFB4E650E7C99289E7AD1D27 /* VulkanGlassTests */,
 			);
 		};
@@ -330,7 +425,6 @@
 				CODE_SIGN_STYLE = Manual;
 				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGNING_REQUIRED = YES;
-				OTHER_CODE_SIGN_FLAGS = "--deep --force";
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -356,7 +450,6 @@
 				CODE_SIGN_STYLE = Manual;
 				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGNING_REQUIRED = YES;
-				OTHER_CODE_SIGN_FLAGS = "--deep --force";
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -373,6 +466,58 @@
 			};
 			name = Release;
         };
+		382F2DBDC2B46D3B1113190D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = VulkanGlassQuickLook/VulkanGlassQuickLook.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = VulkanGlassQuickLook/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.quicklook;
+				PRODUCT_MODULE_NAME = VulkanGlassQuickLook;
+				PRODUCT_NAME = VulkanGlassQuickLook;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = targeted;
+			};
+			name = Debug;
+		};
+		4C1B2365BBD2B9F97A6AA410 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = VulkanGlassQuickLook/VulkanGlassQuickLook.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = VulkanGlassQuickLook/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.quicklook;
+				PRODUCT_MODULE_NAME = VulkanGlassQuickLook;
+				PRODUCT_NAME = VulkanGlassQuickLook;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = targeted;
+			};
+			name = Release;
+		};
 		FB9B240FC74E84D3D0525F8D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -381,6 +526,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) QUICK_LOOK_CONTROLLER_TESTING";
 				SWIFT_VERSION = 5.0;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VulkanGlass.app/Contents/MacOS/VulkanGlass";
 			};
@@ -394,6 +540,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) QUICK_LOOK_CONTROLLER_TESTING";
 				SWIFT_VERSION = 5.0;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VulkanGlass.app/Contents/MacOS/VulkanGlass";
 			};
@@ -417,6 +564,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
         };
+		BDE574A8BB2D1422BA9106A3 /* Build configuration list for PBXNativeTarget "VulkanGlassQuickLook" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				382F2DBDC2B46D3B1113190D /* Debug */,
+				4C1B2365BBD2B9F97A6AA410 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		D9381DB4D47C1A1FCDF26B7F /* Build configuration list for PBXNativeTarget "VulkanGlassTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

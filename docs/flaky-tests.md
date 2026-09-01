@@ -5,6 +5,17 @@ pass when their owning test file is rerun in isolation. Entries remain here when
 resolved so the failure history and verification are preserved. Do not skip or
 delete a failing test to hide a flake.
 
+## MarkdownResourceTests.testRedirectDelegateRejectsPrivateDestination (VulkanGlassTests/ParserAndMarkdownTests.swift)
+
+- **Status:** open
+- **Date observed:** 2026-09-01
+- **Original command:** `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' -derivedDataPath /tmp/vg-review-dd test`
+- **Worker configuration:** Xcode default `xcodebuild test`
+- **Failure:** The test runner exited with code 0 before finishing the test; the app test host exited and Xcode restarted it. No assertion failure was reported.
+- **Suite counts:** 227 total, 226 passed, 1 failed
+- **Isolated rerun:** `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' -derivedDataPath /tmp/vg-review-dd -only-testing:VulkanGlassTests/MarkdownResourceTests test` → passed, 4/4
+- **Hypothesis:** No evidence-backed root cause yet. The failure did not reproduce in an identical aggregate rerun, which passed 227/227; the affected production and test code was unchanged by the Quick Look overlay.
+
 ## AppModelTests.testAutosavePersistsTheEditedTabAfterSwitching (VulkanGlassTests/AppModelTests.swift)
 
 - **Status:** resolved 2026-08-29

@@ -21,7 +21,7 @@ enum GFM {
         var hasHeader: Bool
     }
 
-    enum AlertKind: String, Equatable, CaseIterable {
+    enum AlertKind: String, Equatable, CaseIterable, Sendable {
         case note = "NOTE"
         case tip = "TIP"
         case important = "IMPORTANT"
@@ -49,7 +49,7 @@ enum GFM {
         }
     }
 
-    enum Alignment: Equatable {
+    enum Alignment: Equatable, Sendable {
         case left, center, right
 
         static func parse(_ cell: String) -> Alignment {
@@ -586,8 +586,36 @@ enum MarkdownResourceResolver {
         return true
     }
 
-    static func mayLoadImage(_ url: URL, loadRemoteImages: Bool) -> Bool {
-        url.isFileURL || (loadRemoteImages && isAllowedRemoteURL(url))
+    static func mayLoadImage(
+        _ url: URL,
+        loadLocalImages: Bool = true,
+        loadRemoteImages: Bool
+    ) -> Bool {
+        if url.isFileURL {
+            return loadLocalImages
+        }
+        return loadRemoteImages && isAllowedRemoteURL(url)
+    }
+
+    static func imagePlaceholder(
+        alt: String,
+        resolvedURL: URL?,
+        loadLocalImages: Bool,
+        loadRemoteImages: Bool
+    ) -> String {
+        let reason: String?
+        if let resolvedURL, resolvedURL.isFileURL, !loadLocalImages {
+            reason = "local image blocked"
+        } else if let resolvedURL, !resolvedURL.isFileURL, !loadRemoteImages {
+            reason = "remote image blocked"
+        } else if resolvedURL == nil {
+            reason = "image unavailable"
+        } else {
+            reason = nil
+        }
+
+        guard let reason else { return alt }
+        return alt.isEmpty ? reason.capitalized : "\(alt) (\(reason))"
     }
 }
 

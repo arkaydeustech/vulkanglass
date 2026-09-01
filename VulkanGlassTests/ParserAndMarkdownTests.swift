@@ -710,6 +710,22 @@ final class MarkdownResourceTests: XCTestCase {
         XCTAssertTrue(MarkdownResourceResolver.isAllowedRemoteURL(publicURL))
         XCTAssertFalse(MarkdownResourceResolver.mayLoadImage(publicURL, loadRemoteImages: false))
         XCTAssertTrue(MarkdownResourceResolver.mayLoadImage(publicURL, loadRemoteImages: true))
+
+        let localURL = URL(fileURLWithPath: "/vault/Notes/images/pic.png")
+        XCTAssertFalse(MarkdownResourceResolver.mayLoadImage(
+            localURL,
+            loadLocalImages: false,
+            loadRemoteImages: false
+        ))
+        XCTAssertEqual(
+            MarkdownResourceResolver.imagePlaceholder(
+                alt: "Diagram",
+                resolvedURL: localURL,
+                loadLocalImages: false,
+                loadRemoteImages: false
+            ),
+            "Diagram (local image blocked)"
+        )
     }
 
     func testRemoteLoaderRejectsErrorsAndOversizedResponses() async throws {

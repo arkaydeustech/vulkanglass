@@ -47,16 +47,50 @@ struct MarkdownPreviewView: View {
     let noteTitles: Set<String>
     var baseURL: URL? = nil
     var dark = true
+    var loadLocalImages = true
     var loadRemoteImages = false
+    var hidesLeadingTitle = true
     var layoutCoordinateSpace: String? = nil
     var onLayout: ((MarkdownPreviewLayoutMetrics) -> Void)? = nil
     var onWiki: (String) -> Void
+    let displayBlocks: [MDBlock]
+
+    init(
+        text: String,
+        noteTitles: Set<String>,
+        baseURL: URL? = nil,
+        dark: Bool = true,
+        loadLocalImages: Bool = true,
+        loadRemoteImages: Bool = false,
+        hidesLeadingTitle: Bool = true,
+        parsedBlocks: [MDBlock]? = nil,
+        layoutCoordinateSpace: String? = nil,
+        onLayout: ((MarkdownPreviewLayoutMetrics) -> Void)? = nil,
+        onWiki: @escaping (String) -> Void
+    ) {
+        self.text = text
+        self.noteTitles = noteTitles
+        self.baseURL = baseURL
+        self.dark = dark
+        self.loadLocalImages = loadLocalImages
+        self.loadRemoteImages = loadRemoteImages
+        self.hidesLeadingTitle = hidesLeadingTitle
+        self.layoutCoordinateSpace = layoutCoordinateSpace
+        self.onLayout = onLayout
+        self.onWiki = onWiki
+
+        var blocks = parsedBlocks ?? MDBlock.parse(text)
+        if hidesLeadingTitle, case .heading(1, _) = blocks.first {
+            blocks.removeFirst()
+        }
+        displayBlocks = blocks
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let paneWidth = max(0, geometry.size.width)
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(Array(displayBlocks.enumerated()), id: \.offset) { blockIndex, block in
                         blockView(block, blockIndex: blockIndex)
                     }
@@ -117,14 +151,6 @@ struct MarkdownPreviewView: View {
         }
     }
 
-    private var displayBlocks: [MDBlock] {
-        var items = MDBlock.parse(text)
-        if case .heading(1, _) = items.first {
-            items.removeFirst()
-        }
-        return items
-    }
-
     @ViewBuilder
     private func blockView(_ block: MDBlock, blockIndex: Int) -> some View {
         switch block {
@@ -144,7 +170,7 @@ struct MarkdownPreviewView: View {
                 }
             }
         case .heading(let level, let text):
-            InlineRunsView(text: text, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+            InlineRunsView(text: text, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
                 .font(headingFont(level))
                 .fontWeight(.bold)
                 .padding(.top, level <= 1 ? 4 : 10)
@@ -156,7 +182,7 @@ struct MarkdownPreviewView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(kind.title).font(.subheadline.weight(.semibold)).foregroundStyle(alertColor(kind))
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+                        InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
                     }
                 }
             }
@@ -169,7 +195,7 @@ struct MarkdownPreviewView: View {
                 VGTheme.accent.frame(width: 3)
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+                        InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -179,7 +205,7 @@ struct MarkdownPreviewView: View {
                 ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) { col, cell in
-                            InlineRunsView(text: cell, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+                            InlineRunsView(text: cell, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
                                 .padding(8)
                                 .frame(
                                     maxWidth: .infinity,
@@ -234,7 +260,7 @@ struct MarkdownPreviewView: View {
                 Image(systemName: checked ? "checkmark.square.fill" : "square")
                     .foregroundStyle(VGTheme.accent)
                     .padding(.top, 2)
-                InlineRunsView(text: String(line.dropFirst(6)), noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+                InlineRunsView(text: String(line.dropFirst(6)), noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
             }
         } else if let ordered = line.range(of: #"^\s*\d+\.\s+"#, options: .regularExpression) {
             let marker = String(line[ordered])
@@ -242,17 +268,17 @@ struct MarkdownPreviewView: View {
                 Text(marker.trimmingCharacters(in: .whitespaces))
                     .foregroundStyle(VGTheme.textMuted(dark: dark))
                     .monospacedDigit()
-                InlineRunsView(text: String(line[ordered.upperBound...]), noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+                InlineRunsView(text: String(line[ordered.upperBound...]), noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
             }
         } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
             HStack(alignment: .top, spacing: 8) {
                 Text("•").foregroundStyle(VGTheme.textMuted(dark: dark))
-                InlineRunsView(text: String(line.dropFirst(2)), noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+                InlineRunsView(text: String(line.dropFirst(2)), noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
             }
         } else if line.hasPrefix("![") {
-            InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+            InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
         } else {
-            InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
+            InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
                 .lineSpacing(6)
         }
     }
@@ -285,7 +311,7 @@ struct MarkdownPreviewView: View {
     }
 }
 
-enum MDBlock: Equatable {
+enum MDBlock: Equatable, Sendable {
     case code(language: String, code: String)
     case heading(Int, String)
     case quote([String])
@@ -481,6 +507,7 @@ struct InlineRunsView: View {
     let text: String
     let noteTitles: Set<String>
     var baseURL: URL? = nil
+    var loadLocalImages = true
     var loadRemoteImages = false
     var onWiki: (String) -> Void
 
@@ -551,6 +578,7 @@ struct InlineRunsView: View {
                 alt: alt,
                 rawURL: url,
                 baseURL: baseURL,
+                loadLocalImages: loadLocalImages,
                 loadRemoteImages: loadRemoteImages
             )
         case .text, .bold, .italic, .boldItalic, .strikethrough, .underline, .emoji:
@@ -975,6 +1003,7 @@ private struct MarkdownImageView: View {
     let alt: String
     let rawURL: String
     let baseURL: URL?
+    let loadLocalImages: Bool
     let loadRemoteImages: Bool
     @State private var image: NSImage?
 
@@ -1001,11 +1030,15 @@ private struct MarkdownImageView: View {
                 return
             }
             let data: Data?
-            if url.isFileURL {
+            if url.isFileURL, loadLocalImages {
                 data = await Task.detached(priority: .utility) {
                     try? Data(contentsOf: url, options: .mappedIfSafe)
                 }.value
-            } else if MarkdownResourceResolver.mayLoadImage(url, loadRemoteImages: loadRemoteImages) {
+            } else if MarkdownResourceResolver.mayLoadImage(
+                url,
+                loadLocalImages: loadLocalImages,
+                loadRemoteImages: loadRemoteImages
+            ) {
                 data = try? await RemoteImageLoader.data(from: url)
             } else {
                 data = nil
@@ -1018,12 +1051,16 @@ private struct MarkdownImageView: View {
     }
 
     private var taskIdentity: String {
-        "\(resolvedURL?.absoluteString ?? rawURL)|\(loadRemoteImages)"
+        "\(resolvedURL?.absoluteString ?? rawURL)|\(loadLocalImages)|\(loadRemoteImages)"
     }
 
     private var placeholder: String {
-        guard let url = resolvedURL, !url.isFileURL, !loadRemoteImages else { return alt }
-        return alt.isEmpty ? "Remote image blocked" : "\(alt) (remote image blocked)"
+        MarkdownResourceResolver.imagePlaceholder(
+            alt: alt,
+            resolvedURL: resolvedURL,
+            loadLocalImages: loadLocalImages,
+            loadRemoteImages: loadRemoteImages
+        )
     }
 }
 

@@ -33,6 +33,25 @@ copy of Vulkan Glass there, run:
 python3 scripts/install.py
 ```
 
+The installed app includes a Finder Quick Look extension for Markdown files.
+Select a `.md` file in Finder and press Space to open the rendered Vulkan Glass
+preview. The extension can be enabled or disabled in System Settings under
+General > Login Items & Extensions > Quick Look.
+
+Quick Look previews do not load remote images or local images referenced beside
+the selected Markdown file. Finder grants the sandboxed extension access to the
+selected file, not its containing directory, so local images are shown with a
+clear blocked-image placeholder. Markdown files larger than 5 MiB are rejected
+with a preview error to keep Finder previews responsive.
+
+macOS 26 requires third-party Quick Look extensions to come from a trusted,
+production-signed app. The repository's ad-hoc `Sign to Run Locally` build still
+compiles, embeds, signs, and registers the extension for development, but Finder
+won't launch that local extension on macOS 26. A distributed build must use the
+same Developer ID team for the app and extension, then be notarized and stapled.
+The project intentionally leaves Developer ID configuration unset until a team
+and certificate are configured for the workspace.
+
 The installer asks the copy running from `/Applications` to quit, waits for it to
 close, and leaves the installed app closed. If Vulkan Glass declines to quit (for
 example, because unsaved changes could not be written), installation stops without

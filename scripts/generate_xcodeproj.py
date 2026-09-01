@@ -9,7 +9,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = ROOT / "VulkanGlass"
 TEST_DIR = ROOT / "VulkanGlassTests"
+QUICK_LOOK_DIR = ROOT / "VulkanGlassQuickLook"
 PROJECT_DIR = ROOT / "VulkanGlass.xcodeproj"
+
+# Extension-safe renderer boundary. These files are compiled into both the app
+# and Quick Look targets, so they must not depend on other VulkanGlass sources.
+# Add every new renderer dependency here; the aggregate build compiles the
+# extension, and all extension-owned Swift files are also compiled into tests.
+QUICK_LOOK_SHARED_SOURCES = (
+    "CodeHighlight.swift",
+    "GFM.swift",
+    "MarkdownPreviewView.swift",
+    "Theme.swift",
+)
 
 
 def pid(name: str) -> str:
@@ -19,6 +31,7 @@ def pid(name: str) -> str:
 def main() -> None:
     swift_files = sorted(p for p in SOURCE_DIR.glob("*.swift"))
     test_files = sorted(p for p in TEST_DIR.glob("*.swift"))
+    quick_look_files = sorted(p for p in QUICK_LOOK_DIR.glob("*.swift"))
     asset_dir = SOURCE_DIR / "Assets.xcassets"
 
     ids = {
@@ -51,6 +64,20 @@ def main() -> None:
         "release_test": pid("xc-release-test"),
         "target_proxy": pid("test-target-proxy"),
         "target_dependency": pid("test-target-dependency"),
+        "quick_look_target": pid("quick-look-target"),
+        "quick_look_sources": pid("quick-look-sources-phase"),
+        "quick_look_frameworks": pid("quick-look-frameworks-phase"),
+        "quick_look_product": pid("quick-look-product"),
+        "quick_look_group": pid("quick-look-group"),
+        "quick_look_info": pid("quick-look-info-plist"),
+        "quick_look_entitlements": pid("quick-look-entitlements"),
+        "quick_look_embed": pid("quick-look-embed-phase"),
+        "quick_look_embed_build": pid("quick-look-embed-build"),
+        "quick_look_config_list": pid("quick-look-config-list"),
+        "quick_look_debug": pid("quick-look-debug"),
+        "quick_look_release": pid("quick-look-release"),
+        "quick_look_target_proxy": pid("quick-look-target-proxy"),
+        "quick_look_target_dependency": pid("quick-look-target-dependency"),
     }
 
     file_entries = []
@@ -68,6 +95,29 @@ def main() -> None:
         )
         source_refs.append(f"\t\t\t\t{build} /* {path.name} in Sources */,")
 
+    quick_look_file_entries = []
+    quick_look_source_refs = []
+    for name in QUICK_LOOK_SHARED_SOURCES:
+        if name not in ids:
+            raise SystemExit(f"Quick Look shared source not found: {SOURCE_DIR / name}")
+        build = pid(f"quick-look-build-shared-{name}")
+        build_files.append(
+            f"\t\t{build} /* {name} in Sources */ = {{isa = PBXBuildFile; fileRef = {ids[name]} /* {name} */; }};"
+        )
+        quick_look_source_refs.append(f"\t\t\t\t{build} /* {name} in Sources */,")
+
+    for path in quick_look_files:
+        ref = pid(f"quick-look-file-{path.name}")
+        build = pid(f"quick-look-build-{path.name}")
+        ids[f"quick-look-{path.name}"] = ref
+        quick_look_file_entries.append(
+            f"\t\t{ref} /* {path.name} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = {path.name}; sourceTree = \"<group>\"; }};"
+        )
+        build_files.append(
+            f"\t\t{build} /* {path.name} in Sources */ = {{isa = PBXBuildFile; fileRef = {ref} /* {path.name} */; }};"
+        )
+        quick_look_source_refs.append(f"\t\t\t\t{build} /* {path.name} in Sources */,")
+
     test_file_entries = []
     test_build_files = []
     test_source_refs = []
@@ -83,11 +133,22 @@ def main() -> None:
         )
         test_source_refs.append(f"\t\t\t\t{build} /* {path.name} in Sources */,")
 
+    for path in quick_look_files:
+        ref = ids[f"quick-look-{path.name}"]
+        build = pid(f"test-build-quick-look-{path.name}")
+        test_build_files.append(
+            f"\t\t{build} /* {path.name} in Sources */ = {{isa = PBXBuildFile; fileRef = {ref} /* {path.name} */; }};"
+        )
+        test_source_refs.append(f"\t\t\t\t{build} /* {path.name} in Sources */,")
+
     objects = []
     objects.extend(build_files)
     objects.extend(test_build_files)
     objects.append(
         f"\t\t{ids['assets_build']} /* Assets.xcassets in Resources */ = {{isa = PBXBuildFile; fileRef = {ids['assets']} /* Assets.xcassets */; }};"
+    )
+    objects.append(
+        f"\t\t{ids['quick_look_embed_build']} /* VulkanGlassQuickLook.appex in Embed App Extensions */ = {{isa = PBXBuildFile; fileRef = {ids['quick_look_product']} /* VulkanGlassQuickLook.appex */; settings = {{ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }}; }};"
     )
 
     objects.append(
@@ -101,6 +162,15 @@ def main() -> None:
     )
     objects.append(
         f"""\t\t{ids['test_frameworks']} /* Frameworks */ = {{
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		}};"""
+    )
+    objects.append(
+        f"""\t\t{ids['quick_look_frameworks']} /* Frameworks */ = {{
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -123,6 +193,22 @@ def main() -> None:
 			sourceTree = "<group>";
         }};"""
     )
+    quick_look_children = "\n".join(
+        f"\t\t\t\t{ids[f'quick-look-{p.name}']} /* {p.name} */,"
+        for p in quick_look_files
+    )
+    objects.append(
+        f"""\t\t{ids['quick_look_group']} /* VulkanGlassQuickLook */ = {{
+			isa = PBXGroup;
+			children = (
+{quick_look_children}
+				{ids['quick_look_info']} /* Info.plist */,
+				{ids['quick_look_entitlements']} /* VulkanGlassQuickLook.entitlements */,
+			);
+			path = VulkanGlassQuickLook;
+			sourceTree = "<group>";
+		}};"""
+    )
     test_children = "\n".join(f"\t\t\t\t{ids[f'test-{p.name}']} /* {p.name} */," for p in test_files)
     objects.append(
         f"""\t\t{ids['group_tests']} /* VulkanGlassTests */ = {{
@@ -139,6 +225,7 @@ def main() -> None:
 			isa = PBXGroup;
 			children = (
 				{ids['product']} /* VulkanGlass.app */,
+				{ids['quick_look_product']} /* VulkanGlassQuickLook.appex */,
 				{ids['test_product']} /* VulkanGlassTests.xctest */,
 			);
 			name = Products;
@@ -150,6 +237,7 @@ def main() -> None:
 			isa = PBXGroup;
 			children = (
 				{ids['group_src']} /* VulkanGlass */,
+				{ids['quick_look_group']} /* VulkanGlassQuickLook */,
 				{ids['group_tests']} /* VulkanGlassTests */,
 				{ids['group_products']} /* Products */,
 			);
@@ -158,12 +246,16 @@ def main() -> None:
     )
 
     objects.extend(file_entries)
+    objects.extend(quick_look_file_entries)
     objects.extend(test_file_entries)
     objects.append(
         f"\t\t{ids['product']} /* VulkanGlass.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VulkanGlass.app; sourceTree = BUILT_PRODUCTS_DIR; }};"
     )
     objects.append(
         f"\t\t{ids['test_product']} /* VulkanGlassTests.xctest */ = {{isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VulkanGlassTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; }};"
+    )
+    objects.append(
+        f"\t\t{ids['quick_look_product']} /* VulkanGlassQuickLook.appex */ = {{isa = PBXFileReference; explicitFileType = \"wrapper.app-extension\"; includeInIndex = 0; path = VulkanGlassQuickLook.appex; sourceTree = BUILT_PRODUCTS_DIR; }};"
     )
     objects.append(
         f"\t\t{ids['info']} /* Info.plist */ = {{isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = \"<group>\"; }};"
@@ -173,6 +265,12 @@ def main() -> None:
     )
     objects.append(
         f"\t\t{ids['assets']} /* Assets.xcassets */ = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = \"<group>\"; }};"
+    )
+    objects.append(
+        f"\t\t{ids['quick_look_info']} /* Info.plist */ = {{isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = \"<group>\"; }};"
+    )
+    objects.append(
+        f"\t\t{ids['quick_look_entitlements']} /* VulkanGlassQuickLook.entitlements */ = {{isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VulkanGlassQuickLook.entitlements; sourceTree = \"<group>\"; }};"
     )
 
     objects.append(
@@ -196,12 +294,35 @@ def main() -> None:
 		}};"""
     )
     objects.append(
+        f"""\t\t{ids['quick_look_sources']} /* Sources */ = {{
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+{chr(10).join(quick_look_source_refs)}
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		}};"""
+    )
+    objects.append(
         f"""\t\t{ids['resources']} /* Resources */ = {{
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				{ids['assets_build']} /* Assets.xcassets in Resources */,
 			);
+			runOnlyForDeploymentPostprocessing = 0;
+		}};"""
+    )
+    objects.append(
+        f"""\t\t{ids['quick_look_embed']} /* Embed App Extensions */ = {{
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				{ids['quick_look_embed_build']} /* VulkanGlassQuickLook.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		}};"""
     )
@@ -214,16 +335,52 @@ def main() -> None:
 				{ids['sources']} /* Sources */,
 				{ids['frameworks']} /* Frameworks */,
 				{ids['resources']} /* Resources */,
+				{ids['quick_look_embed']} /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				{ids['quick_look_target_dependency']} /* PBXTargetDependency */,
 			);
 			name = VulkanGlass;
 			productName = VulkanGlass;
 			productReference = {ids['product']} /* VulkanGlass.app */;
 			productType = "com.apple.product-type.application";
         }};"""
+    )
+    objects.append(
+        f"""\t\t{ids['quick_look_target_proxy']} /* PBXContainerItemProxy */ = {{
+			isa = PBXContainerItemProxy;
+			containerPortal = {ids['project']} /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = {ids['quick_look_target']};
+			remoteInfo = VulkanGlassQuickLook;
+		}};"""
+    )
+    objects.append(
+        f"""\t\t{ids['quick_look_target_dependency']} /* PBXTargetDependency */ = {{
+			isa = PBXTargetDependency;
+			target = {ids['quick_look_target']} /* VulkanGlassQuickLook */;
+			targetProxy = {ids['quick_look_target_proxy']} /* PBXContainerItemProxy */;
+		}};"""
+    )
+    objects.append(
+        f"""\t\t{ids['quick_look_target']} /* VulkanGlassQuickLook */ = {{
+			isa = PBXNativeTarget;
+			buildConfigurationList = {ids['quick_look_config_list']} /* Build configuration list for PBXNativeTarget "VulkanGlassQuickLook" */;
+			buildPhases = (
+				{ids['quick_look_sources']} /* Sources */,
+				{ids['quick_look_frameworks']} /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VulkanGlassQuickLook;
+			productName = VulkanGlassQuickLook;
+			productReference = {ids['quick_look_product']} /* VulkanGlassQuickLook.appex */;
+			productType = "com.apple.product-type.app-extension";
+		}};"""
     )
     objects.append(
         f"""\t\t{ids['target_proxy']} /* PBXContainerItemProxy */ = {{
@@ -283,6 +440,7 @@ def main() -> None:
 			projectRoot = "";
 			targets = (
 				{ids['target']} /* VulkanGlass */,
+				{ids['quick_look_target']} /* VulkanGlassQuickLook */,
 				{ids['test_target']} /* VulkanGlassTests */,
 			);
 		}};"""
@@ -330,7 +488,6 @@ def main() -> None:
 				CODE_SIGN_STYLE = Manual;
 				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGNING_REQUIRED = YES;
-				OTHER_CODE_SIGN_FLAGS = "--deep --force";
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -360,12 +517,50 @@ def main() -> None:
         }};"""
     )
 
+    quick_look_settings = """
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = VulkanGlassQuickLook/VulkanGlassQuickLook.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = VulkanGlassQuickLook/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.quicklook;
+				PRODUCT_MODULE_NAME = VulkanGlassQuickLook;
+				PRODUCT_NAME = VulkanGlassQuickLook;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = targeted;
+"""
+    objects.append(
+        f"""\t\t{ids['quick_look_debug']} /* Debug */ = {{
+			isa = XCBuildConfiguration;
+			buildSettings = {{{quick_look_settings}			}};
+			name = Debug;
+		}};"""
+    )
+    objects.append(
+        f"""\t\t{ids['quick_look_release']} /* Release */ = {{
+			isa = XCBuildConfiguration;
+			buildSettings = {{{quick_look_settings}			}};
+			name = Release;
+		}};"""
+    )
+
     test_settings = """
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGNING_ALLOWED = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) QUICK_LOOK_CONTROLLER_TESTING";
 				SWIFT_VERSION = 5.0;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VulkanGlass.app/Contents/MacOS/VulkanGlass";
 """
@@ -404,6 +599,17 @@ def main() -> None:
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
         }};"""
+    )
+    objects.append(
+        f"""\t\t{ids['quick_look_config_list']} /* Build configuration list for PBXNativeTarget "VulkanGlassQuickLook" */ = {{
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				{ids['quick_look_debug']} /* Debug */,
+				{ids['quick_look_release']} /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		}};"""
     )
     objects.append(
         f"""\t\t{ids['config_list_test']} /* Build configuration list for PBXNativeTarget "VulkanGlassTests" */ = {{
