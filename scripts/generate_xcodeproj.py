@@ -339,7 +339,7 @@ def main() -> None:
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = VulkanGlass/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop;
 				PRODUCT_NAME = VulkanGlass;
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -10,6 +10,7 @@
 - The application is ad-hoc signed (`Sign to Run Locally`). Do not switch it to an
   Apple Development identity unless a development team and certificate have been
   explicitly configured for the workspace.
+- Follow `docs/version-update.md` when changing the app version or build number.
 
 ## Safe development launches
 
