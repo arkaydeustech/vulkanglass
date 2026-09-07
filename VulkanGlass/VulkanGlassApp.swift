@@ -18,19 +18,27 @@ final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct VulkanGlassApp: App {
     @State private var model = AppModel()
+    @StateObject private var updater = AppUpdater()
     @NSApplicationDelegateAdaptor(VulkanGlassAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         Window("Vulkan Glass", id: "main") {
-            RootView()
+            RootView(updater: updater)
                 .environment(model)
                 .frame(minWidth: 860, minHeight: 560)
-                .onAppear { appDelegate.model = model }
+                .onAppear {
+                    appDelegate.model = model
+                    updater.start()
+                }
         }
         .defaultSize(width: 1320, height: 860)
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New note") { Task { await model.newNote() } }
                     .keyboardShortcut("n", modifiers: .command)

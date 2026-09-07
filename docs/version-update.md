@@ -8,8 +8,9 @@ across its source files, then regenerate the Xcode project.
 For a public version change such as `0.2` to `0.3`, update all three source
 locations:
 
-1. Change `MARKETING_VERSION` in `scripts/generate_xcodeproj.py`. This is the
-   persistent source for the generated Xcode build setting.
+1. Change `APP_MARKETING_VERSION` in `scripts/generate_xcodeproj.py`. This single
+   persistent value supplies `MARKETING_VERSION` to both the app and its bundled
+   Quick Look extension; their public versions must match.
 2. Change `CFBundleShortVersionString` in `VulkanGlass/Info.plist`. The app uses
    this explicit plist instead of an automatically generated one.
 3. Change the `VulkanGlass/<version>` user-agent in
@@ -31,7 +32,9 @@ addresses.
 
 The build number is independent of the public version. Only change it when the
 release process or user explicitly requires a new build number. It must remain a
-positive integer.
+positive integer. Every release published to the Sparkle update feed must increase
+this number; changing only the public version will not make Sparkle offer an update.
+See [app-updates.md](app-updates.md) for release packaging and publishing.
 
 Update both locations, then regenerate the Xcode project:
 
@@ -43,7 +46,7 @@ Update both locations, then regenerate the Xcode project:
 Check that the source values and both generated build configurations agree:
 
 ```bash
-rg -n 'MARKETING_VERSION|CURRENT_PROJECT_VERSION' \
+rg -n 'APP_MARKETING_VERSION|MARKETING_VERSION|CURRENT_PROJECT_VERSION' \
   scripts/generate_xcodeproj.py VulkanGlass.xcodeproj/project.pbxproj
 plutil -p VulkanGlass/Info.plist | rg \
   'CFBundleShortVersionString|CFBundleVersion'
@@ -57,6 +60,9 @@ Review the final diff. A public-version-only update should normally touch:
 - `VulkanGlass.xcodeproj/project.pbxproj`
 - `VulkanGlass/Info.plist`
 - `VulkanGlass/GitHubService.swift`
+
+Confirm the generated project contains the new `MARKETING_VERSION` for all four
+app and Quick Look Debug/Release target configurations.
 
 If the build number also changes, its matching entries will appear in the first
 three files.

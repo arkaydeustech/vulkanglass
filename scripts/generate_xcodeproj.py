@@ -11,6 +11,7 @@ SOURCE_DIR = ROOT / "VulkanGlass"
 TEST_DIR = ROOT / "VulkanGlassTests"
 QUICK_LOOK_DIR = ROOT / "VulkanGlassQuickLook"
 PROJECT_DIR = ROOT / "VulkanGlass.xcodeproj"
+APP_MARKETING_VERSION = "0.2.1"
 
 # Extension-safe renderer boundary. These files are compiled into both the app
 # and Quick Look targets, so they must not depend on other VulkanGlass sources.
@@ -79,6 +80,9 @@ def main() -> None:
         "quick_look_release": pid("quick-look-release"),
         "quick_look_target_proxy": pid("quick-look-target-proxy"),
         "quick_look_target_dependency": pid("quick-look-target-dependency"),
+        "sparkle_package": pid("sparkle-package"),
+        "sparkle_product": pid("sparkle-product"),
+        "sparkle_build": pid("sparkle-build"),
     }
 
     file_entries = []
@@ -143,6 +147,22 @@ def main() -> None:
         test_source_refs.append(f"\t\t\t\t{build} /* {path.name} in Sources */,")
 
     objects = []
+    objects.extend([
+        f'''\t\t{ids['sparkle_package']} /* Sparkle */ = {{
+            isa = XCRemoteSwiftPackageReference;
+            repositoryURL = "https://github.com/sparkle-project/Sparkle";
+            requirement = {{ kind = exactVersion; version = 2.9.6; }};
+        }};''',
+        f'''\t\t{ids['sparkle_product']} /* Sparkle */ = {{
+            isa = XCSwiftPackageProductDependency;
+            package = {ids['sparkle_package']} /* Sparkle */;
+            productName = Sparkle;
+        }};''',
+        f'''\t\t{ids['sparkle_build']} /* Sparkle in Frameworks */ = {{
+            isa = PBXBuildFile;
+            productRef = {ids['sparkle_product']} /* Sparkle */;
+        }};''',
+    ])
     objects.extend(build_files)
     objects.extend(test_build_files)
     objects.append(
@@ -157,6 +177,7 @@ def main() -> None:
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				{ids['sparkle_build']} /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
         }};"""
@@ -344,6 +365,7 @@ def main() -> None:
 				{ids['quick_look_target_dependency']} /* PBXTargetDependency */,
 			);
 			name = VulkanGlass;
+			packageProductDependencies = ({ids['sparkle_product']} /* Sparkle */, );
 			productName = VulkanGlass;
 			productReference = {ids['product']} /* VulkanGlass.app */;
 			productType = "com.apple.product-type.application";
@@ -439,6 +461,7 @@ def main() -> None:
 			productRefGroup = {ids['group_products']} /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = ({ids['sparkle_package']} /* Sparkle */, );
 			targets = (
 				{ids['target']} /* VulkanGlass */,
 				{ids['quick_look_target']} /* VulkanGlassQuickLook */,
@@ -497,11 +520,13 @@ def main() -> None:
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = VulkanGlass/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = {APP_MARKETING_VERSION};
 				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop;
 				PRODUCT_NAME = VulkanGlass;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = targeted;
+				SPARKLE_FEED_URL = "";
+				SPARKLE_PUBLIC_ED_KEY = "";
 """
     objects.append(
         f"""\t\t{ids['debug_target']} /* Debug */ = {{
@@ -518,7 +543,7 @@ def main() -> None:
         }};"""
     )
 
-    quick_look_settings = """
+    quick_look_settings = f"""
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = VulkanGlassQuickLook/VulkanGlassQuickLook.entitlements;
 				CODE_SIGN_IDENTITY = "-";
@@ -532,7 +557,7 @@ def main() -> None:
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = VulkanGlassQuickLook/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = {APP_MARKETING_VERSION};
 				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.quicklook;
 				PRODUCT_MODULE_NAME = VulkanGlassQuickLook;
 				PRODUCT_NAME = VulkanGlassQuickLook;

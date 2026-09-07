@@ -83,3 +83,13 @@ xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'plat
 The tests are hosted by `VulkanGlass.app`, so a test run launches the real app. Auth is
 disabled automatically whenever the app detects an XCTest host environment, which keeps test
 runs free of Keychain prompts.
+
+## App updates
+
+The app integrates Sparkle for automatic update suggestions and in-app download,
+installation, and relaunch. Use **Vulkan Glass > Check for Updates…** or the
+Updates section in Settings. Sparkle asks before enabling automatic checks, and
+the preference can be changed later in Settings. Release feed and signing-key
+setup, publishing, and verification are documented in
+[docs/app-updates.md](docs/app-updates.md). Updates remain disabled until a valid
+release feed and public key are configured.

@@ -144,6 +144,7 @@ private func paletteBackdrop<Content: View>(
 
 struct SettingsSheet: View {
     @Environment(AppModel.self) private var model
+    @ObservedObject var updater: AppUpdater
     @State private var token = ""
     @State private var message: String?
 
@@ -210,10 +211,12 @@ struct SettingsSheet: View {
                 }
             }
             Spacer()
+            Divider()
+            UpdateSettingsView(updater: updater)
             Button("Done") { model.settingsOpen = false }
         }
         .padding(24)
-        .frame(width: 520, height: 500)
+        .frame(width: 520, height: 660)
         .task { await model.connectGitHub() }
     }
 

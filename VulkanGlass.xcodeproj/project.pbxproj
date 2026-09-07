@@ -5,7 +5,22 @@
 	};
 	objectVersion = 56;
 	objects = {
+		951BF508BB0D9D9ACF752EE0 /* Sparkle */ = {
+            isa = XCRemoteSwiftPackageReference;
+            repositoryURL = "https://github.com/sparkle-project/Sparkle";
+            requirement = { kind = exactVersion; version = 2.9.6; };
+        };
+		7745A1A055D851A77A54F818 /* Sparkle */ = {
+            isa = XCSwiftPackageProductDependency;
+            package = 951BF508BB0D9D9ACF752EE0 /* Sparkle */;
+            productName = Sparkle;
+        };
+		31DFB0E19EACA8D3E16CF1A4 /* Sparkle in Frameworks */ = {
+            isa = PBXBuildFile;
+            productRef = 7745A1A055D851A77A54F818 /* Sparkle */;
+        };
 		5BE64C2A66DD1968BAADE323 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0837DCCC0ADE4AB724AD6EB1 /* AppModel.swift */; };
+		F068615981A077A483BD84B2 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B51F28B9F66989B58DEE2F /* AppUpdater.swift */; };
 		1B16F940F1BEE4AAF2126DC4 /* ChromeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF68F96E309842BAB0EB5C0 /* ChromeViews.swift */; };
 		2CF59801B328C7D15495431C /* CodeHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 630BBC9E60BBA1CA6FDD1D54 /* CodeHighlight.swift */; };
 		535F4DB428F2E12CA628E56D /* EditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */; };
@@ -41,6 +56,7 @@
 		1EC574DF82CCA4B1D1451A8F /* PreviewViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F681E7978D0947CBDFA29AD /* PreviewViewController.swift */; };
 		695433D745AD0EEE5284117D /* QuickLookPreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */; };
 		3C642F51BDE57C04ED72BD8F /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */; };
+		A52C614C326747059D221A90 /* AppUpdaterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87449A20B27E44E36980B8C7 /* AppUpdaterTests.swift */; };
 		4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */; };
 		0008B1898EB1B9ACA79DC4A6 /* GitServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E091D111CB3836061C3D76 /* GitServiceTests.swift */; };
 		73429833E75444B2B54E8F58 /* GraphAndFileServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */; };
@@ -54,6 +70,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				31DFB0E19EACA8D3E16CF1A4 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
         };
@@ -75,6 +92,7 @@
 			isa = PBXGroup;
 			children = (
 				0837DCCC0ADE4AB724AD6EB1 /* AppModel.swift */,
+				A0B51F28B9F66989B58DEE2F /* AppUpdater.swift */,
 				1FF68F96E309842BAB0EB5C0 /* ChromeViews.swift */,
 				630BBC9E60BBA1CA6FDD1D54 /* CodeHighlight.swift */,
 				8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */,
@@ -124,6 +142,7 @@
 			isa = PBXGroup;
 			children = (
 				88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */,
+				87449A20B27E44E36980B8C7 /* AppUpdaterTests.swift */,
 				7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */,
 				E5E091D111CB3836061C3D76 /* GitServiceTests.swift */,
 				64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */,
@@ -154,6 +173,7 @@
 			sourceTree = "<group>";
 		};
 		0837DCCC0ADE4AB724AD6EB1 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		A0B51F28B9F66989B58DEE2F /* AppUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdater.swift; sourceTree = "<group>"; };
 		1FF68F96E309842BAB0EB5C0 /* ChromeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChromeViews.swift; sourceTree = "<group>"; };
 		630BBC9E60BBA1CA6FDD1D54 /* CodeHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlight.swift; sourceTree = "<group>"; };
 		8E6DEE0531EF6E6A2492D9BA /* EditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
@@ -184,6 +204,7 @@
 		0F681E7978D0947CBDFA29AD /* PreviewViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewViewController.swift; sourceTree = "<group>"; };
 		C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewSupport.swift; sourceTree = "<group>"; };
 		88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
+		87449A20B27E44E36980B8C7 /* AppUpdaterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdaterTests.swift; sourceTree = "<group>"; };
 		7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCLIServiceTests.swift; sourceTree = "<group>"; };
 		E5E091D111CB3836061C3D76 /* GitServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitServiceTests.swift; sourceTree = "<group>"; };
 		64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphAndFileServiceTests.swift; sourceTree = "<group>"; };
@@ -202,6 +223,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				5BE64C2A66DD1968BAADE323 /* AppModel.swift in Sources */,
+				F068615981A077A483BD84B2 /* AppUpdater.swift in Sources */,
 				1B16F940F1BEE4AAF2126DC4 /* ChromeViews.swift in Sources */,
 				2CF59801B328C7D15495431C /* CodeHighlight.swift in Sources */,
 				535F4DB428F2E12CA628E56D /* EditorView.swift in Sources */,
@@ -237,6 +259,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3C642F51BDE57C04ED72BD8F /* AppModelTests.swift in Sources */,
+				A52C614C326747059D221A90 /* AppUpdaterTests.swift in Sources */,
 				4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */,
 				0008B1898EB1B9ACA79DC4A6 /* GitServiceTests.swift in Sources */,
 				73429833E75444B2B54E8F58 /* GraphAndFileServiceTests.swift in Sources */,
@@ -295,6 +318,7 @@
 				270EB56A6FC77DA5A9195309 /* PBXTargetDependency */,
 			);
 			name = VulkanGlass;
+			packageProductDependencies = (7745A1A055D851A77A54F818 /* Sparkle */, );
 			productName = VulkanGlass;
 			productReference = F5BF48AA40CAD7891EB709FC /* VulkanGlass.app */;
 			productType = "com.apple.product-type.application";
@@ -375,6 +399,7 @@
 			productRefGroup = CC0F68FE2D81F9614883F277 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = (951BF508BB0D9D9ACF752EE0 /* Sparkle */, );
 			targets = (
 				42AEFBAE01D2DFD981F7DA7D /* VulkanGlass */,
 				4993AD58A942FB527B0A4ECD /* VulkanGlassQuickLook */,
@@ -444,6 +469,8 @@
 				PRODUCT_NAME = VulkanGlass;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = targeted;
+				SPARKLE_FEED_URL = "";
+				SPARKLE_PUBLIC_ED_KEY = "";
 			};
 			name = Debug;
 		};
@@ -469,6 +496,8 @@
 				PRODUCT_NAME = VulkanGlass;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = targeted;
+				SPARKLE_FEED_URL = "";
+				SPARKLE_PUBLIC_ED_KEY = "";
 			};
 			name = Release;
         };
@@ -488,7 +517,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = VulkanGlassQuickLook/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.quicklook;
 				PRODUCT_MODULE_NAME = VulkanGlassQuickLook;
 				PRODUCT_NAME = VulkanGlassQuickLook;
@@ -514,7 +543,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = VulkanGlassQuickLook/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.vulkanglass.desktop.quicklook;
 				PRODUCT_MODULE_NAME = VulkanGlassQuickLook;
 				PRODUCT_NAME = VulkanGlassQuickLook;

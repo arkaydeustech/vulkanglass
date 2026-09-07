@@ -265,6 +265,7 @@ struct WorkspaceView: View {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @ObservedObject var updater: AppUpdater
 
     var body: some View {
         ZStack {
@@ -283,7 +284,7 @@ struct RootView: View {
         .foregroundStyle(VGTheme.textNormal(dark: model.dark))
         .background(WindowChromeConfigurator())
         .ignoresSafeArea(.container, edges: .top)
-        .sheet(isPresented: Bindable(model).settingsOpen) { SettingsSheet() }
+        .sheet(isPresented: Bindable(model).settingsOpen) { SettingsSheet(updater: updater) }
         .sheet(isPresented: Bindable(model).cloneOpen) { CloneVaultSheet() }
         .sheet(isPresented: Bindable(model).createOpen) { CreateVaultSheet() }
         .overlay(alignment: .top) {
