@@ -4,9 +4,19 @@
 
 - This is a native macOS SwiftUI application. It requires the full Xcode app at
   `/Applications/Xcode.app`.
+- Tool versions and development scripts are managed by mise (`mise.toml`). Run
+  `mise install` once after cloning, then `mise run <task>` (list them with
+  `mise tasks`). Node and the oxc tools are pinned there, with download URLs and
+  checksums in the committed `mise.lock` (regenerate with `mise lock` after
+  changing `[tools]`); the Python scripts run under the system `python3`.
 - `VulkanGlass.xcodeproj/project.pbxproj` is generated. Make persistent project
   structure or build-setting changes in `scripts/generate_xcodeproj.py`, then run
-  `python3 scripts/generate_xcodeproj.py`.
+  `mise run project` (or `python3 scripts/generate_xcodeproj.py`).
+- Lint and format with oxc: `mise run lint` (oxlint) and `mise run format`
+  (oxfmt); `mise run check` runs the formatting/lint checks plus the installer
+  unit tests and the oxlint self-test (`mise run test:lint`). oxfmt formats the
+  repository's own JSON/YAML tooling files, and oxlint lints any
+  JavaScript/TypeScript that is added.
 - The application is ad-hoc signed (`Sign to Run Locally`). Do not switch it to an
   Apple Development identity unless a development team and certificate have been
   explicitly configured for the workspace.
@@ -14,13 +24,13 @@
 
 ## Safe development launches
 
-- Use `python3 scripts/build.py` for normal agent builds and UI checks. It rebuilds
-  and launches the app with `--disable-auth` by default.
+- Use `mise run build` (or `python3 scripts/build.py`) for normal agent builds and
+  UI checks. It rebuilds and launches the app with `--disable-auth` by default.
 - Local-only mode must not access the macOS Keychain, invoke `gh auth token`, save
   a PAT, or perform GitHub pull/push operations.
-- Only use `python3 scripts/build.py --with-auth` when the user explicitly wants
-  GitHub authentication tested and understands that macOS may display Keychain
-  prompts.
+- Only use `mise run build --with-auth` (or `python3 scripts/build.py --with-auth`)
+  when the user explicitly wants GitHub authentication tested and understands that
+  macOS may display Keychain prompts.
 - For launches outside the build script, pass `--disable-auth` or set
   `VULKANGLASS_DISABLE_AUTH=1`.
 - The behavior is implemented by `DevelopmentAuthentication` and the guards in
@@ -32,8 +42,12 @@
 
 ## Tests
 
+- Run the installer unit tests with `mise run test:install` (or
+  `python3 -m unittest scripts.test_install`).
+- Run the `VulkanGlassTests` XCTest suite with `mise run test`, which sets the
+  full Xcode developer directory for you.
 - The machine's global `xcode-select` may point to Command Line Tools. Run tests
-  with the full Xcode developer directory explicitly:
+  manually with the full Xcode developer directory explicitly:
 
   ```bash
   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \

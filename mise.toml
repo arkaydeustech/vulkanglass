@@ -1,0 +1,87 @@
+# Tooling versions and task runner for Vulkan Glass.
+#
+# mise is the single source of truth for the developer toolchain and scripts.
+# Run `mise install` after cloning, then `mise run <task>` (or `mise tasks` to
+# list every task). The Python build scripts run under the system `python3`;
+# mise pins the Node/oxc tooling used to lint, format, and check.
+#
+# Versions are pinned in [tools] and their download URLs/checksums are pinned in
+# the committed mise.lock, so CI and every machine resolve identical tool
+# artifacts. Regenerate mise.lock with `mise lock` after changing [tools].
+
+[tools]
+node = "22.23.1"
+oxlint = "1.82.0"
+oxfmt = "0.67.0"
+
+[tasks.setup]
+description = "Install the pinned toolchain and generate the Xcode project"
+run = ["mise install", "mise run project"]
+
+[tasks.start]
+description = "Build and launch Vulkan Glass in local-only development mode"
+run = "python3 ./scripts/build.py"
+raw_args = true
+
+[tasks.build]
+description = "Alias for start: build and launch Vulkan Glass"
+run = "mise run start"
+raw_args = true
+
+[tasks.install]
+description = "Build and install Vulkan Glass in /Applications"
+run = "python3 ./scripts/install.py"
+raw_args = true
+
+[tasks.project]
+description = "Regenerate VulkanGlass.xcodeproj from scripts/generate_xcodeproj.py"
+run = "python3 ./scripts/generate_xcodeproj.py"
+raw_args = true
+
+[tasks.icons]
+description = "Regenerate the app icon assets from resources/icon.svg"
+run = "python3 ./scripts/make_icons.py"
+raw_args = true
+
+[tasks.test]
+description = "Run the VulkanGlass XCTest suite with the full Xcode toolchain"
+env = { DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer" }
+run = "xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' test"
+raw_args = true
+
+[tasks."test:install"]
+description = "Run the installer unit tests with the system Python"
+run = "python3 -m unittest scripts.test_install"
+raw_args = true
+
+[tasks."test:lint"]
+description = "Verify oxlint actually applies the repository rules (self-test)"
+run = "python3 ./scripts/test_oxlint.py"
+
+[tasks."test:tasks"]
+description = "Verify raw argument passthrough for the build and install tasks"
+run = ["mise run install --help", "mise run build --help"]
+
+[tasks."test:config"]
+description = "Verify the Orkestrator setup config stays repository-local"
+run = "python3 -m unittest scripts.test_setup_config"
+
+[tasks.lint]
+description = "Lint the repository with oxlint"
+run = "oxlint --no-error-on-unmatched-pattern"
+
+[tasks."lint:fix"]
+description = "Lint and apply safe fixes with oxlint"
+run = "oxlint --fix --no-error-on-unmatched-pattern"
+
+[tasks.format]
+description = "Format the repository with oxfmt"
+run = "oxfmt"
+
+[tasks."format:check"]
+description = "Check formatting with oxfmt without writing"
+run = "oxfmt --check"
+
+[tasks.check]
+description = "Check formatting and linting with oxc, then run the installer and lint self-tests"
+depends = ["format:check", "lint", "test:lint", "test:tasks", "test:config", "test:install"]

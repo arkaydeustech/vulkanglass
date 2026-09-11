@@ -1,15 +1,8 @@
 {
   "root": [
-    "command -v python3 >/dev/null || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3)"
+    "if command -v apt-get >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3; fi"
   ],
-  "setupContainer": [
-    "python3 scripts/generate_xcodeproj.py"
-  ],
-  "setupLocal": [
-    "python3 scripts/make_icons.py",
-    "python3 scripts/generate_xcodeproj.py"
-  ],
-  "run": [
-    "python3 scripts/build.py"
-  ]
+  "setupContainer": ["python3 scripts/generate_xcodeproj.py"],
+  "setupLocal": ["python3 scripts/make_icons.py", "python3 scripts/generate_xcodeproj.py"],
+  "run": ["python3 scripts/build.py"]
 }

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Tooling and tests
+    runs-on: macos-14
+    env:
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install the pinned toolchain with mise
+        uses: jdx/mise-action@v2
+      - name: Run format, lint, and test checks
+        run: mise run check

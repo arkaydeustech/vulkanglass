@@ -4,6 +4,35 @@ Native macOS SwiftUI app for Markdown notes. Vaults are GitHub repositories; sav
 
 Accent color is teal. Layout follows Obsidian (ribbon, file tree, editor, backlinks, graph).
 
+## Toolchain and tasks
+
+Tool versions and the development scripts are managed by
+[mise](https://mise.jdx.dev/). Install the pinned toolchain once, then run tasks
+with `mise run <task>` (list them with `mise tasks`):
+
+```bash
+mise install
+```
+
+| Task | Description |
+| --- | --- |
+| `mise run start` | Regenerate the Xcode project, build, and launch the app |
+| `mise run build` | Alias for `start` |
+| `mise run install` | Build a Release app and install it in `/Applications` |
+| `mise run project` | Regenerate `VulkanGlass.xcodeproj` |
+| `mise run icons` | Regenerate the app icon assets |
+| `mise run test` | Run the `VulkanGlassTests` XCTest suite |
+| `mise run test:install` | Run the installer unit tests |
+| `mise run test:lint` | Verify the oxlint rules actually apply |
+| `mise run lint` | Lint with [oxlint](https://oxc.rs) |
+| `mise run format` | Format with [oxfmt](https://oxc.rs) |
+| `mise run check` | Check formatting and lint, then run the installer and lint self-tests |
+
+Node and the oxc tools are pinned in `mise.toml`, with their download URLs and
+checksums recorded in `mise.lock`; the Python scripts below still run under the
+system `python3`. oxfmt formats the repository's own JSON/YAML tooling files and
+oxlint lints any JavaScript/TypeScript that is added.
+
 ## Build
 
 Requires Xcode. Scripts are Python (not Ruby):
@@ -13,7 +42,9 @@ python3 scripts/make_icons.py
 python3 scripts/build.py
 ```
 
-`build.py` compiles with `xcodebuild` and launches `Vulkan Glass.app`.
+The same steps are available as `mise run icons` and `mise run build`
+(`mise run build` is an alias for `mise run start`). `build.py` compiles with
+`xcodebuild` and launches `Vulkan Glass.app`.
 Development launches are local-only by default: they do not access the macOS
 Keychain, invoke `gh auth token`, or perform GitHub network sync. To deliberately
 test GitHub authentication, launch with:
@@ -21,6 +52,8 @@ test GitHub authentication, launch with:
 ```bash
 python3 scripts/build.py --with-auth
 ```
+
+When using mise, the equivalent is `mise run build --with-auth`.
 
 For other Debug launch methods, pass `--disable-auth` as a launch argument or set
 `VULKANGLASS_DISABLE_AUTH=1` in the scheme environment. Both switches are compiled
@@ -32,6 +65,8 @@ copy of Vulkan Glass there, run:
 ```bash
 python3 scripts/install.py
 ```
+
+When using mise, the equivalent is `mise run install`.
 
 The installed app includes a Finder Quick Look extension for Markdown files.
 Select a `.md` file in Finder and press Space to open the rendered Vulkan Glass
@@ -66,6 +101,8 @@ mkdir -p ~/Applications
 python3 scripts/install.py --applications-dir ~/Applications
 ```
 
+When using mise, the equivalent is `mise run install --applications-dir ~/Applications`.
+
 ## Tests
 
 Run the installer unit tests with:
@@ -74,11 +111,15 @@ Run the installer unit tests with:
 python3 -m unittest scripts.test_install
 ```
 
+When using mise, the equivalent is `mise run test:install`.
+
 The generated project includes the `VulkanGlassTests` XCTest target:
 
 ```bash
 xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' test
 ```
+
+When using mise, `mise run test` runs the same suite and sets the Xcode developer directory for you.
 
 The tests are hosted by `VulkanGlass.app`, so a test run launches the real app. Auth is
 disabled automatically whenever the app detects an XCTest host environment, which keeps test
