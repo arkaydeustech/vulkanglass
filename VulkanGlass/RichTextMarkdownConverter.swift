@@ -78,7 +78,7 @@ enum RichTextMarkdownConverter {
         if documentType == .html,
            let html = decodedHTML(data),
            needsSemanticHTMLImport(html),
-           let semantic = SemanticHTML.markdown(from: html) {
+           let semantic = SemanticHTML.markdown(from: html, lineBreaksAsMarkdown: true) {
             return semantic
         }
         let options = readingOptions(for: data, documentType: documentType)
@@ -113,6 +113,33 @@ enum RichTextMarkdownConverter {
             return nil
         }
         return fallback
+    }
+
+    static func isSourceEditorHTML(_ html: String) -> Bool {
+        let root = SemanticHTML.parseFragment(html)
+        return root.children.contains { node in
+            guard node.name == "div",
+                  containsOnlySourcePresentationElements(node),
+                  node.children.contains(where: { $0.name == "div" }),
+                  let style = node.attributes["style"] else { return false }
+            let preservesWhitespace = style.range(
+                of: #"(?:^|;)\s*white-space\s*:\s*pre(?:-wrap)?\s*(?:;|$)"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+            let usesMonospaceFont = style.range(
+                of: #"(?:^|;)\s*font-family\s*:[^;]*\bmonospace\b\s*(?:;|$)"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+            return preservesWhitespace && usesMonospaceFont
+        }
+    }
+
+    private static func containsOnlySourcePresentationElements(_ node: SemanticHTML.Node) -> Bool {
+        node.children.allSatisfy { child in
+            guard let name = child.name else { return true }
+            guard name == "div" || name == "span" || name == "br" else { return false }
+            return containsOnlySourcePresentationElements(child)
+        }
     }
 
     private static func needsSemanticHTMLImport(_ html: String) -> Bool {

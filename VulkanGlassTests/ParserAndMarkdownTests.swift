@@ -1798,7 +1798,7 @@ final class RichTextMarkdownConverterTests: XCTestCase {
         let cp1252Data = try XCTUnwrap(cp1252HTML.data(using: .windowsCP1252))
         XCTAssertEqual(
             try XCTUnwrap(RichTextMarkdownConverter.markdown(from: cp1252Data, documentType: .html)),
-            "café naïve\n\n<br>"
+            "café naïve"
         )
 
         let utf16HTML = "<p>雪 café</p><br>"
@@ -1806,7 +1806,7 @@ final class RichTextMarkdownConverterTests: XCTestCase {
         utf16Data.append(try XCTUnwrap(utf16HTML.data(using: .utf16LittleEndian)))
         XCTAssertEqual(
             try XCTUnwrap(RichTextMarkdownConverter.markdown(from: utf16Data, documentType: .html)),
-            "雪 café\n\n<br>"
+            "雪 café"
         )
 
         XCTAssertNil(RichTextMarkdownConverter.decodedHTML(Data([0xFF, 0xFE, 0x41])))
@@ -1824,7 +1824,7 @@ final class RichTextMarkdownConverterTests: XCTestCase {
         )
         XCTAssertEqual(
             converted,
-            "\\# literal\n\n\\> quote\n\n\\- item\n\n1\\. item\n\n\\---\n\n<br>"
+            "\\# literal\n\n\\> quote\n\n\\- item\n\n1\\. item\n\n\\---"
         )
         XCTAssertFalse(MDBlock.parse(converted).contains { block in
             if case .heading = block { return true }
@@ -1844,7 +1844,7 @@ final class RichTextMarkdownConverterTests: XCTestCase {
         """
         XCTAssertEqual(
             try XCTUnwrap(RichTextMarkdownConverter.markdown(from: Data(html.utf8), documentType: .html)),
-            "**Bold** *Italic* <ins>Under</ins> ~~Strike~~ `Mono`\n\n<br>"
+            "**Bold** *Italic* <ins>Under</ins> ~~Strike~~ `Mono`"
         )
     }
 
@@ -1918,7 +1918,7 @@ final class RichTextMarkdownConverterTests: XCTestCase {
         let converted = try XCTUnwrap(
             RichTextMarkdownConverter.markdown(from: Data(html.utf8), documentType: .html)
         )
-        XCTAssertTrue(converted.contains("> Quoted <mark>note</mark><br>next line"))
+        XCTAssertTrue(converted.contains("> Quoted <mark>note</mark>  \n> next line"))
         XCTAssertTrue(converted.contains("\n\n---\n\n"))
         XCTAssertTrue(converted.contains("- [x] Done\n- [ ] Todo"))
         XCTAssertTrue(converted.contains("![Picture](https://example.com/p.png)"))
@@ -2287,6 +2287,62 @@ final class EditorLifecycleTests: XCTestCase {
         let textView = SourceTextView()
         XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
         XCTAssertEqual(textView.string, markdown)
+    }
+
+    func testPastePreservesPlainMarkdownCopiedFromVSCodeWithoutHTMLBreakTags() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let markdown = """
+        Current Focus
+
+        * Getting Funds finished
+        * Finalising onboarding
+
+        Next
+
+        * My Network
+        """
+        pasteboard.setData(Data(sourceEditorHTML(for: markdown).utf8), forType: .html)
+        pasteboard.setString(markdown, forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(textView.string, markdown)
+        XCTAssertFalse(textView.string.contains("<br>"))
+    }
+
+    func testPasteKeepsFormattingForPreWrappedRichHTML() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let html = #"<div style="font-family: Menlo, monospace; white-space: pre-wrap;"><div><strong>Important</strong><br><a href="https://example.com">Open details</a></div></div>"#
+        pasteboard.setData(Data(html.utf8), forType: .html)
+        pasteboard.setString("Important\nOpen details", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(
+            textView.string,
+            "**Important**  \n[Open details](https://example.com)"
+        )
+    }
+
+    func testPasteConvertsTelegramStyleRichTextAndBreaksToMarkdown() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("paste-test-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let html = #"<div><strong>Important</strong><br><em>Read this</em> and <a href="https://example.com">open it</a></div>"#
+        pasteboard.setData(Data(html.utf8), forType: .html)
+        pasteboard.setString("Important\nRead this and open it", forType: .string)
+        defer { pasteboard.clearContents() }
+
+        let textView = SourceTextView()
+        XCTAssertTrue(textView.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(
+            textView.string,
+            "**Important**  \n*Read this* and [open it](https://example.com)"
+        )
+        XCTAssertNil(textView.string.range(of: #"</?[A-Za-z][^>]*>"#, options: .regularExpression))
     }
 
     func testPastePreservesMixedSourceMarkdownWhenConversionBreaksALaterTable() {
@@ -3327,6 +3383,7 @@ final class EditorLifecycleTests: XCTestCase {
         let rows = text
             .split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
             .map { line in
+                guard !line.isEmpty else { return "<div><br></div>" }
                 let escaped = String(line)
                     .replacingOccurrences(of: "&", with: "&amp;")
                     .replacingOccurrences(of: "<", with: "&lt;")

@@ -4,6 +4,7 @@ import Foundation
 /// It preserves document meaning without embedding an unrestricted browser in notes.
 enum SemanticHTML {
     private static let maximumNestingDepth = 256
+    private static let markdownLineBreakPlaceholder = "\u{E000}"
 
     final class Node {
         var name: String?
@@ -118,13 +119,13 @@ enum SemanticHTML {
         return root
     }
 
-    static func markdown(from html: String) -> String? {
+    static func markdown(from html: String, lineBreaksAsMarkdown: Bool = false) -> String? {
         let root = parseFragment(html)
-        return markdown(from: root.children)
+        return markdown(from: root.children, lineBreaksAsMarkdown: lineBreaksAsMarkdown)
     }
 
-    static func markdown(from nodes: [Node]) -> String? {
-        let output = renderBlocks(nodes)
+    static func markdown(from nodes: [Node], lineBreaksAsMarkdown: Bool = false) -> String? {
+        let output = renderBlocks(nodes, lineBreaksAsMarkdown: lineBreaksAsMarkdown)
             .replacingOccurrences(of: #"\n[ \t]+\n"#, with: "\n\n", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -241,13 +242,18 @@ enum SemanticHTML {
         return result
     }
 
-    private static func renderBlocks(_ nodes: [Node], preserveHTMLText: Bool = false) -> String {
+    private static func renderBlocks(
+        _ nodes: [Node],
+        preserveHTMLText: Bool = false,
+        lineBreaksAsMarkdown: Bool = false
+    ) -> String {
         var blocks: [String] = []
         var inlineBuffer: [Node] = []
         func flushInline() {
             let value = escapingMarkdownBlockStarts(in: normalizeInline(renderInline(
                 inlineBuffer,
-                preserveHTML: preserveHTMLText
+                preserveHTML: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
             )))
             if !value.isEmpty { blocks.append(value) }
             inlineBuffer.removeAll(keepingCapacity: true)
@@ -264,7 +270,11 @@ enum SemanticHTML {
                 continue
             }
             flushInline()
-            let value = renderBlock(node, preserveHTMLText: preserveHTMLText)
+            let value = renderBlock(
+                node,
+                preserveHTMLText: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            )
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !value.isEmpty { blocks.append(value) }
         }
@@ -272,39 +282,68 @@ enum SemanticHTML {
         return blocks.joined(separator: "\n\n")
     }
 
-    private static func renderBlock(_ node: Node, preserveHTMLText: Bool = false) -> String {
+    private static func renderBlock(
+        _ node: Node,
+        preserveHTMLText: Bool = false,
+        lineBreaksAsMarkdown: Bool = false
+    ) -> String {
         guard let name = node.name else { return normalizeInline(node.plainText) }
         if ignoredElements.contains(name) { return "" }
         switch name {
         case "html", "body", "main", "article", "section", "header", "footer", "nav", "aside", "form", "fieldset":
-            return renderBlocks(node.children, preserveHTMLText: preserveHTMLText)
+            return renderBlocks(
+                node.children,
+                preserveHTMLText: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            )
         case "h1", "h2", "h3", "h4", "h5", "h6":
             let level = Int(name.dropFirst()) ?? 1
             return String(repeating: "#", count: level) + " " + normalizeInline(renderInline(
                 node.children,
-                preserveHTML: preserveHTMLText
+                preserveHTML: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
             ))
         case "p", "address":
             return escapingMarkdownBlockStarts(in: normalizeInline(renderInline(
                 node.children,
-                preserveHTML: preserveHTMLText
+                preserveHTML: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
             )))
         case "div":
             return node.children.contains(where: { $0.name.map(blockElements.contains) == true })
-                ? renderBlocks(node.children, preserveHTMLText: preserveHTMLText)
+                ? renderBlocks(
+                    node.children,
+                    preserveHTMLText: preserveHTMLText,
+                    lineBreaksAsMarkdown: lineBreaksAsMarkdown
+                )
                 : escapingMarkdownBlockStarts(in: normalizeInline(renderInline(
                     node.children,
-                    preserveHTML: preserveHTMLText
+                    preserveHTML: preserveHTMLText,
+                    lineBreaksAsMarkdown: lineBreaksAsMarkdown
                 )))
         case "blockquote":
-            return renderBlocks(node.children, preserveHTMLText: preserveHTMLText)
+            return renderBlocks(
+                node.children,
+                preserveHTMLText: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            )
                 .components(separatedBy: "\n").map { line in
                 line.isEmpty ? ">" : "> \(line)"
             }.joined(separator: "\n")
         case "ul":
-            return renderList(node, ordered: false, preserveHTMLText: preserveHTMLText)
+            return renderList(
+                node,
+                ordered: false,
+                preserveHTMLText: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            )
         case "ol":
-            return renderList(node, ordered: true, preserveHTMLText: preserveHTMLText)
+            return renderList(
+                node,
+                ordered: true,
+                preserveHTMLText: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            )
         case "pre":
             let language = firstElement(named: "code", in: node)?.attributes["class"]?
                 .split(separator: " ").first(where: { $0.hasPrefix("language-") })
@@ -326,13 +365,26 @@ enum SemanticHTML {
         case "dl":
             return sanitizedDefinitionList(node)
         case "figure":
-            return renderBlocks(node.children, preserveHTMLText: preserveHTMLText)
+            return renderBlocks(
+                node.children,
+                preserveHTMLText: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            )
         default:
-            return normalizeInline(renderInline(node.children, preserveHTML: preserveHTMLText))
+            return normalizeInline(renderInline(
+                node.children,
+                preserveHTML: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            ))
         }
     }
 
-    private static func renderList(_ node: Node, ordered: Bool, preserveHTMLText: Bool = false) -> String {
+    private static func renderList(
+        _ node: Node,
+        ordered: Bool,
+        preserveHTMLText: Bool = false,
+        lineBreaksAsMarkdown: Bool = false
+    ) -> String {
         let items = node.children.filter { $0.name == "li" }
         var number = Int(node.attributes["start"] ?? "") ?? 1
         return items.map { item in
@@ -350,17 +402,29 @@ enum SemanticHTML {
                 marker = "- "
             }
             number += 1
-            let content = renderListItem(item, preserveHTMLText: preserveHTMLText)
+            let content = renderListItem(
+                item,
+                preserveHTMLText: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            )
             let lines = content.components(separatedBy: "\n")
             return marker + (lines.first ?? "") + lines.dropFirst().map { "\n  \($0)" }.joined()
         }.joined(separator: "\n")
     }
 
-    private static func renderListItem(_ node: Node, preserveHTMLText: Bool = false) -> String {
+    private static func renderListItem(
+        _ node: Node,
+        preserveHTMLText: Bool = false,
+        lineBreaksAsMarkdown: Bool = false
+    ) -> String {
         var pieces: [String] = []
         var inline: [Node] = []
         func flush() {
-            let value = normalizeInline(renderInline(inline, preserveHTML: preserveHTMLText))
+            let value = normalizeInline(renderInline(
+                inline,
+                preserveHTML: preserveHTMLText,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
+            ))
             if !value.isEmpty { pieces.append(value) }
             inline.removeAll(keepingCapacity: true)
         }
@@ -368,10 +432,18 @@ enum SemanticHTML {
             if child.name == "input" { continue }
             if child.name == "ul" || child.name == "ol" {
                 flush()
-                pieces.append(renderBlock(child, preserveHTMLText: preserveHTMLText))
+                pieces.append(renderBlock(
+                    child,
+                    preserveHTMLText: preserveHTMLText,
+                    lineBreaksAsMarkdown: lineBreaksAsMarkdown
+                ))
             } else if child.name.map(blockElements.contains) == true {
                 flush()
-                pieces.append(renderBlock(child, preserveHTMLText: preserveHTMLText))
+                pieces.append(renderBlock(
+                    child,
+                    preserveHTMLText: preserveHTMLText,
+                    lineBreaksAsMarkdown: lineBreaksAsMarkdown
+                ))
             } else {
                 inline.append(child)
             }
@@ -383,7 +455,8 @@ enum SemanticHTML {
     private static func renderInline(
         _ nodes: [Node],
         preserveHTML: Bool = false,
-        escapeTextAngles: Bool = false
+        escapeTextAngles: Bool = false,
+        lineBreaksAsMarkdown: Bool = false
     ) -> String {
         nodes.map { node in
             guard let name = node.name else {
@@ -396,10 +469,14 @@ enum SemanticHTML {
             let inner = renderInline(
                 node.children,
                 preserveHTML: preserveHTML,
-                escapeTextAngles: escapeTextAngles
+                escapeTextAngles: escapeTextAngles,
+                lineBreaksAsMarkdown: lineBreaksAsMarkdown
             )
             switch name {
-            case "br": return "<br>"
+            case "br":
+                return preserveHTML || !lineBreaksAsMarkdown
+                    ? "<br>"
+                    : markdownLineBreakPlaceholder
             case "wbr": return ""
             case "strong", "b": return preserveHTML ? "<strong>\(inner)</strong>" : "**\(inner)**"
             case "em", "i": return preserveHTML ? "<em>\(inner)</em>" : "*\(inner)*"
@@ -427,7 +504,8 @@ enum SemanticHTML {
                     return renderInline(
                         [image],
                         preserveHTML: preserveHTML,
-                        escapeTextAngles: escapeTextAngles
+                        escapeTextAngles: escapeTextAngles,
+                        lineBreaksAsMarkdown: lineBreaksAsMarkdown
                     )
                 }
                 return ""
@@ -508,8 +586,12 @@ enum SemanticHTML {
     }
 
     private static func normalizeInline(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: #"[ \t\r\n]+"#, with: " ", options: .regularExpression)
+        value.components(separatedBy: markdownLineBreakPlaceholder)
+            .map {
+                $0.replacingOccurrences(of: #"[ \t\r\n]+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .joined(separator: "  \n")
             .replacingOccurrences(of: " <br> ", with: "<br>")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }

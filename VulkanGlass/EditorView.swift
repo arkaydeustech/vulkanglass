@@ -562,6 +562,15 @@ final class SourceTextView: NSTextView {
         for (pasteboardType, documentType) in Self.richPasteboardTypes {
             if let data = pasteboard.data(forType: pasteboardType) {
                 guard data.count <= Self.maximumRichPasteboardBytes else { break }
+                if pasteboardType == .html,
+                   let plain,
+                   let html = RichTextMarkdownConverter.decodedHTML(data),
+                   RichTextMarkdownConverter.isSourceEditorHTML(html) {
+                    // Source editors place syntax-highlighted presentation HTML beside
+                    // the exact source selection. The plain representation is already
+                    // Markdown and must win so wrapper divs and br elements cannot alter it.
+                    return plain
+                }
                 guard let markdown = RichTextMarkdownConverter.markdown(
                     from: data,
                     documentType: documentType
