@@ -98,12 +98,11 @@ final class InlineParserTests: XCTestCase {
         let withCode = InlineRunsView.parse("before **bold** `code` after")
         XCTAssertEqual(
             InlineRunsView.layoutGroups(for: withCode),
-            [
-                .text([.text("before "), .bold("bold"), .text(" ")]),
-                .element(.code("code")),
-                .text([.text(" after")])
-            ]
+            [.text(withCode)]
         )
+
+        let withLink = InlineRunsView.parse("before [[Target|label]] and [site](https://example.com)")
+        XCTAssertEqual(InlineRunsView.layoutGroups(for: withLink), [.text(withLink)])
     }
 
     func testUnderlineHTMLIsRenderedInTheReadingPreview() {
@@ -2867,6 +2866,224 @@ final class EditorLifecycleTests: XCTestCase {
         }
     }
 
+    func testReadingModeUsesOneSelectableRichTextViewAcrossParagraphsAndInlineLinks() throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-selectable-reading-test.md"
+        let markdown = "First [[Target|linked label]] and [external](https://example.com) with `code`.\n\nSecond **bold text**."
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Selectable Title",
+                content: markdown,
+                originalContent: markdown,
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = .preview
+
+        let view = NoteEditorView()
+            .environment(model)
+            .frame(width: 600, height: 400, alignment: .topLeading)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let textViews = allSubviews(of: ReadingNSTextView.self, in: hostingView)
+        XCTAssertEqual(textViews.count, 1)
+        let body = try XCTUnwrap(textViews.first)
+        XCTAssertTrue(body.isSelectable)
+        XCTAssertFalse(body.isEditable)
+        XCTAssertFalse(body.string.contains("Selectable Title"))
+        XCTAssertTrue(body.string.contains("First linked label and external with code.\n\nSecond bold text."))
+
+        let attributed = body.attributedString()
+        let boldRange = (attributed.string as NSString).range(of: "bold text")
+        let font = try XCTUnwrap(
+            attributed.attribute(.font, at: boldRange.location, effectiveRange: nil)
+                as? NSFont
+        )
+        XCTAssertTrue(font.fontDescriptor.symbolicTraits.contains(.bold))
+
+        for label in ["linked label", "external"] {
+            let range = (attributed.string as NSString).range(of: label)
+            XCTAssertNotNil(attributed.attribute(.link, at: range.location, effectiveRange: nil))
+        }
+        let codeRange = (attributed.string as NSString).range(of: "code")
+        let codeFont = try XCTUnwrap(
+            attributed.attribute(.font, at: codeRange.location, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertTrue(codeFont.isFixedPitch)
+
+        let spanningRange = NSRange(
+            location: (body.string as NSString).range(of: "linked label").location,
+            length: NSMaxRange((body.string as NSString).range(of: "Second"))
+                - (body.string as NSString).range(of: "linked label").location
+        )
+        body.setSelectedRange(spanningRange)
+        XCTAssertTrue((body.string as NSString).substring(with: spanningRange).contains("\n\n"))
+        withExtendedLifetime(hostingView) {}
+    }
+
+    func testReadingContextMenuTargetsItsTextViewForCopyAndSelectAll() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: window.contentView!.bounds)
+        let search = NSTextField(frame: NSRect(x: 20, y: 250, width: 200, height: 24))
+        search.stringValue = "Search vault"
+        let reading = ReadingNSTextView(frame: NSRect(x: 20, y: 20, width: 440, height: 200))
+        reading.string = "First paragraph.\n\nSecond paragraph."
+        container.addSubview(search)
+        container.addSubview(reading)
+        window.contentView = container
+        window.makeFirstResponder(search)
+
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .rightMouseDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 0
+        ))
+        let menu = try XCTUnwrap(reading.menu(for: event))
+        let copyItem = try XCTUnwrap(menu.item(withTitle: "Copy"))
+        let selectAllItem = try XCTUnwrap(menu.item(withTitle: "Select All"))
+        XCTAssertTrue(copyItem.target === reading)
+        XCTAssertTrue(selectAllItem.target === reading)
+
+        reading.setSelectedRange((reading.string as NSString).range(of: "First"))
+        NSPasteboard.general.clearContents()
+        XCTAssertTrue(NSApp.sendAction(copyItem.action!, to: copyItem.target, from: copyItem))
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "First")
+
+        XCTAssertTrue(NSApp.sendAction(selectAllItem.action!, to: selectAllItem.target, from: selectAllItem))
+        XCTAssertEqual(reading.selectedRange(), NSRange(location: 0, length: reading.string.utf16.count))
+        XCTAssertNotEqual(search.currentEditor()?.selectedRange, reading.selectedRange())
+    }
+
+    func testReadingWikiLinkRemainsActivatableAfterOpeningContextMenu() throws {
+        let attributed = ReadingAttributedDocument.make(
+            blocks: MDBlock.parse("Open [[Target Note|the linked note]]."),
+            noteTitles: ["target note"],
+            baseURL: nil,
+            dark: true
+        )
+        let range = (attributed.string as NSString).range(of: "the linked note")
+        let link = try XCTUnwrap(attributed.attribute(.link, at: range.location, effectiveRange: nil))
+        var followedTarget: String?
+        let coordinator = UnifiedReadingTextView.Coordinator { followedTarget = $0 }
+        let textView = ReadingNSTextView()
+        textView.textStorage?.setAttributedString(attributed)
+
+        XCTAssertTrue(coordinator.textView(textView, clickedOnLink: link, at: range.location))
+        XCTAssertEqual(followedTarget, "Target Note")
+    }
+
+    func testReadingTitleButtonStartsInlineRename() throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-title-button-test.md"
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Rename Me",
+                content: "Body",
+                originalContent: "Body",
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = .preview
+
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView().environment(model)
+                .frame(width: 600, height: 400, alignment: .topLeading)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let button = try XCTUnwrap(firstSubview(of: NoteTitleRenameNSButton.self, in: hostingView))
+        button.performClick(nil)
+        XCTAssertEqual(model.titleEditingTabID, path)
+        withExtendedLifetime(hostingView) {}
+    }
+
+    func testReadingTitleButtonGlyphKeepsTheDocumentLeadingEdge() async throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-title-button-leading-test.md"
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Aligned Title",
+                content: "Body",
+                originalContent: "Body",
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = .preview
+
+        let reported = expectation(description: "Title leading edge")
+        var titleLeading: CGFloat?
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView(onDocumentLeading: { element, leading in
+                guard case .title = element, titleLeading == nil else { return }
+                titleLeading = leading
+                reported.fulfill()
+            })
+                .environment(model)
+                .frame(width: 600, height: 400, alignment: .topLeading)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        await fulfillment(of: [reported], timeout: 2)
+        let button = try XCTUnwrap(firstSubview(of: NoteTitleRenameNSButton.self, in: hostingView))
+        let titleRect = try XCTUnwrap(button.cell?.titleRect(forBounds: button.bounds))
+        let actualLeading = button.convert(titleRect.origin, to: hostingView).x
+        XCTAssertEqual(actualLeading, try XCTUnwrap(titleLeading), accuracy: 1)
+        withExtendedLifetime(hostingView) {}
+    }
+
+    func testSourceModeDoesNotInstallReadingSelectionOrMakeTheTitleSelectable() {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-source-selection-test.md"
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Source Title",
+                content: "Source body",
+                originalContent: "Source body",
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = .source
+
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView().environment(model)
+                .frame(width: 600, height: 400, alignment: .topLeading)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(allSubviews(of: ReadingNSTextView.self, in: hostingView).isEmpty)
+        XCTAssertTrue(
+            allSubviews(of: NSTextField.self, in: hostingView)
+                .filter { $0.isSelectable && !$0.isEditable }
+                .isEmpty
+        )
+        XCTAssertNotNil(firstSubview(of: SourceTextView.self, in: hostingView))
+        withExtendedLifetime(hostingView) {}
+    }
+
     func testReadingPreviewRendersSpanningTableDetailsAndDefinitionList() {
         let markdown = """
         <table>
@@ -3233,6 +3450,15 @@ final class EditorLifecycleTests: XCTestCase {
             if let match = firstSubview(of: type, in: subview) { return match }
         }
         return nil
+    }
+
+    private func allSubviews<T: NSView>(of type: T.Type, in root: NSView) -> [T] {
+        var matches: [T] = []
+        if let match = root as? T { matches.append(match) }
+        for subview in root.subviews {
+            matches.append(contentsOf: allSubviews(of: type, in: subview))
+        }
+        return matches
     }
 
     func testKeyboardNavigationConfirmsSelectedWikiSuggestion() {

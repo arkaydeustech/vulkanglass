@@ -87,6 +87,65 @@ struct MarkdownPreviewView: View {
     }
 
     var body: some View {
+        Group {
+            if supportsUnifiedTextSelection {
+                unifiedTextPreview
+            } else {
+                blockPreview
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private var unifiedTextPreview: some View {
+        GeometryReader { geometry in
+            let paneWidth = max(0, geometry.size.width)
+            UnifiedReadingTextView(
+                blocks: displayBlocks,
+                noteTitles: noteTitles,
+                baseURL: baseURL,
+                dark: dark,
+                onWiki: onWiki
+            )
+            .frame(
+                width: VGTheme.readingColumnWidth(paneWidth: paneWidth),
+                height: geometry.size.height,
+                alignment: .topLeading
+            )
+            .background {
+                if onLayout != nil {
+                    GeometryReader { columnGeometry in
+                        Color.clear.preference(
+                            key: MarkdownPreviewLayoutPreferenceKey.self,
+                            value: MarkdownPreviewLayoutMetrics(
+                                readingColumnSize: columnGeometry.size,
+                                contentLeading: columnGeometry.frame(
+                                    in: .named(layoutCoordinateSpace ?? "MarkdownPreviewLayout")
+                                ).minX + VGTheme.documentHorizontalPadding
+                            )
+                        )
+                    }
+                }
+            }
+            .frame(minWidth: paneWidth, alignment: .leading)
+            .background {
+                if onLayout != nil {
+                    Color.clear.preference(
+                        key: MarkdownPreviewLayoutPreferenceKey.self,
+                        value: MarkdownPreviewLayoutMetrics(scrollSurfaceSize: geometry.size)
+                    )
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .coordinateSpace(name: "MarkdownPreviewLayout")
+        .onPreferenceChange(MarkdownPreviewLayoutPreferenceKey.self) { metrics in
+            guard metrics.scrollSurfaceSize != nil, metrics.readingColumnSize != nil else { return }
+            onLayout?(metrics)
+        }
+    }
+
+    private var blockPreview: some View {
         GeometryReader { geometry in
             let paneWidth = max(0, geometry.size.width)
             ScrollView {
@@ -148,6 +207,28 @@ struct MarkdownPreviewView: View {
         .onPreferenceChange(MarkdownPreviewLayoutPreferenceKey.self) { metrics in
             guard metrics.scrollSurfaceSize != nil, metrics.readingColumnSize != nil else { return }
             onLayout?(metrics)
+        }
+    }
+
+    private var supportsUnifiedTextSelection: Bool {
+        displayBlocks.allSatisfy { block in
+            switch block {
+            case .code, .rule:
+                return true
+            case .heading(_, let text):
+                return !Self.containsInlineImage(text)
+            case .quote(let lines), .alert(_, let lines), .lines(let lines):
+                return !lines.contains(where: Self.containsInlineImage)
+            case .table, .richTable, .details, .definitionList:
+                return false
+            }
+        }
+    }
+
+    private static func containsInlineImage(_ text: String) -> Bool {
+        InlineRunsView.parse(text).contains {
+            if case .image = $0 { return true }
+            return false
         }
     }
 
@@ -535,6 +616,357 @@ struct SpanningTableLayout: Layout {
     }
 }
 
+/// One native text system owns a prose document's selection. That lets a drag cross
+/// paragraphs and inline styles, and keeps contextual actions scoped to this note.
+struct UnifiedReadingTextView: NSViewRepresentable {
+    let blocks: [MDBlock]
+    let noteTitles: Set<String>
+    let baseURL: URL?
+    let dark: Bool
+    let onWiki: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onWiki: onWiki)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+
+        let textView = ReadingNSTextView()
+        textView.delegate = context.coordinator
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.usesFontPanel = false
+        textView.usesRuler = false
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: VGTheme.documentHorizontalPadding, height: 0)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.minSize = .zero
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        update(textView, coordinator: context.coordinator)
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        context.coordinator.onWiki = onWiki
+        guard let textView = nsView.documentView as? ReadingNSTextView else { return }
+        update(textView, coordinator: context.coordinator)
+    }
+
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        (nsView.documentView as? ReadingNSTextView)?.delegate = nil
+        coordinator.textView = nil
+    }
+
+    private func update(_ textView: ReadingNSTextView, coordinator: Coordinator) {
+        let attributedText = ReadingAttributedDocument.make(
+            blocks: blocks,
+            noteTitles: noteTitles,
+            baseURL: baseURL,
+            dark: dark
+        )
+        if textView.attributedString() != attributedText {
+            let selection = textView.selectedRange()
+            textView.textStorage?.setAttributedString(attributedText)
+            let boundedLocation = min(selection.location, attributedText.length)
+            let boundedLength = min(selection.length, attributedText.length - boundedLocation)
+            textView.setSelectedRange(NSRange(location: boundedLocation, length: boundedLength))
+        }
+        textView.linkTextAttributes = [
+            .foregroundColor: NSColor(VGTheme.textAccent),
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .cursor: NSCursor.pointingHand,
+        ]
+        textView.selectedTextAttributes = [
+            .backgroundColor: NSColor(VGTheme.accent).withAlphaComponent(0.28)
+        ]
+        coordinator.textView = textView
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var onWiki: (String) -> Void
+        weak var textView: ReadingNSTextView?
+
+        init(onWiki: @escaping (String) -> Void) {
+            self.onWiki = onWiki
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            clickedOnLink link: Any,
+            at charIndex: Int
+        ) -> Bool {
+            guard let url = (link as? URL) ?? (link as? NSURL).map({ $0 as URL }) else {
+                return false
+            }
+            if url.scheme?.lowercased() == "wiki" {
+                let encodedTarget = String(url.absoluteString.dropFirst("wiki://".count))
+                onWiki(encodedTarget.removingPercentEncoding ?? encodedTarget)
+                return true
+            }
+            NSWorkspace.shared.open(url)
+            return true
+        }
+    }
+}
+
+final class ReadingNSTextView: NSTextView {
+    override func menu(for event: NSEvent) -> NSMenu? {
+        window?.makeFirstResponder(self)
+        let menu = NSMenu()
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
+        copyItem.target = self
+        copyItem.isEnabled = selectedRange().length > 0
+        menu.addItem(copyItem)
+        menu.addItem(.separator())
+        let selectAllItem = NSMenuItem(
+            title: "Select All",
+            action: #selector(selectAll(_:)),
+            keyEquivalent: ""
+        )
+        selectAllItem.target = self
+        selectAllItem.isEnabled = !string.isEmpty
+        menu.addItem(selectAllItem)
+        return menu
+    }
+}
+
+enum ReadingAttributedDocument {
+    static func make(
+        blocks: [MDBlock],
+        noteTitles: Set<String>,
+        baseURL: URL?,
+        dark: Bool
+    ) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        let textColor = NSColor(VGTheme.textNormal(dark: dark))
+        let mutedColor = NSColor(VGTheme.textMuted(dark: dark))
+        let bodyFont = NSFont.systemFont(ofSize: 16)
+
+        func appendInline(
+            _ source: String,
+            font: NSFont = NSFont.systemFont(ofSize: 16),
+            color: NSColor? = nil
+        ) {
+            result.append(inline(
+                source,
+                noteTitles: noteTitles,
+                baseURL: baseURL,
+                font: font,
+                color: color ?? textColor
+            ))
+        }
+
+        func appendBreak() {
+            guard result.length > 0 else { return }
+            result.append(NSAttributedString(string: "\n\n", attributes: [
+                .font: bodyFont,
+                .foregroundColor: textColor,
+            ]))
+        }
+
+        for (blockIndex, block) in blocks.enumerated() {
+            if blockIndex > 0 { appendBreak() }
+            switch block {
+            case .code(_, let code):
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.paragraphSpacing = 4
+                result.append(NSAttributedString(string: code, attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .regular),
+                    .foregroundColor: textColor,
+                    .backgroundColor: NSColor(VGTheme.backgroundSecondary(dark: dark)).withAlphaComponent(0.85),
+                    .paragraphStyle: paragraph,
+                ]))
+            case .heading(let level, let source):
+                appendInline(source, font: headingFont(level))
+            case .alert(let kind, let lines):
+                let color = alertColor(kind)
+                result.append(NSAttributedString(string: "\(kind.title)\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
+                    .foregroundColor: color,
+                ]))
+                for (index, line) in lines.enumerated() {
+                    if index > 0 { result.append(NSAttributedString(string: "\n")) }
+                    appendInline(line)
+                }
+            case .quote(let lines):
+                for (index, line) in lines.enumerated() {
+                    if index > 0 { result.append(NSAttributedString(string: "\n")) }
+                    result.append(NSAttributedString(string: "▏ ", attributes: [
+                        .font: bodyFont,
+                        .foregroundColor: NSColor(VGTheme.accent),
+                    ]))
+                    appendInline(line, color: mutedColor)
+                }
+            case .rule:
+                result.append(NSAttributedString(string: "────────────────────────", attributes: [
+                    .font: bodyFont,
+                    .foregroundColor: NSColor(VGTheme.divider(dark: dark)),
+                ]))
+            case .lines(let lines):
+                for (index, line) in lines.enumerated() {
+                    if index > 0 { result.append(NSAttributedString(string: "\n")) }
+                    let displayLine = normalizedLine(line)
+                    appendInline(displayLine)
+                }
+            case .table, .richTable, .details, .definitionList:
+                assertionFailure("Complex blocks use the structured SwiftUI preview")
+            }
+        }
+
+        result.append(NSAttributedString(string: "\n", attributes: [
+            .font: bodyFont,
+            .foregroundColor: textColor,
+            .paragraphStyle: {
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.paragraphSpacing = VGTheme.readingBottomPadding
+                return paragraph
+            }(),
+        ]))
+        return result
+    }
+
+    static func inline(
+        _ source: String,
+        noteTitles: Set<String>,
+        baseURL: URL?,
+        font: NSFont,
+        color: NSColor
+    ) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        for run in InlineRunsView.parse(source) {
+            let value: String
+            var attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: color,
+            ]
+            switch run {
+            case .text(let text), .emoji(let text):
+                value = text
+            case .bold(let text):
+                value = text
+                attributes[.font] = font.withTraits(.boldFontMask)
+            case .italic(let text):
+                value = text
+                attributes[.font] = font.withTraits(.italicFontMask)
+            case .boldItalic(let text):
+                value = text
+                attributes[.font] = font.withTraits([.boldFontMask, .italicFontMask])
+            case .strikethrough(let text):
+                value = text
+                attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+            case .underline(let text):
+                value = text
+                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            case .subscriptText(let text):
+                value = text
+                attributes[.font] = NSFont.systemFont(ofSize: max(9, font.pointSize - 5))
+                attributes[.baselineOffset] = -3
+            case .superscriptText(let text):
+                value = text
+                attributes[.font] = NSFont.systemFont(ofSize: max(9, font.pointSize - 5))
+                attributes[.baselineOffset] = 5
+            case .keyboard(let text):
+                value = text
+                attributes[.font] = NSFont.monospacedSystemFont(ofSize: 14, weight: .medium)
+                attributes[.backgroundColor] = NSColor.secondaryLabelColor.withAlphaComponent(0.12)
+            case .highlight(let text):
+                value = text
+                attributes[.backgroundColor] = NSColor.systemYellow.withAlphaComponent(0.38)
+            case .wiki(let target, let label):
+                value = label
+                attributes[.link] = wikiURL(target)
+                attributes[.foregroundColor] = NSColor(VGTheme.textAccent).withAlphaComponent(
+                    noteTitles.contains(target.lowercased()) ? 1 : 0.55
+                )
+            case .tag(let tag):
+                value = "#\(tag)"
+                attributes[.foregroundColor] = NSColor(VGTheme.textAccent)
+                attributes[.backgroundColor] = NSColor(VGTheme.accent).withAlphaComponent(0.22)
+            case .link(let label, let rawURL):
+                value = label
+                if rawURL.hasPrefix("wiki://") {
+                    let encoded = String(rawURL.dropFirst("wiki://".count))
+                    attributes[.link] = wikiURL(encoded.removingPercentEncoding ?? encoded)
+                } else if let url = MarkdownResourceResolver.linkURL(rawURL, relativeTo: baseURL) {
+                    attributes[.link] = url
+                }
+            case .code(let text):
+                value = text
+                attributes[.font] = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+                attributes[.backgroundColor] = NSColor.secondaryLabelColor.withAlphaComponent(0.18)
+            case .footnote(let text):
+                value = text
+                attributes[.font] = NSFont.systemFont(ofSize: 10)
+                attributes[.foregroundColor] = NSColor(VGTheme.textAccent)
+                attributes[.baselineOffset] = 4
+            case .image(let alt, _):
+                value = alt
+            }
+            result.append(NSAttributedString(string: value, attributes: attributes))
+        }
+        return result
+    }
+
+    private static func wikiURL(_ target: String) -> URL {
+        let encoded = target.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? target
+        return URL(string: "wiki://\(encoded)")!
+    }
+
+    private static func normalizedLine(_ line: String) -> String {
+        if line.hasPrefix("- [ ] ") { return "☐ \(line.dropFirst(6))" }
+        if line.hasPrefix("- [x] ") || line.hasPrefix("- [X] ") {
+            return "☑ \(line.dropFirst(6))"
+        }
+        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+            return "• \(line.dropFirst(2))"
+        }
+        return line
+    }
+
+    private static func headingFont(_ level: Int) -> NSFont {
+        switch level {
+        case 1: return .systemFont(ofSize: 28, weight: .bold)
+        case 2, 3: return .systemFont(ofSize: 22, weight: .bold)
+        default: return .systemFont(ofSize: 20, weight: .bold)
+        }
+    }
+
+    private static func alertColor(_ kind: GFM.AlertKind) -> NSColor {
+        switch kind {
+        case .note: return NSColor(red: 0.35, green: 0.62, blue: 0.95, alpha: 1)
+        case .tip: return NSColor(VGTheme.accent)
+        case .important: return NSColor(red: 0.72, green: 0.48, blue: 0.95, alpha: 1)
+        case .warning: return NSColor(red: 0.95, green: 0.68, blue: 0.22, alpha: 1)
+        case .caution: return NSColor(red: 0.90, green: 0.32, blue: 0.32, alpha: 1)
+        }
+    }
+}
+
+private extension NSFont {
+    func withTraits(_ traits: NSFontTraitMask) -> NSFont {
+        NSFontManager.shared.convert(self, toHaveTrait: traits)
+    }
+}
+
 enum MDBlock: Equatable, Sendable {
     case code(language: String, code: String)
     case heading(Int, String)
@@ -900,12 +1332,18 @@ struct InlineRunsView: View {
             ForEach(Array(layoutGroups.enumerated()), id: \.offset) { _, group in
                 switch group {
                 case .text(let textRuns):
-                    Self.composedText(textRuns)
+                    composedText(textRuns)
                 case .element(let run):
                     standaloneView(run)
                 }
             }
         }
+        .environment(\.openURL, OpenURLAction { url in
+            guard url.scheme?.lowercased() == "wiki" else { return .systemAction }
+            let encodedTarget = String(url.absoluteString.dropFirst("wiki://".count))
+            onWiki(encodedTarget.removingPercentEncoding ?? encodedTarget)
+            return .handled
+        })
     }
 
     private var runs: [InlineRun] {
@@ -979,7 +1417,7 @@ struct InlineRunsView: View {
             )
         case .text, .bold, .italic, .boldItalic, .strikethrough, .underline,
              .subscriptText, .superscriptText, .emoji:
-            Self.composedText([run])
+            composedText([run])
         }
     }
 
@@ -995,45 +1433,112 @@ struct InlineRunsView: View {
 
         for run in runs {
             switch run {
-            case .text, .bold, .italic, .boldItalic, .strikethrough, .underline,
-                 .subscriptText, .superscriptText, .emoji:
-                textRuns.append(run)
-            case .wiki, .tag, .link, .code, .footnote, .image, .keyboard, .highlight:
+            case .image:
                 flushText()
                 result.append(.element(run))
+            case .text, .bold, .italic, .boldItalic, .strikethrough, .underline,
+                 .subscriptText, .superscriptText, .emoji, .wiki, .tag, .link,
+                 .code, .footnote, .keyboard, .highlight:
+                textRuns.append(run)
             }
         }
         flushText()
         return result
     }
 
-    private static func composedText(_ runs: [InlineRun]) -> Text {
-        runs.reduce(Text("")) { partial, run in
-            partial + styledText(run)
+    private func composedText(_ runs: [InlineRun]) -> Text {
+        var result = AttributedString()
+        for run in runs {
+            let value: String
+            var segment: AttributedString
+            switch run {
+            case .text(let text), .emoji(let text):
+                value = text
+                segment = AttributedString(value)
+            case .bold(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.inlinePresentationIntent = .stronglyEmphasized
+            case .italic(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.inlinePresentationIntent = .emphasized
+            case .boldItalic(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.inlinePresentationIntent = [.stronglyEmphasized, .emphasized]
+            case .strikethrough(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.strikethroughStyle = .single
+            case .underline(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.underlineStyle = .single
+            case .subscriptText(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.font = .system(size: 11)
+                segment.baselineOffset = -3
+            case .superscriptText(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.font = .system(size: 11)
+                segment.baselineOffset = 5
+            case .keyboard(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.font = .system(.body, design: .monospaced).weight(.medium)
+                segment.backgroundColor = Color.secondary.opacity(0.12)
+            case .highlight(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.backgroundColor = Color.yellow.opacity(0.38)
+            case .wiki(let target, let label):
+                value = label
+                segment = AttributedString(value)
+                let encoded = target.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? target
+                segment.link = URL(string: "wiki://\(encoded)")
+                segment.foregroundColor = VGTheme.textAccent.opacity(
+                    noteTitles.contains(target.lowercased()) ? 1 : 0.55
+                )
+                if noteTitles.contains(target.lowercased()) {
+                    segment.underlineStyle = .single
+                }
+            case .tag(let tag):
+                value = "#\(tag)"
+                segment = AttributedString(value)
+                segment.font = .system(size: 13)
+                segment.foregroundColor = VGTheme.textAccent
+                segment.backgroundColor = VGTheme.accent.opacity(0.22)
+            case .link(let label, let rawURL):
+                value = label
+                segment = AttributedString(value)
+                if rawURL.hasPrefix("wiki://") {
+                    let encoded = String(rawURL.dropFirst("wiki://".count))
+                    segment.link = URL(string: "wiki://\(encoded)")
+                } else {
+                    segment.link = MarkdownResourceResolver.linkURL(rawURL, relativeTo: baseURL)
+                }
+                segment.foregroundColor = VGTheme.textAccent
+                segment.underlineStyle = .single
+            case .code(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.font = .system(.body, design: .monospaced)
+                segment.backgroundColor = Color.gray.opacity(0.18)
+            case .footnote(let text):
+                value = text
+                segment = AttributedString(value)
+                segment.font = .system(size: 10)
+                segment.foregroundColor = VGTheme.textAccent
+                segment.baselineOffset = 4
+            case .image:
+                continue
+            }
+            result.append(segment)
         }
-    }
-
-    private static func styledText(_ run: InlineRun) -> Text {
-        switch run {
-        case .text(let value), .emoji(let value):
-            return Text(value)
-        case .bold(let value):
-            return Text(value).bold()
-        case .italic(let value):
-            return Text(value).italic()
-        case .boldItalic(let value):
-            return Text(value).bold().italic()
-        case .strikethrough(let value):
-            return Text(value).strikethrough()
-        case .underline(let value):
-            return Text(value).underline()
-        case .subscriptText(let value):
-            return Text(value).font(.system(size: 11)).baselineOffset(-3)
-        case .superscriptText(let value):
-            return Text(value).font(.system(size: 11)).baselineOffset(5)
-        case .wiki, .tag, .link, .code, .footnote, .image, .keyboard, .highlight:
-            return Text("")
-        }
+        return Text(result)
     }
 
     static func parse(_ input: String) -> [InlineRun] {

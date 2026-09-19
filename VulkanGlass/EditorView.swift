@@ -1809,14 +1809,13 @@ struct NoteEditorView: View {
                 // The borderless NSTextField bridge renders two points left of its SwiftUI frame.
                 .padding(.leading, 2)
             } else {
-                Text(tab.title)
-                    .font(.system(size: 34, weight: .bold))
-                    .foregroundStyle(VGTheme.textNormal(dark: model.dark))
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.beginEditingTitle(for: tab.id) }
-                    .help("Rename")
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Renames this note")
+                NoteTitleRenameButton(
+                    title: tab.title,
+                    color: NSColor(VGTheme.textNormal(dark: model.dark))
+                ) {
+                    model.beginEditingTitle(for: tab.id)
+                }
+                .fixedSize()
             }
         }
         .tracking(-0.4)
@@ -1840,6 +1839,56 @@ struct NoteEditorView: View {
         .padding(.top, 24)
         .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+final class NoteTitleRenameNSButton: NSButton {}
+
+struct NoteTitleRenameButton: NSViewRepresentable {
+    let title: String
+    let color: NSColor
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NoteTitleRenameNSButton {
+        let button = NoteTitleRenameNSButton()
+        button.isBordered = false
+        button.setButtonType(.momentaryChange)
+        button.font = .systemFont(ofSize: 34, weight: .bold)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.activate(_:))
+        button.toolTip = "Rename"
+        button.setAccessibilityRole(.button)
+        button.setAccessibilityHelp("Renames this note")
+        update(button, coordinator: context.coordinator)
+        return button
+    }
+
+    func updateNSView(_ nsView: NoteTitleRenameNSButton, context: Context) {
+        context.coordinator.action = action
+        update(nsView, coordinator: context.coordinator)
+    }
+
+    private func update(_ button: NoteTitleRenameNSButton, coordinator: Coordinator) {
+        button.title = title
+        button.contentTintColor = color
+        button.setAccessibilityLabel(title)
+        button.sizeToFit()
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func activate(_ sender: Any?) {
+            action()
+        }
     }
 }
 
