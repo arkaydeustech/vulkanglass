@@ -28,6 +28,11 @@ enum FileServiceError: LocalizedError, Equatable {
 }
 
 enum FileService {
+    struct WikiNoteResolution: Sendable {
+        let url: URL
+        let wasCreated: Bool
+    }
+
     private static let skipped = Set([".git", "node_modules", ".obsidian", ".vulkan-glass", "dist", "out"])
 
     /// Returns whether `path` exists on disk and is a directory.
@@ -207,9 +212,14 @@ enum FileService {
             .map { URL(fileURLWithPath: $0.path) }
     }
 
-    static func createFromWiki(root: URL, target: String) throws -> URL {
-        if let existing = resolveWiki(root: root, target: target) { return existing }
-        return try createNote(in: root, name: target)
+    static func createFromWiki(root: URL, target: String) throws -> WikiNoteResolution {
+        if let existing = resolveWiki(root: root, target: target) {
+            return WikiNoteResolution(url: existing, wasCreated: false)
+        }
+        return WikiNoteResolution(
+            url: try createNote(in: root, name: target),
+            wasCreated: true
+        )
     }
 
     /// Produces a candidate beneath root and rejects absolute, parent, and symlink escapes.

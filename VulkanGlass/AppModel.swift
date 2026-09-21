@@ -112,6 +112,7 @@ final class AppModel {
     var activeTabID: String?
     var titleEditingTabID: String?
     private(set) var titleEditingDraft = ""
+    private(set) var editorFocusRequest: EditorFocusRequest?
     var leftOpen = true
     var rightOpen = true
     var leftPanel: LeftPanel = .files
@@ -347,6 +348,7 @@ final class AppModel {
         vault = nil
         fileTree = []
         notes = []
+        editorFocusRequest = nil
         titleEditingTabID = nil
         titleEditingDraft = ""
         tabs = []
@@ -398,6 +400,7 @@ final class AppModel {
             guard await commitTitleEditing() else { return }
         }
         if let existing = tabs.first(where: { $0.path == path }) {
+            editorFocusRequest = nil
             titleEditingTabID = nil
             titleEditingDraft = ""
             activeTabID = existing.id
@@ -421,6 +424,7 @@ final class AppModel {
                 editorMode: inheritedEditorMode
             )
             tabs.append(tab)
+            editorFocusRequest = nil
             titleEditingTabID = nil
             titleEditingDraft = ""
             activeTabID = tab.id
@@ -449,6 +453,9 @@ final class AppModel {
             titleEditingTabID = nil
             titleEditingDraft = ""
         }
+        if editorFocusRequest?.tabID == resolvedTarget {
+            editorFocusRequest = nil
+        }
         tabs.removeAll { $0.id == resolvedTarget }
         if activeTabID == resolvedTarget {
             activeTabID = tabs.last?.id
@@ -471,12 +478,14 @@ final class AppModel {
         if titleEditingTabID != id {
             titleEditingTabID = nil
         }
+        editorFocusRequest = nil
         activeTabID = id
         centerView = .editor
     }
 
     func beginEditingTitle(for id: String) {
         guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        editorFocusRequest = nil
         titleEditingTabID = id
         titleEditingDraft = tab.title
     }
@@ -635,6 +644,7 @@ final class AppModel {
                 let url = try FileService.createNote(in: dailyDir, name: name)
                 await refreshVault()
                 await openTab(path: url.path)
+                prepareNewNoteForEditing(at: url.path)
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -709,6 +719,11 @@ final class AppModel {
                 self.titleEditingTabID = nil
                 titleEditingDraft = ""
             }
+            if let requestedTabID = editorFocusRequest?.tabID,
+               removedIDs.contains(requestedTabID)
+            {
+                editorFocusRequest = nil
+            }
             tabs.removeAll { $0.path == path || $0.path.hasPrefix(prefix) }
             if let activeTabID, removedIDs.contains(activeTabID) { self.activeTabID = tabs.last?.id }
             await refreshVault()
@@ -721,11 +736,14 @@ final class AppModel {
         guard let vault else { return }
         do {
             let root = URL(fileURLWithPath: vault.path)
-            let url = try await Task.detached {
+            let resolution = try await Task.detached {
                 try FileService.createFromWiki(root: root, target: target)
             }.value
             await refreshVault()
-            await openTab(path: url.path)
+            await openTab(path: resolution.url.path)
+            if resolution.wasCreated {
+                prepareNewNoteForEditing(at: resolution.url.path)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -879,15 +897,24 @@ final class AppModel {
         if titleEditingTabID == oldPath {
             titleEditingTabID = newPath
         }
+        if let request = editorFocusRequest, request.tabID == oldPath {
+            editorFocusRequest = EditorFocusRequest(id: request.id, tabID: newPath)
+        }
     }
 
-    /// New notes always begin in source mode with their generated title ready to replace.
+    /// New notes always begin in source mode with the document ready for typing.
     private func prepareNewNoteForEditing(at path: String) {
         guard tabs.contains(where: { $0.id == path }) else { return }
         editorMode = .source
         centerView = .editor
-        titleEditingTabID = path
-        titleEditingDraft = Markdown.title(from: path)
+        titleEditingTabID = nil
+        titleEditingDraft = ""
+        editorFocusRequest = EditorFocusRequest(tabID: path)
+    }
+
+    func fulfillEditorFocusRequest(_ id: UUID) {
+        guard editorFocusRequest?.id == id else { return }
+        editorFocusRequest = nil
     }
 
     /// Shows a toast and returns to the welcome screen when a vault folder is gone.
@@ -902,6 +929,7 @@ final class AppModel {
             vault = nil
             fileTree = []
             notes = []
+            editorFocusRequest = nil
             titleEditingTabID = nil
             titleEditingDraft = ""
             tabs = []
@@ -976,6 +1004,7 @@ final class AppModel {
         vault = nil
         fileTree = []
         notes = []
+        editorFocusRequest = nil
         gitStatus = GitStatus(state: .idle, message: "Standalone file — not a GitHub vault")
         do {
             let text = try FileService.read(url)

@@ -151,6 +151,16 @@ struct NoteTab: Identifiable, Equatable, Sendable {
     var dirty: Bool { content != originalContent }
 }
 
+struct EditorFocusRequest: Equatable, Sendable {
+    let id: UUID
+    let tabID: String
+
+    init(id: UUID = UUID(), tabID: String) {
+        self.id = id
+        self.tabID = tabID
+    }
+}
+
 struct GitHubUser: Sendable {
     var login: String
     var name: String?

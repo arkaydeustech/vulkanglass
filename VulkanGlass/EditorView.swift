@@ -8,6 +8,8 @@ struct SourceEditor: NSViewRepresentable {
     var dark: Bool
     var baseURL: URL?
     var loadRemoteImages = false
+    var focusRequestID: UUID?
+    var onFocusRequestFulfilled: (UUID) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onChange: { text = $0 })
@@ -58,6 +60,8 @@ struct SourceEditor: NSViewRepresentable {
         }
         applyChrome(textView)
         context.coordinator.restyle()
+        context.coordinator.onFocusRequestFulfilled = onFocusRequestFulfilled
+        context.coordinator.updateFocusRequest(focusRequestID)
         return scroll
     }
 
@@ -68,6 +72,7 @@ struct SourceEditor: NSViewRepresentable {
         context.coordinator.dark = dark
         context.coordinator.baseURL = baseURL
         context.coordinator.loadRemoteImages = loadRemoteImages
+        context.coordinator.onFocusRequestFulfilled = onFocusRequestFulfilled
         guard let textView = nsView.documentView as? SourceTextView else { return }
         textView.configureImages(baseURL: baseURL, loadRemoteImages: loadRemoteImages)
         if textView.string != text {
@@ -78,9 +83,11 @@ struct SourceEditor: NSViewRepresentable {
         }
         applyChrome(textView)
         context.coordinator.refreshWikiPopup()
+        context.coordinator.updateFocusRequest(focusRequestID)
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.prepareForDismantle()
         coordinator.cancelPendingRestyle()
         coordinator.dismissPopup()
         if let textView = nsView.documentView as? SourceTextView {
@@ -105,6 +112,7 @@ struct SourceEditor: NSViewRepresentable {
         var dark = true
         var baseURL: URL?
         var loadRemoteImages = false
+        var onFocusRequestFulfilled: (UUID) -> Void = { _ in }
         private var cachedText: String?
         private var cachedTokens: [LivePreview.Token] = []
         private let popup = WikiLinkPopupController()
@@ -114,16 +122,73 @@ struct SourceEditor: NSViewRepresentable {
         private var dismissedMarker: Int?
         private var restyling = false
         private var pendingRestyle: DispatchWorkItem?
+        private var fulfilledFocusRequestID: UUID?
+        private var activeFocusRequestID: UUID?
+        private var pendingFocusRequestID: UUID?
+        private var dismantling = false
+        private let focus: (SourceTextView) -> Bool
 
         var isPopupVisible: Bool { popup.isVisible }
         var selectedSuggestionIndex: Int { selected }
 
-        init(onChange: @escaping (String) -> Void) {
+        init(
+            onChange: @escaping (String) -> Void,
+            focus: @escaping (SourceTextView) -> Bool = {
+                guard let window = $0.window else { return false }
+                return window.makeFirstResponder($0)
+            }
+        ) {
             self.onChange = onChange
+            self.focus = focus
             super.init()
             popup.onChoose = { [weak self] note in
                 self?.insert(note)
             }
+        }
+
+        func updateFocusRequest(_ id: UUID?) {
+            activeFocusRequestID = id
+            guard let id else {
+                pendingFocusRequestID = nil
+                return
+            }
+            requestFocus(id: id)
+        }
+
+        private func requestFocus(id: UUID, remainingAttempts: Int = 8) {
+            guard activeFocusRequestID == id,
+                  fulfilledFocusRequestID != id,
+                  pendingFocusRequestID != id,
+                  !dismantling
+            else { return }
+            pendingFocusRequestID = id
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.activeFocusRequestID == id,
+                      let textView = self.textView,
+                      !self.dismantling
+                else {
+                    if self?.pendingFocusRequestID == id {
+                        self?.pendingFocusRequestID = nil
+                    }
+                    return
+                }
+                self.pendingFocusRequestID = nil
+                let insertionPoint = (textView.string as NSString).length
+                textView.setSelectedRange(NSRange(location: insertionPoint, length: 0))
+                if self.focus(textView) {
+                    self.fulfilledFocusRequestID = id
+                    self.onFocusRequestFulfilled(id)
+                } else if remainingAttempts > 1 {
+                    self.requestFocus(id: id, remainingAttempts: remainingAttempts - 1)
+                }
+            }
+        }
+
+        func prepareForDismantle() {
+            dismantling = true
+            activeFocusRequestID = nil
+            pendingFocusRequestID = nil
         }
 
         func textDidChange(_ notification: Notification) {
@@ -1744,7 +1809,11 @@ struct NoteEditorView: View {
                         notes: model.notes,
                         dark: model.dark,
                         baseURL: URL(fileURLWithPath: tab.path).deletingLastPathComponent(),
-                        loadRemoteImages: model.settings.loadRemoteImages
+                        loadRemoteImages: model.settings.loadRemoteImages,
+                        focusRequestID: model.editorFocusRequest?.tabID == tab.id
+                            ? model.editorFocusRequest?.id
+                            : nil,
+                        onFocusRequestFulfilled: { model.fulfillEditorFocusRequest($0) }
                     )
                         .background {
                             if onDocumentLeading != nil {
