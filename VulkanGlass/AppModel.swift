@@ -642,11 +642,11 @@ final class AppModel {
     }
 
     func createFolder(name: String) async {
-        guard let vault, !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard let vault else { return }
         do {
             _ = try FileService.createFolder(
                 in: URL(fileURLWithPath: vault.path),
-                name: name.trimmingCharacters(in: .whitespaces)
+                name: name
             )
             await refreshVault()
         } catch {

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 enum FileServiceError: LocalizedError, Equatable {
+    case emptyName
     case invalidRelativePath(String)
     case outsideRoot(String)
     case missingVault(String)
@@ -10,6 +11,8 @@ enum FileServiceError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
+        case .emptyName:
+            return "Enter a folder name."
         case .invalidRelativePath(let value):
             return "Invalid file or folder name: \(value)"
         case .outsideRoot(let path):
@@ -62,7 +65,13 @@ enum FileService {
     }
 
     static func createFolder(in directory: URL, name: String) throws -> URL {
-        let url = try containedURL(root: directory, relativePath: name)
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw FileServiceError.emptyName }
+        guard !trimmed.contains("/") else { throw FileServiceError.invalidRelativePath(name) }
+        let url = try containedURL(root: directory, relativePath: trimmed)
+        guard !FileManager.default.fileExists(atPath: url.path) else {
+            throw FileServiceError.nameTaken(trimmed)
+        }
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
         return url
     }

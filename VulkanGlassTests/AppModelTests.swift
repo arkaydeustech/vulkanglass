@@ -405,6 +405,81 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: tab.path))
     }
 
+    func testFolderDraftCapturesSubmittedNameBeforeClearingAndRefreshesFileTree() async throws {
+        let root = try temporaryDirectory()
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.vault = VaultInfo(
+            name: "vault",
+            path: root.path,
+            remote: nil,
+            branch: nil,
+            isGitHub: false
+        )
+        let draft = FolderCreationDraft()
+        draft.name = "Project Notes"
+
+        let submission = draft.submit(into: model)
+
+        XCTAssertEqual(draft.name, "")
+        await submission.value
+
+        let folder = root.appendingPathComponent("Project Notes", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertEqual(model.fileTree.map(\.name), ["Project Notes"])
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testFolderDraftIsEmptyWheneverCreationBeginsOrIsCancelled() {
+        let draft = FolderCreationDraft()
+        draft.name = "Abandoned"
+
+        draft.cancel()
+        XCTAssertEqual(draft.name, "")
+
+        draft.name = "Stale"
+        draft.begin()
+        XCTAssertEqual(draft.name, "")
+    }
+
+    func testCreateFolderReportsExistingName() async throws {
+        let root = try temporaryDirectory()
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Existing"),
+            withIntermediateDirectories: false
+        )
+        let model = modelWithVault(at: root)
+
+        await model.createFolder(name: "Existing")
+
+        XCTAssertEqual(model.errorMessage, FileServiceError.nameTaken("Existing").localizedDescription)
+        XCTAssertEqual(model.fileTree.map(\.name), [])
+    }
+
+    func testCreateFolderRejectsWhitespaceOnlyNameWithFeedback() async throws {
+        let root = try temporaryDirectory()
+        let model = modelWithVault(at: root)
+
+        await model.createFolder(name: "  \n ")
+
+        XCTAssertEqual(model.errorMessage, FileServiceError.emptyName.localizedDescription)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+
+    func testCreateFolderRejectsPathSeparator() async throws {
+        let root = try temporaryDirectory()
+        let model = modelWithVault(at: root)
+
+        await model.createFolder(name: "Nested/Folder")
+
+        XCTAssertEqual(
+            model.errorMessage,
+            FileServiceError.invalidRelativePath("Nested/Folder").localizedDescription
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Nested").path))
+    }
+
     func testBackToBackNewNotesKeepTitleTargetAndEditorModesScopedPerTab() async throws {
         let root = try temporaryDirectory()
         let existing = root.appendingPathComponent("Existing.md")
@@ -1228,6 +1303,18 @@ final class AppModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+
+    private func modelWithVault(at root: URL) -> AppModel {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.vault = VaultInfo(
+            name: "vault",
+            path: root.path,
+            remote: nil,
+            branch: nil,
+            isGitHub: false
+        )
+        return model
     }
 
     private func inlineRenameRepresentable(

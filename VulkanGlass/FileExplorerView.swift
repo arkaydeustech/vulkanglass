@@ -1,9 +1,31 @@
+import Observation
 import SwiftUI
+
+@MainActor
+@Observable
+final class FolderCreationDraft {
+    var name = ""
+
+    func begin() {
+        name = ""
+    }
+
+    func cancel() {
+        name = ""
+    }
+
+    @discardableResult
+    func submit(into model: AppModel) -> Task<Void, Never> {
+        let submittedName = name
+        name = ""
+        return Task { await model.createFolder(name: submittedName) }
+    }
+}
 
 struct FileExplorerView: View {
     @Environment(AppModel.self) private var model
     @State private var filter = ""
-    @State private var folderName = ""
+    @State private var folderDraft = FolderCreationDraft()
     @State private var askingFolder = false
 
     var body: some View {
@@ -21,7 +43,10 @@ struct FileExplorerView: View {
                 }
                 .buttonStyle(.plain)
                 .help("New note")
-                Button { askingFolder = true } label: {
+                Button {
+                    folderDraft.begin()
+                    askingFolder = true
+                } label: {
                     Image(systemName: "folder.badge.plus")
                         .font(.system(size: 12))
                 }
@@ -50,12 +75,13 @@ struct FileExplorerView: View {
             }
         }
         .alert("New folder", isPresented: $askingFolder) {
-            TextField("Name", text: $folderName)
+            TextField("Name", text: $folderDraft.name)
             Button("Create") {
-                Task { await model.createFolder(name: folderName) }
-                folderName = ""
+                folderDraft.submit(into: model)
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                folderDraft.cancel()
+            }
         }
     }
 
