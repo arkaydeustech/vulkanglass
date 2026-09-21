@@ -1,24 +1,11 @@
 import AppKit
+import ImageIO
 import SwiftUI
 
 struct MarkdownPreviewLayoutMetrics: Equatable {
     var scrollSurfaceSize: CGSize?
     var readingColumnSize: CGSize?
     var contentLeading: CGFloat?
-    var tableCells: [MarkdownPreviewTableCellLayout] = []
-}
-
-struct MarkdownPreviewTableCellLayout: Equatable {
-    var table: Int
-    var row: Int
-    var column: Int
-    var size: CGSize
-}
-
-enum MarkdownPreviewTableStyle {
-    static func background(dark: Bool, isHeader: Bool) -> Color {
-        isHeader ? VGTheme.backgroundSecondary(dark: dark).opacity(0.85) : Color.clear
-    }
 }
 
 private enum MarkdownPreviewLayoutPreferenceKey: PreferenceKey {
@@ -32,12 +19,6 @@ private enum MarkdownPreviewLayoutPreferenceKey: PreferenceKey {
         value.scrollSurfaceSize = next.scrollSurfaceSize ?? value.scrollSurfaceSize
         value.readingColumnSize = next.readingColumnSize ?? value.readingColumnSize
         value.contentLeading = next.contentLeading ?? value.contentLeading
-        for cell in next.tableCells {
-            value.tableCells.removeAll {
-                $0.table == cell.table && $0.row == cell.row && $0.column == cell.column
-            }
-            value.tableCells.append(cell)
-        }
     }
 }
 
@@ -87,14 +68,7 @@ struct MarkdownPreviewView: View {
     }
 
     var body: some View {
-        Group {
-            if supportsUnifiedTextSelection {
-                unifiedTextPreview
-            } else {
-                blockPreview
-                    .textSelection(.enabled)
-            }
-        }
+        unifiedTextPreview
     }
 
     private var unifiedTextPreview: some View {
@@ -105,6 +79,8 @@ struct MarkdownPreviewView: View {
                 noteTitles: noteTitles,
                 baseURL: baseURL,
                 dark: dark,
+                loadLocalImages: loadLocalImages,
+                loadRemoteImages: loadRemoteImages,
                 onWiki: onWiki
             )
             .frame(
@@ -144,486 +120,38 @@ struct MarkdownPreviewView: View {
             onLayout?(metrics)
         }
     }
-
-    private var blockPreview: some View {
-        GeometryReader { geometry in
-            let paneWidth = max(0, geometry.size.width)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(displayBlocks.enumerated()), id: \.offset) { blockIndex, block in
-                        blockView(block, blockIndex: blockIndex)
-                    }
-                }
-                .background {
-                    if onLayout != nil {
-                        GeometryReader { contentGeometry in
-                            Color.clear.preference(
-                                key: MarkdownPreviewLayoutPreferenceKey.self,
-                                value: MarkdownPreviewLayoutMetrics(
-                                    contentLeading: contentGeometry.frame(
-                                        in: .named(layoutCoordinateSpace ?? "MarkdownPreviewLayout")
-                                    ).minX
-                                )
-                            )
-                        }
-                    }
-                }
-                .padding(.horizontal, VGTheme.documentHorizontalPadding)
-                .padding(.bottom, VGTheme.readingBottomPadding)
-                .frame(
-                    width: VGTheme.readingColumnWidth(paneWidth: paneWidth),
-                    alignment: .leading
-                )
-                .background {
-                    if onLayout != nil {
-                        GeometryReader { columnGeometry in
-                            Color.clear.preference(
-                                key: MarkdownPreviewLayoutPreferenceKey.self,
-                                value: MarkdownPreviewLayoutMetrics(
-                                    readingColumnSize: columnGeometry.size
-                                )
-                            )
-                        }
-                    }
-                }
-                .frame(minWidth: paneWidth, alignment: .leading)
-            }
-            .frame(width: paneWidth, height: geometry.size.height, alignment: .topLeading)
-            .background {
-                if onLayout != nil {
-                    GeometryReader { scrollGeometry in
-                        Color.clear.preference(
-                            key: MarkdownPreviewLayoutPreferenceKey.self,
-                            value: MarkdownPreviewLayoutMetrics(
-                                scrollSurfaceSize: scrollGeometry.size
-                            )
-                        )
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .coordinateSpace(name: "MarkdownPreviewLayout")
-        .onPreferenceChange(MarkdownPreviewLayoutPreferenceKey.self) { metrics in
-            guard metrics.scrollSurfaceSize != nil, metrics.readingColumnSize != nil else { return }
-            onLayout?(metrics)
-        }
-    }
-
-    private var supportsUnifiedTextSelection: Bool {
-        displayBlocks.allSatisfy { block in
-            switch block {
-            case .code, .rule:
-                return true
-            case .heading(_, let text):
-                return !Self.containsInlineImage(text)
-            case .quote(let lines), .alert(_, let lines), .lines(let lines):
-                return !lines.contains(where: Self.containsInlineImage)
-            case .table, .richTable, .details, .definitionList:
-                return false
-            }
-        }
-    }
-
-    private static func containsInlineImage(_ text: String) -> Bool {
-        InlineRunsView.parse(text).contains {
-            if case .image = $0 { return true }
-            return false
-        }
-    }
-
-    @ViewBuilder
-    private func blockView(_ block: MDBlock, blockIndex: Int) -> some View {
-        switch block {
-        case .code(let language, let code):
-            ZStack(alignment: .topTrailing) {
-                Text(code)
-                    .font(.system(.body, design: .monospaced))
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(VGTheme.backgroundSecondary(dark: dark).opacity(0.85))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                if !language.isEmpty {
-                    Text(CodeHighlight.displayName(for: language))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(10)
-                }
-            }
-        case .heading(let level, let text):
-            InlineRunsView(text: text, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-                .font(headingFont(level))
-                .fontWeight(.bold)
-                .padding(.top, level <= 1 ? 4 : 10)
-        case .alert(let kind, let lines):
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: kind.symbol)
-                    .foregroundStyle(alertColor(kind))
-                    .padding(.top, 2)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(kind.title).font(.subheadline.weight(.semibold)).foregroundStyle(alertColor(kind))
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-                    }
-                }
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(alertColor(kind).opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        case .quote(let lines):
-            HStack(alignment: .top, spacing: 12) {
-                VGTheme.accent.frame(width: 3)
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        case .table(let rows, let alignments, let hasHeader):
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
-                    GridRow {
-                        ForEach(Array(row.enumerated()), id: \.offset) { col, cell in
-                            InlineRunsView(text: cell, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-                                .padding(8)
-                                .frame(
-                                    maxWidth: .infinity,
-                                    maxHeight: .infinity,
-                                    alignment: alignment(alignments, col)
-                                )
-                                .background(MarkdownPreviewTableStyle.background(
-                                    dark: dark,
-                                    isHeader: hasHeader && rowIndex == 0
-                                ))
-                                .background {
-                                    if onLayout != nil {
-                                        GeometryReader { cellGeometry in
-                                            Color.clear.preference(
-                                                key: MarkdownPreviewLayoutPreferenceKey.self,
-                                                value: MarkdownPreviewLayoutMetrics(
-                                                    tableCells: [
-                                                        MarkdownPreviewTableCellLayout(
-                                                            table: blockIndex,
-                                                            row: rowIndex,
-                                                            column: col,
-                                                            size: cellGeometry.size
-                                                        )
-                                                    ]
-                                                )
-                                            )
-                                        }
-                                    }
-                                }
-                                .border(VGTheme.divider(dark: dark), width: 0.5)
-                        }
-                    }
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-        case .richTable(let table):
-            HTMLSpanningTableView(
-                table: table,
-                noteTitles: noteTitles,
-                baseURL: baseURL,
-                dark: dark,
-                loadRemoteImages: loadRemoteImages,
-                onWiki: onWiki
-            )
-        case .details(let summary, let body, let initiallyOpen):
-            HTMLDetailsView(initiallyOpen: initiallyOpen) {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(MDBlock.parse(body).enumerated()), id: \.offset) { nestedIndex, block in
-                        erasedBlockView(block, blockIndex: blockIndex * 1_000 + nestedIndex)
-                    }
-                }
-                .padding(.leading, 20)
-                .padding(.top, 4)
-            } label: {
-                InlineRunsView(
-                    text: summary,
-                    noteTitles: noteTitles,
-                    baseURL: baseURL,
-                    loadRemoteImages: loadRemoteImages,
-                    onWiki: onWiki
-                )
-                .fontWeight(.semibold)
-            }
-        case .definitionList(let items):
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    VStack(alignment: .leading, spacing: 4) {
-                        InlineRunsView(text: item.term, noteTitles: noteTitles, baseURL: baseURL, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-                            .fontWeight(.semibold)
-                        ForEach(Array(item.definitions.enumerated()), id: \.offset) { _, definition in
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(Array(MDBlock.parse(definition).enumerated()), id: \.offset) { nestedIndex, block in
-                                    erasedBlockView(block, blockIndex: blockIndex * 1_000 + nestedIndex)
-                                }
-                            }
-                                .padding(.leading, 20)
-                        }
-                    }
-                }
-            }
-        case .rule:
-            VGTheme.divider(dark: dark).frame(height: 1).padding(.vertical, 8)
-        case .lines(let lines):
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    lineView(line)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func lineView(_ line: String) -> some View {
-        if line.hasPrefix("- [ ] ") || line.hasPrefix("- [x] ") || line.hasPrefix("- [X] ") {
-            let checked = line.hasPrefix("- [x] ") || line.hasPrefix("- [X] ")
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: checked ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(VGTheme.accent)
-                    .padding(.top, 2)
-                InlineRunsView(text: String(line.dropFirst(6)), noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-            }
-        } else if let ordered = line.range(of: #"^\s*\d+\.\s+"#, options: .regularExpression) {
-            let marker = String(line[ordered])
-            HStack(alignment: .top, spacing: 8) {
-                Text(marker.trimmingCharacters(in: .whitespaces))
-                    .foregroundStyle(VGTheme.textMuted(dark: dark))
-                    .monospacedDigit()
-                InlineRunsView(text: String(line[ordered.upperBound...]), noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-            }
-        } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-            HStack(alignment: .top, spacing: 8) {
-                Text("•").foregroundStyle(VGTheme.textMuted(dark: dark))
-                InlineRunsView(text: String(line.dropFirst(2)), noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-            }
-        } else if line.hasPrefix("![") {
-            InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-        } else {
-            InlineRunsView(text: line, noteTitles: noteTitles, baseURL: baseURL, loadLocalImages: loadLocalImages, loadRemoteImages: loadRemoteImages, onWiki: onWiki)
-                .lineSpacing(6)
-        }
-    }
-
-    private func erasedBlockView(_ block: MDBlock, blockIndex: Int) -> AnyView {
-        AnyView(blockView(block, blockIndex: blockIndex))
-    }
-
-    private func headingFont(_ level: Int) -> Font {
-        switch level {
-        case 1: return .largeTitle
-        case 2: return .title2
-        case 3: return .title2
-        default: return .title3
-        }
-    }
-
-    private func alignment(_ alignments: [GFM.Alignment], _ col: Int) -> Alignment {
-        switch alignments.indices.contains(col) ? alignments[col] : .left {
-        case .left: return .leading
-        case .center: return .center
-        case .right: return .trailing
-        }
-    }
-
-    private func alertColor(_ kind: GFM.AlertKind) -> Color {
-        switch kind {
-        case .note: return Color(red: 0.35, green: 0.62, blue: 0.95)
-        case .tip: return VGTheme.accent
-        case .important: return Color(red: 0.72, green: 0.48, blue: 0.95)
-        case .warning: return Color(red: 0.95, green: 0.68, blue: 0.22)
-        case .caution: return Color(red: 0.90, green: 0.32, blue: 0.32)
-        }
-    }
-}
-
-private struct HTMLDetailsView<Content: View, Label: View>: View {
-    @State private var isExpanded: Bool
-    private let content: Content
-    private let label: Label
-
-    init(
-        initiallyOpen: Bool,
-        @ViewBuilder content: () -> Content,
-        @ViewBuilder label: () -> Label
-    ) {
-        _isExpanded = State(initialValue: initiallyOpen)
-        self.content = content()
-        self.label = label()
-    }
-
-    var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            content
-        } label: {
-            label
-        }
-        .padding(10)
-        .background(Color.secondary.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-}
-
-private struct HTMLSpanningTableView: View {
-    let table: GFM.HTMLTable
-    let noteTitles: Set<String>
-    let baseURL: URL?
-    let dark: Bool
-    let loadRemoteImages: Bool
-    let onWiki: (String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let caption = table.caption {
-                InlineRunsView(
-                    text: caption,
-                    noteTitles: noteTitles,
-                    baseURL: baseURL,
-                    loadRemoteImages: loadRemoteImages,
-                    onWiki: onWiki
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            SpanningTableLayout(cells: table.cells, columns: table.columnCount, rows: table.rowCount) {
-                ForEach(Array(table.cells.enumerated()), id: \.offset) { _, cell in
-                    InlineRunsView(
-                        text: cell.content,
-                        noteTitles: noteTitles,
-                        baseURL: baseURL,
-                        loadRemoteImages: loadRemoteImages,
-                        onWiki: onWiki
-                    )
-                    .fontWeight(cell.isHeader ? .semibold : .regular)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: swiftUIAlignment(cell.alignment))
-                    .background(MarkdownPreviewTableStyle.background(dark: dark, isHeader: cell.isHeader))
-                    .border(VGTheme.divider(dark: dark), width: 0.5)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-    }
-
-    private func swiftUIAlignment(_ alignment: GFM.Alignment) -> Alignment {
-        switch alignment {
-        case .left: return .leading
-        case .center: return .center
-        case .right: return .trailing
-        }
-    }
-}
-
-struct SpanningTableLayout: Layout {
-    let cells: [GFM.HTMLTableCell]
-    let columns: Int
-    let rows: Int
-
-    func sizeThatFits(
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout Void
-    ) -> CGSize {
-        metrics(proposal: proposal, subviews: subviews).size
-    }
-
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout Void
-    ) {
-        let measurement = metrics(
-            proposal: ProposedViewSize(width: bounds.width, height: proposal.height),
-            subviews: subviews
-        )
-        for index in subviews.indices where cells.indices.contains(index) {
-            let cell = cells[index]
-            guard let frame = Self.frame(
-                for: cell,
-                in: bounds,
-                columnCount: columns,
-                rowHeights: measurement.rowHeights
-            ) else { continue }
-            subviews[index].place(
-                at: frame.origin,
-                anchor: .topLeading,
-                proposal: ProposedViewSize(width: frame.width, height: frame.height)
-            )
-        }
-    }
-
-    static func frame(
-        for cell: GFM.HTMLTableCell,
-        in bounds: CGRect,
-        columnCount: Int,
-        rowHeights: [CGFloat]
-    ) -> CGRect? {
-        guard columnCount > 0,
-              cell.row >= 0, cell.row < rowHeights.count,
-              cell.column >= 0, cell.column < columnCount else { return nil }
-        let endRow = min(rowHeights.count, cell.row + max(1, cell.rowSpan))
-        let endColumn = min(columnCount, cell.column + max(1, cell.columnSpan))
-        let columnWidth = bounds.width / CGFloat(columnCount)
-        return CGRect(
-            x: bounds.minX + CGFloat(cell.column) * columnWidth,
-            y: bounds.minY + rowHeights.prefix(cell.row).reduce(0, +),
-            width: CGFloat(endColumn - cell.column) * columnWidth,
-            height: rowHeights[cell.row..<endRow].reduce(0, +)
-        )
-    }
-
-    private func metrics(proposal: ProposedViewSize, subviews: Subviews) -> (
-        size: CGSize,
-        columnWidth: CGFloat,
-        rowHeights: [CGFloat]
-    ) {
-        guard columns > 0, rows > 0 else { return (.zero, 0, []) }
-        let intrinsicWidths = subviews.map { $0.sizeThatFits(.unspecified).width }
-        let proposedWidth = proposal.width.flatMap { $0.isFinite ? max($0, 1) : nil }
-        let naturalColumnWidth = max(80, (intrinsicWidths.max() ?? 80) + 16)
-        let totalWidth = proposedWidth ?? naturalColumnWidth * CGFloat(columns)
-        let columnWidth = totalWidth / CGFloat(columns)
-        var rowHeights = Array(repeating: CGFloat(0), count: rows)
-
-        for index in subviews.indices where cells.indices.contains(index) {
-            let cell = cells[index]
-            guard cell.row < rows else { continue }
-            let width = columnWidth * CGFloat(cell.columnSpan)
-            let height = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil)).height
-            if cell.rowSpan == 1 {
-                rowHeights[cell.row] = max(rowHeights[cell.row], height)
-            }
-        }
-        for index in subviews.indices where cells.indices.contains(index) {
-            let cell = cells[index]
-            guard cell.row < rows, cell.rowSpan > 1 else { continue }
-            let end = min(rows, cell.row + cell.rowSpan)
-            let width = columnWidth * CGFloat(cell.columnSpan)
-            let required = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil)).height
-            let current = rowHeights[cell.row..<end].reduce(0, +)
-            if required > current {
-                let addition = (required - current) / CGFloat(end - cell.row)
-                for row in cell.row..<end { rowHeights[row] += addition }
-            }
-        }
-        rowHeights = rowHeights.map { max($0, 34) }
-        return (CGSize(width: totalWidth, height: rowHeights.reduce(0, +)), columnWidth, rowHeights)
-    }
 }
 
 /// One native text system owns a prose document's selection. That lets a drag cross
 /// paragraphs and inline styles, and keeps contextual actions scoped to this note.
+struct ReadingRenderConfiguration: Equatable {
+    let blocks: [MDBlock]
+    let noteTitles: Set<String>
+    let baseURL: URL?
+    let dark: Bool
+    let loadLocalImages: Bool
+    let loadRemoteImages: Bool
+}
+
 struct UnifiedReadingTextView: NSViewRepresentable {
     let blocks: [MDBlock]
     let noteTitles: Set<String>
     let baseURL: URL?
     let dark: Bool
+    let loadLocalImages: Bool
+    let loadRemoteImages: Bool
     let onWiki: (String) -> Void
+
+    private var configuration: ReadingRenderConfiguration {
+        ReadingRenderConfiguration(
+            blocks: blocks,
+            noteTitles: noteTitles,
+            baseURL: baseURL,
+            dark: dark,
+            loadLocalImages: loadLocalImages,
+            loadRemoteImages: loadRemoteImages
+        )
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onWiki: onWiki)
@@ -673,40 +201,141 @@ struct UnifiedReadingTextView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
         (nsView.documentView as? ReadingNSTextView)?.delegate = nil
-        coordinator.textView = nil
+        coordinator.stop()
     }
 
     private func update(_ textView: ReadingNSTextView, coordinator: Coordinator) {
-        let attributedText = ReadingAttributedDocument.make(
-            blocks: blocks,
-            noteTitles: noteTitles,
-            baseURL: baseURL,
-            dark: dark
-        )
-        if textView.attributedString() != attributedText {
+        coordinator.render(configuration, in: textView)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        typealias ImageLoader = @Sendable (URL) async -> ReadingDecodedImage?
+
+        var onWiki: (String) -> Void
+        weak var textView: ReadingNSTextView?
+        private(set) var documentSetCount = 0
+        private var lastConfiguration: ReadingRenderConfiguration?
+        private var detailsStates: [String: Bool] = [:]
+        private var generation = 0
+        private var imageTasks: [Task<Void, Never>] = []
+        private let imageLoader: ImageLoader
+
+        init(
+            onWiki: @escaping (String) -> Void,
+            imageLoader: @escaping ImageLoader = { url in
+                await ReadingImageLoader.shared.image(for: url)
+            }
+        ) {
+            self.onWiki = onWiki
+            self.imageLoader = imageLoader
+        }
+
+        func render(
+            _ configuration: ReadingRenderConfiguration,
+            in textView: ReadingNSTextView,
+            force: Bool = false
+        ) {
+            self.textView = textView
+            applyTextViewAttributes(to: textView)
+            guard force || lastConfiguration != configuration else { return }
+
+            if let previous = lastConfiguration, previous.blocks != configuration.blocks {
+                detailsStates.removeAll()
+            }
+            lastConfiguration = configuration
+            generation += 1
+            let currentGeneration = generation
+            imageTasks.forEach { $0.cancel() }
+            imageTasks.removeAll(keepingCapacity: true)
+
+            let attributedText = ReadingAttributedDocument.make(
+                blocks: configuration.blocks,
+                noteTitles: configuration.noteTitles,
+                baseURL: configuration.baseURL,
+                dark: configuration.dark,
+                loadLocalImages: configuration.loadLocalImages,
+                loadRemoteImages: configuration.loadRemoteImages,
+                expandedDetails: detailsStates
+            )
             let selection = textView.selectedRange()
             textView.textStorage?.setAttributedString(attributedText)
+            documentSetCount += 1
             let boundedLocation = min(selection.location, attributedText.length)
             let boundedLength = min(selection.length, attributedText.length - boundedLocation)
             textView.setSelectedRange(NSRange(location: boundedLocation, length: boundedLength))
+            scheduleImageLoads(in: attributedText, generation: currentGeneration)
         }
-        textView.linkTextAttributes = [
-            .foregroundColor: NSColor(VGTheme.textAccent),
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-            .cursor: NSCursor.pointingHand,
-        ]
-        textView.selectedTextAttributes = [
-            .backgroundColor: NSColor(VGTheme.accent).withAlphaComponent(0.28)
-        ]
-        coordinator.textView = textView
-    }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        var onWiki: (String) -> Void
-        weak var textView: ReadingNSTextView?
+        func stop() {
+            generation += 1
+            imageTasks.forEach { $0.cancel() }
+            imageTasks.removeAll()
+            textView = nil
+        }
 
-        init(onWiki: @escaping (String) -> Void) {
-            self.onWiki = onWiki
+        private func applyTextViewAttributes(to textView: ReadingNSTextView) {
+            textView.linkTextAttributes = [
+                .foregroundColor: NSColor(VGTheme.textAccent),
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .cursor: NSCursor.pointingHand,
+            ]
+            textView.selectedTextAttributes = [
+                .backgroundColor: NSColor(VGTheme.accent).withAlphaComponent(0.28)
+            ]
+        }
+
+        private func scheduleImageLoads(
+            in attributedText: NSAttributedString,
+            generation currentGeneration: Int
+        ) {
+            var urls: Set<URL> = []
+            attributedText.enumerateAttribute(
+                .readingImageURL,
+                in: NSRange(location: 0, length: attributedText.length)
+            ) { value, _, _ in
+                guard let raw = value as? String, let url = URL(string: raw) else { return }
+                urls.insert(url)
+            }
+
+            for url in urls {
+                let task = Task { [weak self] in
+                    guard let self, let decoded = await imageLoader(url), !Task.isCancelled else {
+                        return
+                    }
+                    apply(decoded, for: url, generation: currentGeneration)
+                }
+                imageTasks.append(task)
+            }
+        }
+
+        private func apply(
+            _ decoded: ReadingDecodedImage,
+            for url: URL,
+            generation expectedGeneration: Int
+        ) {
+            guard generation == expectedGeneration,
+                  let textStorage = textView?.textStorage else { return }
+            let fullRange = NSRange(location: 0, length: textStorage.length)
+            var ranges: [NSRange] = []
+            textStorage.enumerateAttribute(.readingImageURL, in: fullRange) { value, range, _ in
+                guard value as? String == url.absoluteString else { return }
+                ranges.append(range)
+            }
+            guard !ranges.isEmpty else { return }
+
+            let image = NSImage(cgImage: decoded.image, size: decoded.size)
+            textStorage.beginEditing()
+            for range in ranges {
+                let attachment = NSTextAttachment()
+                attachment.image = image
+                attachment.bounds = CGRect(
+                    origin: .zero,
+                    size: ReadingAttributedDocument.fittedImageSize(decoded.size)
+                )
+                textStorage.addAttribute(.attachment, value: attachment, range: range)
+            }
+            textStorage.endEditing()
         }
 
         func textView(
@@ -716,6 +345,20 @@ struct UnifiedReadingTextView: NSViewRepresentable {
         ) -> Bool {
             guard let url = (link as? URL) ?? (link as? NSURL).map({ $0 as URL }) else {
                 return false
+            }
+            if url.scheme?.lowercased() == "vulkanglass-details" {
+                let id = String(url.path.drop(while: { $0 == "/" }))
+                guard !id.isEmpty,
+                      let configuration = lastConfiguration,
+                      let readingTextView = textView as? ReadingNSTextView else { return false }
+                let initial = (textView.attributedString().attribute(
+                    .readingDetailsInitiallyOpen,
+                    at: charIndex,
+                    effectiveRange: nil
+                ) as? NSNumber)?.boolValue ?? false
+                detailsStates[id] = !(detailsStates[id] ?? initial)
+                render(configuration, in: readingTextView, force: true)
+                return true
             }
             if url.scheme?.lowercased() == "wiki" {
                 let encodedTarget = String(url.absoluteString.dropFirst("wiki://".count))
@@ -749,12 +392,87 @@ final class ReadingNSTextView: NSTextView {
     }
 }
 
+extension NSAttributedString.Key {
+    static let readingImageURL = NSAttributedString.Key("VulkanGlassReadingImageURL")
+    static let readingDetailsInitiallyOpen = NSAttributedString.Key(
+        "VulkanGlassReadingDetailsInitiallyOpen"
+    )
+}
+
+struct ReadingDecodedImage: @unchecked Sendable {
+    let image: CGImage
+    let size: CGSize
+}
+
+actor ReadingImageLoader {
+    static let shared = ReadingImageLoader()
+
+    private var cache: [String: ReadingDecodedImage] = [:]
+
+    func image(for url: URL) async -> ReadingDecodedImage? {
+        let key = cacheKey(for: url)
+        if let cached = cache[key] { return cached }
+
+        let data: Data?
+        if url.isFileURL {
+            data = try? Data(contentsOf: url, options: .mappedIfSafe)
+        } else {
+            data = try? await RemoteImageLoader.data(from: url)
+        }
+        guard !Task.isCancelled, let data else { return nil }
+        let decoded = await Task.detached(priority: .utility) {
+            Self.decode(data)
+        }.value
+        guard !Task.isCancelled, let decoded else { return nil }
+        cache[key] = decoded
+        return decoded
+    }
+
+    private func cacheKey(for url: URL) -> String {
+        guard url.isFileURL,
+              let values = try? url.resourceValues(forKeys: [
+                  .contentModificationDateKey,
+                  .fileSizeKey,
+              ]) else { return url.absoluteString }
+        return "\(url.absoluteString)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(values.fileSize ?? 0)"
+    }
+
+    nonisolated private static func decode(_ data: Data) -> ReadingDecodedImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 640,
+                  kCGImageSourceShouldCacheImmediately: true,
+              ] as CFDictionary) else { return nil }
+        return ReadingDecodedImage(
+            image: image,
+            size: CGSize(width: image.width, height: image.height)
+        )
+    }
+}
+
 enum ReadingAttributedDocument {
+    private struct TableCell {
+        let row: Int
+        let column: Int
+        let rowSpan: Int
+        let columnSpan: Int
+        let content: String
+        let isHeader: Bool
+        let alignment: GFM.Alignment
+    }
+
     static func make(
         blocks: [MDBlock],
         noteTitles: Set<String>,
         baseURL: URL?,
-        dark: Bool
+        dark: Bool,
+        loadLocalImages: Bool = true,
+        loadRemoteImages: Bool = false,
+        includesBottomPadding: Bool = true,
+        expandedDetails: [String: Bool] = [:],
+        pathPrefix: String = ""
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let textColor = NSColor(VGTheme.textNormal(dark: dark))
@@ -771,16 +489,90 @@ enum ReadingAttributedDocument {
                 noteTitles: noteTitles,
                 baseURL: baseURL,
                 font: font,
-                color: color ?? textColor
+                color: color ?? textColor,
+                loadLocalImages: loadLocalImages,
+                loadRemoteImages: loadRemoteImages
             ))
         }
 
         func appendBreak() {
             guard result.length > 0 else { return }
-            result.append(NSAttributedString(string: "\n\n", attributes: [
+            let separator = result.string.hasSuffix("\n\n")
+                ? ""
+                : (result.string.hasSuffix("\n") ? "\n" : "\n\n")
+            result.append(NSAttributedString(string: separator, attributes: [
                 .font: bodyFont,
                 .foregroundColor: textColor,
             ]))
+        }
+
+        func appendTable(
+            cells: [TableCell],
+            columnCount: Int,
+            caption: String? = nil
+        ) {
+            guard columnCount > 0 else { return }
+            if let caption, !caption.isEmpty {
+                appendInline(caption, font: .systemFont(ofSize: 14, weight: .semibold))
+                result.append(NSAttributedString(string: "\n", attributes: [
+                    .font: bodyFont,
+                    .foregroundColor: textColor,
+                ]))
+            }
+
+            let table = NSTextTable()
+            table.numberOfColumns = columnCount
+            table.layoutAlgorithm = .automatic
+            table.collapsesBorders = true
+            table.hidesEmptyCells = false
+            table.setValue(100, type: .percentage, for: .width)
+
+            for cell in cells.sorted(by: {
+                $0.row == $1.row ? $0.column < $1.column : $0.row < $1.row
+            }) {
+                let tableBlock = NSTextTableBlock(
+                    table: table,
+                    startingRow: cell.row,
+                    rowSpan: cell.rowSpan,
+                    startingColumn: cell.column,
+                    columnSpan: cell.columnSpan
+                )
+                tableBlock.setWidth(8, type: .absolute, for: .padding)
+                tableBlock.setWidth(0.5, type: .absolute, for: .border)
+                tableBlock.setBorderColor(NSColor(VGTheme.divider(dark: dark)))
+                tableBlock.verticalAlignment = .middle
+                if cell.isHeader {
+                    tableBlock.backgroundColor = NSColor(
+                        VGTheme.backgroundSecondary(dark: dark)
+                    ).withAlphaComponent(0.85)
+                }
+
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.textBlocks = [tableBlock]
+                paragraph.alignment = textAlignment(cell.alignment)
+                let font = cell.isHeader
+                    ? NSFont.systemFont(ofSize: 16, weight: .semibold)
+                    : bodyFont
+                let content = NSMutableAttributedString(attributedString: inline(
+                    cell.content,
+                    noteTitles: noteTitles,
+                    baseURL: baseURL,
+                    font: font,
+                    color: textColor,
+                    loadLocalImages: loadLocalImages,
+                    loadRemoteImages: loadRemoteImages
+                ))
+                content.append(NSAttributedString(string: "\n", attributes: [
+                    .font: font,
+                    .foregroundColor: textColor,
+                ]))
+                content.addAttribute(
+                    .paragraphStyle,
+                    value: paragraph,
+                    range: NSRange(location: 0, length: content.length)
+                )
+                result.append(content)
+            }
         }
 
         for (blockIndex, block) in blocks.enumerated() {
@@ -827,20 +619,125 @@ enum ReadingAttributedDocument {
                     let displayLine = normalizedLine(line)
                     appendInline(displayLine)
                 }
-            case .table, .richTable, .details, .definitionList:
-                assertionFailure("Complex blocks use the structured SwiftUI preview")
+            case .table(let rows, let alignments, let hasHeader):
+                let cells = rows.enumerated().flatMap { row, values in
+                    values.enumerated().map { column, content in
+                        TableCell(
+                            row: row,
+                            column: column,
+                            rowSpan: 1,
+                            columnSpan: 1,
+                            content: content,
+                            isHeader: hasHeader && row == 0,
+                            alignment: alignments.indices.contains(column)
+                                ? alignments[column]
+                                : .left
+                        )
+                    }
+                }
+                appendTable(
+                    cells: cells,
+                    columnCount: rows.map(\.count).max() ?? alignments.count
+                )
+            case .richTable(let source):
+                appendTable(
+                    cells: source.cells.map {
+                        TableCell(
+                            row: $0.row,
+                            column: $0.column,
+                            rowSpan: $0.rowSpan,
+                            columnSpan: $0.columnSpan,
+                            content: $0.content,
+                            isHeader: $0.isHeader,
+                            alignment: $0.alignment
+                        )
+                    },
+                    columnCount: source.columnCount,
+                    caption: source.caption
+                )
+            case .details(let summary, let body, let initiallyOpen):
+                let detailsID = "\(pathPrefix)\(blockIndex)"
+                let isOpen = expandedDetails[detailsID] ?? initiallyOpen
+                let summaryStart = result.length
+                result.append(NSAttributedString(
+                    string: isOpen ? "▾ " : "▸ ",
+                    attributes: [
+                        .font: bodyFont,
+                        .foregroundColor: mutedColor,
+                    ]
+                ))
+                appendInline(summary, font: .systemFont(ofSize: 16, weight: .semibold))
+                let summaryRange = NSRange(
+                    location: summaryStart,
+                    length: result.length - summaryStart
+                )
+                result.addAttributes([
+                    .link: URL(string: "vulkanglass-details://toggle/\(detailsID)")!,
+                    .readingDetailsInitiallyOpen: NSNumber(value: initiallyOpen),
+                ], range: summaryRange)
+                if isOpen, !body.isEmpty {
+                    result.append(NSAttributedString(string: "\n", attributes: [
+                        .font: bodyFont,
+                        .foregroundColor: textColor,
+                    ]))
+                    result.append(make(
+                        blocks: MDBlock.parse(body),
+                        noteTitles: noteTitles,
+                        baseURL: baseURL,
+                        dark: dark,
+                        loadLocalImages: loadLocalImages,
+                        loadRemoteImages: loadRemoteImages,
+                        includesBottomPadding: false,
+                        expandedDetails: expandedDetails,
+                        pathPrefix: "\(detailsID)."
+                    ))
+                }
+            case .definitionList(let items):
+                for (itemIndex, item) in items.enumerated() {
+                    if itemIndex > 0 {
+                        result.append(NSAttributedString(string: "\n", attributes: [
+                            .font: bodyFont,
+                            .foregroundColor: textColor,
+                        ]))
+                    }
+                    appendInline(item.term, font: .systemFont(ofSize: 16, weight: .semibold))
+                    for (definitionIndex, definition) in item.definitions.enumerated() {
+                        result.append(NSAttributedString(string: "\n", attributes: [
+                            .font: bodyFont,
+                            .foregroundColor: textColor,
+                        ]))
+                        let nested = NSMutableAttributedString(attributedString: make(
+                            blocks: MDBlock.parse(definition),
+                            noteTitles: noteTitles,
+                            baseURL: baseURL,
+                            dark: dark,
+                            loadLocalImages: loadLocalImages,
+                            loadRemoteImages: loadRemoteImages,
+                            includesBottomPadding: false,
+                            expandedDetails: expandedDetails,
+                            pathPrefix: "\(pathPrefix)\(blockIndex).definition.\(itemIndex).\(definitionIndex)."
+                        ))
+                        applyHangingIndent(
+                            to: nested,
+                            amount: 20
+                        )
+                        result.append(nested)
+                    }
+                }
             }
         }
 
-        result.append(NSAttributedString(string: "\n", attributes: [
-            .font: bodyFont,
-            .foregroundColor: textColor,
-            .paragraphStyle: {
-                let paragraph = NSMutableParagraphStyle()
-                paragraph.paragraphSpacing = VGTheme.readingBottomPadding
-                return paragraph
-            }(),
-        ]))
+        if includesBottomPadding {
+            result.append(NSAttributedString(string: "\n", attributes: [
+                .font: bodyFont,
+                .foregroundColor: textColor,
+                .paragraphStyle: {
+                    let paragraph = NSMutableParagraphStyle()
+                    paragraph.paragraphSpacing = VGTheme.readingBottomPadding
+                    return paragraph
+                }(),
+            ]))
+        }
         return result
     }
 
@@ -849,7 +746,9 @@ enum ReadingAttributedDocument {
         noteTitles: Set<String>,
         baseURL: URL?,
         font: NSFont,
-        color: NSColor
+        color: NSColor,
+        loadLocalImages: Bool,
+        loadRemoteImages: Bool
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
         for run in InlineRunsView.parse(source) {
@@ -918,8 +817,37 @@ enum ReadingAttributedDocument {
                 attributes[.font] = NSFont.systemFont(ofSize: 10)
                 attributes[.foregroundColor] = NSColor(VGTheme.textAccent)
                 attributes[.baselineOffset] = 4
-            case .image(let alt, _):
-                value = alt
+            case .image(let alt, let rawURL):
+                let resolvedURL = MarkdownResourceResolver.imageURL(
+                    rawURL,
+                    relativeTo: baseURL
+                )
+                if let resolvedURL,
+                   MarkdownResourceResolver.mayLoadImage(
+                       resolvedURL,
+                       loadLocalImages: loadLocalImages,
+                       loadRemoteImages: loadRemoteImages
+                   ) {
+                    let attachment = NSTextAttachment()
+                    attachment.image = loadingImagePlaceholder(alt: alt)
+                    attachment.bounds = CGRect(x: 0, y: -3, width: 20, height: 20)
+                    let loading = NSMutableAttributedString(attachment: attachment)
+                    loading.addAttribute(
+                        .readingImageURL,
+                        value: resolvedURL.absoluteString,
+                        range: NSRange(location: 0, length: loading.length)
+                    )
+                    result.append(loading)
+                    continue
+                }
+                value = MarkdownResourceResolver.imagePlaceholder(
+                    alt: alt,
+                    resolvedURL: resolvedURL,
+                    loadLocalImages: loadLocalImages,
+                    loadRemoteImages: loadRemoteImages
+                )
+                attributes[.font] = font.withTraits(.italicFontMask)
+                attributes[.foregroundColor] = NSColor.secondaryLabelColor
             }
             result.append(NSAttributedString(string: value, attributes: attributes))
         }
@@ -929,6 +857,37 @@ enum ReadingAttributedDocument {
     private static func wikiURL(_ target: String) -> URL {
         let encoded = target.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? target
         return URL(string: "wiki://\(encoded)")!
+    }
+
+    static func fittedImageSize(_ size: CGSize) -> CGSize {
+        guard size.width > 0, size.height > 0 else { return .zero }
+        let scale = min(1, 640 / size.width, 240 / size.height)
+        return CGSize(width: size.width * scale, height: size.height * scale)
+    }
+
+    private static func loadingImagePlaceholder(alt: String) -> NSImage? {
+        NSImage(
+            systemSymbolName: "photo",
+            accessibilityDescription: alt.isEmpty ? "Loading image" : alt
+        )
+    }
+
+    private static func applyHangingIndent(
+        to attributed: NSMutableAttributedString,
+        amount: CGFloat
+    ) {
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        var updates: [(NSRange, NSMutableParagraphStyle)] = []
+        attributed.enumerateAttribute(.paragraphStyle, in: fullRange) { value, range, _ in
+            let paragraph = (value as? NSParagraphStyle)?.mutableCopy()
+                as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+            paragraph.headIndent += amount
+            paragraph.firstLineHeadIndent += amount
+            updates.append((range, paragraph))
+        }
+        for (range, paragraph) in updates {
+            attributed.addAttribute(.paragraphStyle, value: paragraph, range: range)
+        }
     }
 
     private static func normalizedLine(_ line: String) -> String {
@@ -947,6 +906,14 @@ enum ReadingAttributedDocument {
         case 1: return .systemFont(ofSize: 28, weight: .bold)
         case 2, 3: return .systemFont(ofSize: 22, weight: .bold)
         default: return .systemFont(ofSize: 20, weight: .bold)
+        }
+    }
+
+    private static func textAlignment(_ alignment: GFM.Alignment) -> NSTextAlignment {
+        switch alignment {
+        case .left: return .left
+        case .center: return .center
+        case .right: return .right
         }
     }
 
@@ -1272,7 +1239,7 @@ enum MDBlock: Equatable, Sendable {
     }
 }
 
-enum InlineRun: Identifiable, Equatable {
+enum InlineRun: Equatable {
     case text(String)
     case bold(String)
     case italic(String)
@@ -1291,256 +1258,9 @@ enum InlineRun: Identifiable, Equatable {
     case emoji(String)
     case image(alt: String, url: String)
 
-    var id: String {
-        switch self {
-        case .text(let value): return "t-\(value)"
-        case .bold(let value): return "b-\(value)"
-        case .italic(let value): return "it-\(value)"
-        case .boldItalic(let value): return "bi-\(value)"
-        case .strikethrough(let value): return "s-\(value)"
-        case .underline(let value): return "u-\(value)"
-        case .subscriptText(let value): return "sub-\(value)"
-        case .superscriptText(let value): return "sup-\(value)"
-        case .keyboard(let value): return "kbd-\(value)"
-        case .highlight(let value): return "mark-\(value)"
-        case .wiki(let target, let label): return "w-\(target)-\(label)"
-        case .tag(let value): return "g-\(value)"
-        case .link(let label, let url): return "l-\(label)-\(url)"
-        case .code(let value): return "c-\(value)"
-        case .footnote(let value): return "f-\(value)"
-        case .emoji(let value): return "e-\(value)"
-        case .image(let alt, let url): return "i-\(alt)-\(url)"
-        }
-    }
 }
 
-enum InlineRunGroup: Equatable {
-    case text([InlineRun])
-    case element(InlineRun)
-}
-
-struct InlineRunsView: View {
-    let text: String
-    let noteTitles: Set<String>
-    var baseURL: URL? = nil
-    var loadLocalImages = true
-    var loadRemoteImages = false
-    var onWiki: (String) -> Void
-
-    var body: some View {
-        FlowLayout(spacing: 4) {
-            ForEach(Array(layoutGroups.enumerated()), id: \.offset) { _, group in
-                switch group {
-                case .text(let textRuns):
-                    composedText(textRuns)
-                case .element(let run):
-                    standaloneView(run)
-                }
-            }
-        }
-        .environment(\.openURL, OpenURLAction { url in
-            guard url.scheme?.lowercased() == "wiki" else { return .systemAction }
-            let encodedTarget = String(url.absoluteString.dropFirst("wiki://".count))
-            onWiki(encodedTarget.removingPercentEncoding ?? encodedTarget)
-            return .handled
-        })
-    }
-
-    private var runs: [InlineRun] {
-        Self.parse(text)
-    }
-
-    private var layoutGroups: [InlineRunGroup] {
-        Self.layoutGroups(for: runs)
-    }
-
-    @ViewBuilder
-    private func standaloneView(_ run: InlineRun) -> some View {
-        switch run {
-        case .wiki(let target, let label):
-            let exists = noteTitles.contains(target.lowercased())
-            Button(label) { onWiki(target) }
-                .buttonStyle(.plain)
-                .foregroundStyle(exists ? VGTheme.textAccent : VGTheme.textAccent.opacity(0.55))
-                .underline(exists)
-        case .tag(let tag):
-            Text("#\(tag)")
-                .font(.system(size: 13))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(VGTheme.accent.opacity(0.22))
-                .foregroundStyle(VGTheme.textAccent)
-                .clipShape(Capsule())
-        case .link(let label, let url):
-            if url.hasPrefix("wiki://") {
-                let target = String(url.dropFirst(7)).removingPercentEncoding ?? url
-                Button(label) { onWiki(target) }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(VGTheme.textAccent)
-                    .underline()
-            } else if let destination = MarkdownResourceResolver.linkURL(url, relativeTo: baseURL) {
-                Link(label, destination: destination)
-                    .foregroundStyle(VGTheme.textAccent)
-                    .underline()
-            } else {
-                Text(label)
-            }
-        case .code(let value):
-            Text(value)
-                .font(.system(.body, design: .monospaced))
-                .padding(.horizontal, 4)
-                .background(Color.gray.opacity(0.18))
-        case .keyboard(let value):
-            Text(value)
-                .font(.system(.body, design: .monospaced).weight(.medium))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.12))
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.35)))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-        case .highlight(let value):
-            Text(value)
-                .padding(.horizontal, 2)
-                .background(Color.yellow.opacity(0.38))
-        case .footnote(let value):
-            Text(value)
-                .font(.system(size: 10))
-                .foregroundStyle(VGTheme.textAccent)
-                .baselineOffset(4)
-        case .image(let alt, let url):
-            MarkdownImageView(
-                alt: alt,
-                rawURL: url,
-                baseURL: baseURL,
-                loadLocalImages: loadLocalImages,
-                loadRemoteImages: loadRemoteImages
-            )
-        case .text, .bold, .italic, .boldItalic, .strikethrough, .underline,
-             .subscriptText, .superscriptText, .emoji:
-            composedText([run])
-        }
-    }
-
-    static func layoutGroups(for runs: [InlineRun]) -> [InlineRunGroup] {
-        var result: [InlineRunGroup] = []
-        var textRuns: [InlineRun] = []
-
-        func flushText() {
-            guard !textRuns.isEmpty else { return }
-            result.append(.text(textRuns))
-            textRuns.removeAll(keepingCapacity: true)
-        }
-
-        for run in runs {
-            switch run {
-            case .image:
-                flushText()
-                result.append(.element(run))
-            case .text, .bold, .italic, .boldItalic, .strikethrough, .underline,
-                 .subscriptText, .superscriptText, .emoji, .wiki, .tag, .link,
-                 .code, .footnote, .keyboard, .highlight:
-                textRuns.append(run)
-            }
-        }
-        flushText()
-        return result
-    }
-
-    private func composedText(_ runs: [InlineRun]) -> Text {
-        var result = AttributedString()
-        for run in runs {
-            let value: String
-            var segment: AttributedString
-            switch run {
-            case .text(let text), .emoji(let text):
-                value = text
-                segment = AttributedString(value)
-            case .bold(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.inlinePresentationIntent = .stronglyEmphasized
-            case .italic(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.inlinePresentationIntent = .emphasized
-            case .boldItalic(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.inlinePresentationIntent = [.stronglyEmphasized, .emphasized]
-            case .strikethrough(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.strikethroughStyle = .single
-            case .underline(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.underlineStyle = .single
-            case .subscriptText(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.font = .system(size: 11)
-                segment.baselineOffset = -3
-            case .superscriptText(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.font = .system(size: 11)
-                segment.baselineOffset = 5
-            case .keyboard(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.font = .system(.body, design: .monospaced).weight(.medium)
-                segment.backgroundColor = Color.secondary.opacity(0.12)
-            case .highlight(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.backgroundColor = Color.yellow.opacity(0.38)
-            case .wiki(let target, let label):
-                value = label
-                segment = AttributedString(value)
-                let encoded = target.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? target
-                segment.link = URL(string: "wiki://\(encoded)")
-                segment.foregroundColor = VGTheme.textAccent.opacity(
-                    noteTitles.contains(target.lowercased()) ? 1 : 0.55
-                )
-                if noteTitles.contains(target.lowercased()) {
-                    segment.underlineStyle = .single
-                }
-            case .tag(let tag):
-                value = "#\(tag)"
-                segment = AttributedString(value)
-                segment.font = .system(size: 13)
-                segment.foregroundColor = VGTheme.textAccent
-                segment.backgroundColor = VGTheme.accent.opacity(0.22)
-            case .link(let label, let rawURL):
-                value = label
-                segment = AttributedString(value)
-                if rawURL.hasPrefix("wiki://") {
-                    let encoded = String(rawURL.dropFirst("wiki://".count))
-                    segment.link = URL(string: "wiki://\(encoded)")
-                } else {
-                    segment.link = MarkdownResourceResolver.linkURL(rawURL, relativeTo: baseURL)
-                }
-                segment.foregroundColor = VGTheme.textAccent
-                segment.underlineStyle = .single
-            case .code(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.font = .system(.body, design: .monospaced)
-                segment.backgroundColor = Color.gray.opacity(0.18)
-            case .footnote(let text):
-                value = text
-                segment = AttributedString(value)
-                segment.font = .system(size: 10)
-                segment.foregroundColor = VGTheme.textAccent
-                segment.baselineOffset = 4
-            case .image:
-                continue
-            }
-            result.append(segment)
-        }
-        return Text(result)
-    }
-
+enum InlineRunsView {
     static func parse(_ input: String) -> [InlineRun] {
         var result: [InlineRun] = []
         var index = input.startIndex
@@ -1997,106 +1717,5 @@ struct InlineRunsView: View {
         let name = String(input[start..<end])
         guard let glyph = GFM.emoji(for: name) else { return nil }
         return (glyph, input.index(after: end))
-    }
-}
-
-private struct MarkdownImageView: View {
-    let alt: String
-    let rawURL: String
-    let baseURL: URL?
-    let loadLocalImages: Bool
-    let loadRemoteImages: Bool
-    @State private var image: NSImage?
-
-    private var resolvedURL: URL? {
-        MarkdownResourceResolver.imageURL(rawURL, relativeTo: baseURL)
-    }
-
-    var body: some View {
-        Group {
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 240)
-            } else {
-                Text(placeholder)
-                    .italic()
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .task(id: taskIdentity) {
-            image = nil
-            guard let url = resolvedURL else {
-                return
-            }
-            let data: Data?
-            if url.isFileURL, loadLocalImages {
-                data = await Task.detached(priority: .utility) {
-                    try? Data(contentsOf: url, options: .mappedIfSafe)
-                }.value
-            } else if MarkdownResourceResolver.mayLoadImage(
-                url,
-                loadLocalImages: loadLocalImages,
-                loadRemoteImages: loadRemoteImages
-            ) {
-                data = try? await RemoteImageLoader.data(from: url)
-            } else {
-                data = nil
-            }
-            guard !Task.isCancelled, let data, let decoded = NSImage(data: data) else {
-                return
-            }
-            image = decoded
-        }
-    }
-
-    private var taskIdentity: String {
-        "\(resolvedURL?.absoluteString ?? rawURL)|\(loadLocalImages)|\(loadRemoteImages)"
-    }
-
-    private var placeholder: String {
-        MarkdownResourceResolver.imagePlaceholder(
-            alt: alt,
-            resolvedURL: resolvedURL,
-            loadLocalImages: loadLocalImages,
-            loadRemoteImages: loadRemoteImages
-        )
-    }
-}
-
-/// Wraps chips and text like Obsidian's inline tags and links.
-private struct FlowLayout: Layout {
-    var spacing: CGFloat = 4
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        arrange(proposal: proposal, subviews: subviews).0
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let frames = arrange(proposal: ProposedViewSize(width: bounds.width, height: bounds.height), subviews: subviews).1
-        for (subview, frame) in zip(subviews, frames) {
-            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), proposal: ProposedViewSize(frame.size))
-        }
-    }
-
-    private func arrange(proposal: ProposedViewSize, subviews: Subviews) -> (CGSize, [CGRect]) {
-        let maxWidth = proposal.width ?? .infinity
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var frames: [CGRect] = []
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > maxWidth, x > 0 {
-                x = 0
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-        return (CGSize(width: maxWidth.isFinite ? maxWidth : x, height: y + rowHeight), frames)
     }
 }

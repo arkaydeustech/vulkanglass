@@ -91,27 +91,11 @@ final class InlineParserTests: XCTestCase {
         )
     }
 
-    func testStyledTextRunsShareOneLayoutElement() {
-        let runs = InlineRunsView.parse("before **bold**, _italic_, and ~~old~~")
-        XCTAssertEqual(InlineRunsView.layoutGroups(for: runs), [.text(runs)])
-
-        let withCode = InlineRunsView.parse("before **bold** `code` after")
-        XCTAssertEqual(
-            InlineRunsView.layoutGroups(for: withCode),
-            [.text(withCode)]
-        )
-
-        let withLink = InlineRunsView.parse("before [[Target|label]] and [site](https://example.com)")
-        XCTAssertEqual(InlineRunsView.layoutGroups(for: withLink), [.text(withLink)])
-    }
-
     func testUnderlineHTMLIsRenderedInTheReadingPreview() {
         XCTAssertEqual(
             InlineRunsView.parse("before <u>glass</u> and <INS>clear</ins>"),
             [.text("before "), .underline("glass"), .text(" and "), .underline("clear")]
         )
-        let runs = InlineRunsView.parse("<u>glass</u>")
-        XCTAssertEqual(InlineRunsView.layoutGroups(for: runs), [.text(runs)])
     }
 
     func testSubscriptAndSuperscriptHTMLAreRenderedInTheReadingPreview() {
@@ -169,6 +153,33 @@ final class InlineParserTests: XCTestCase {
         XCTAssertEqual(token.count, 1)
         XCTAssertEqual(token.first?.fullRange, NSRange(location: 0, length: (balanced as NSString).length))
     }
+}
+
+private actor ReadingImageLoadCounter {
+    private(set) var value = 0
+
+    func increment() {
+        value += 1
+    }
+}
+
+private func makeTestDecodedImage(width: Int, height: Int) throws -> ReadingDecodedImage {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let context = try XCTUnwrap(CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ))
+    context.setFillColor(NSColor.systemTeal.cgColor)
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    return ReadingDecodedImage(
+        image: try XCTUnwrap(context.makeImage()),
+        size: CGSize(width: width, height: height)
+    )
 }
 
 @MainActor
@@ -2925,6 +2936,455 @@ final class EditorLifecycleTests: XCTestCase {
         withExtendedLifetime(hostingView) {}
     }
 
+    func testReadingModeMouseDragSelectsAcrossProseTableAndFollowingText() throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-structured-selection-test.md"
+        let markdown = """
+        First line has enough text to start the selection in its middle.
+        Second line must be included in the selection.
+        Third line is where the selection ends.
+
+        | A | B |
+        | --- | --- |
+        | one | two |
+
+        Final line after the table is where the selection ends.
+        """
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Structured selection",
+                content: markdown,
+                originalContent: markdown,
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = .preview
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView().environment(model)
+                .frame(width: 600, height: 400, alignment: .topLeading)
+        )
+        hostingView.frame = window.contentView!.bounds
+        window.contentView = hostingView
+        hostingView.layoutSubtreeIfNeeded()
+
+        let textViews = allSubviews(of: ReadingNSTextView.self, in: hostingView)
+        XCTAssertEqual(textViews.count, 1)
+        let body = try XCTUnwrap(textViews.first)
+        XCTAssertTrue(body.string.contains("First line"))
+        XCTAssertTrue(body.string.contains("one"))
+        XCTAssertTrue(body.string.contains("two"))
+        XCTAssertTrue(body.string.contains("Final line after the table"))
+        XCTAssertTrue(window.makeFirstResponder(body))
+
+        let layoutManager = try XCTUnwrap(body.layoutManager)
+        let textContainer = try XCTUnwrap(body.textContainer)
+        layoutManager.ensureLayout(for: textContainer)
+        let source = body.string as NSString
+
+        func point(in phrase: String, offset: Int) throws -> NSPoint {
+            let phraseRange = source.range(of: phrase)
+            XCTAssertNotEqual(phraseRange.location, NSNotFound)
+            let characterRange = NSRange(location: phraseRange.location + offset, length: 1)
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: characterRange,
+                actualCharacterRange: nil
+            )
+            var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            rect.origin.x += body.textContainerOrigin.x
+            rect.origin.y += body.textContainerOrigin.y
+            return NSPoint(x: rect.midX, y: rect.midY)
+        }
+
+        func event(
+            _ type: NSEvent.EventType,
+            at point: NSPoint,
+            number: Int
+        ) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(
+                with: type,
+                location: body.convert(point, to: nil),
+                modifierFlags: [],
+                timestamp: TimeInterval(number) / 10,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: number,
+                clickCount: type == .leftMouseDown ? 1 : 0,
+                pressure: type == .leftMouseUp ? 0 : 1
+            ))
+        }
+
+        let start = try point(in: "First line", offset: 3)
+        let end = try point(in: "Final line after the table", offset: 10)
+        let down = try event(.leftMouseDown, at: start, number: 1)
+        NSApp.postEvent(try event(.leftMouseDragged, at: end, number: 2), atStart: false)
+        NSApp.postEvent(try event(.leftMouseUp, at: end, number: 3), atStart: false)
+        body.mouseDown(with: down)
+
+        let selected = source.substring(with: body.selectedRange())
+        XCTAssertTrue(selected.contains("Second line must be included"))
+        XCTAssertTrue(selected.contains("A"))
+        XCTAssertTrue(selected.contains("B"))
+        XCTAssertTrue(selected.contains("one"))
+        XCTAssertTrue(selected.contains("two"))
+        XCTAssertTrue(selected.contains("Final line"))
+        withExtendedLifetime((window, hostingView)) {}
+    }
+
+    func testReadingAttributedDocumentIncludesEveryStructuredBlockInOneString() {
+        let richTable = GFM.HTMLTable(
+            rows: [["Wide heading", ""], ["Left", "Right"]],
+            hasHeader: true,
+            caption: "Rich caption",
+            cells: [
+                .init(
+                    row: 0,
+                    column: 0,
+                    rowSpan: 1,
+                    columnSpan: 2,
+                    content: "Wide heading",
+                    isHeader: true,
+                    alignment: .center
+                ),
+                .init(
+                    row: 1,
+                    column: 0,
+                    rowSpan: 1,
+                    columnSpan: 1,
+                    content: "Left",
+                    isHeader: false,
+                    alignment: .left
+                ),
+                .init(
+                    row: 1,
+                    column: 1,
+                    rowSpan: 1,
+                    columnSpan: 1,
+                    content: "Right",
+                    isHeader: false,
+                    alignment: .right
+                ),
+            ]
+        )
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [
+                .lines(["Before"]),
+                .table([["A", "B"], ["one", "two"]], [.left, .right], hasHeader: true),
+                .richTable(richTable),
+                .details(summary: "Summary", body: "Nested body", initiallyOpen: true),
+                .definitionList([.init(term: "Term", definitions: ["Definition"])]),
+                .lines(["After"]),
+            ],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+
+        for expected in [
+            "Before", "A", "B", "one", "two", "Rich caption", "Wide heading",
+            "Left", "Right", "Summary", "Nested body", "Term", "Definition", "After",
+        ] {
+            XCTAssertTrue(attributed.string.contains(expected), "Missing \(expected)")
+        }
+
+        var tableBlocks: [NSTextTableBlock] = []
+        attributed.enumerateAttribute(
+            .paragraphStyle,
+            in: NSRange(location: 0, length: attributed.length)
+        ) { value, _, _ in
+            guard let paragraph = value as? NSParagraphStyle else { return }
+            tableBlocks.append(
+                contentsOf: paragraph.textBlocks.compactMap { $0 as? NSTextTableBlock }
+            )
+        }
+        XCTAssertEqual(tableBlocks.count, 7)
+        XCTAssertEqual(Set(tableBlocks.map { ObjectIdentifier($0.table) }).count, 2)
+    }
+
+    func testReadingImagePolicyCreatesAttachmentsOnlyForPermittedImages() throws {
+        let baseURL = URL(fileURLWithPath: "/tmp/vulkanglass-reading-images", isDirectory: true)
+        let allowed = ReadingAttributedDocument.make(
+            blocks: [.lines(["![Diagram](diagram.png)"])],
+            noteTitles: [],
+            baseURL: baseURL,
+            dark: false,
+            loadLocalImages: true
+        )
+        let attachmentRange = (allowed.string as NSString).range(of: "\u{fffc}")
+        XCTAssertNotEqual(attachmentRange.location, NSNotFound)
+        XCTAssertNotNil(allowed.attribute(.attachment, at: attachmentRange.location, effectiveRange: nil))
+        XCTAssertEqual(
+            allowed.attribute(.readingImageURL, at: attachmentRange.location, effectiveRange: nil) as? String,
+            baseURL.appendingPathComponent("diagram.png").absoluteString
+        )
+
+        let blockedLocal = ReadingAttributedDocument.make(
+            blocks: [.lines(["![Diagram](diagram.png)"])],
+            noteTitles: [],
+            baseURL: baseURL,
+            dark: false,
+            loadLocalImages: false
+        )
+        XCTAssertTrue(blockedLocal.string.contains("Diagram (local image blocked)"))
+        XCTAssertNil(blockedLocal.attribute(.attachment, at: 0, effectiveRange: nil))
+
+        let blockedRemote = ReadingAttributedDocument.make(
+            blocks: [.lines(["![](https://example.com/diagram.png)"])],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false,
+            loadRemoteImages: false
+        )
+        XCTAssertTrue(blockedRemote.string.contains("Remote Image Blocked"))
+    }
+
+    func testReadingRemoteImageReplacesLoadingAttachmentAsynchronously() async throws {
+        let loaded = expectation(description: "remote image loaded")
+        let decoded = try makeTestDecodedImage(width: 40, height: 30)
+        let coordinator = UnifiedReadingTextView.Coordinator(
+            onWiki: { _ in },
+            imageLoader: { url in
+                XCTAssertEqual(url, URL(string: "https://example.com/diagram.png"))
+                loaded.fulfill()
+                return decoded
+            }
+        )
+        let textView = ReadingNSTextView()
+        coordinator.render(
+            ReadingRenderConfiguration(
+                blocks: [.lines(["![Remote](https://example.com/diagram.png)"])],
+                noteTitles: [],
+                baseURL: nil,
+                dark: false,
+                loadLocalImages: true,
+                loadRemoteImages: true
+            ),
+            in: textView
+        )
+
+        await fulfillment(of: [loaded], timeout: 1)
+        for _ in 0..<10 { await Task.yield() }
+        let range = (textView.string as NSString).range(of: "\u{fffc}")
+        let attachment = try XCTUnwrap(
+            textView.attributedString().attribute(
+                .attachment,
+                at: range.location,
+                effectiveRange: nil
+            ) as? NSTextAttachment
+        )
+        XCTAssertEqual(attachment.bounds.width, 40, accuracy: 0.1)
+        XCTAssertEqual(attachment.bounds.height, 30, accuracy: 0.1)
+    }
+
+    func testReadingDetailsHonorInitialStateAndToggleFromTheSummary() throws {
+        let blocks: [MDBlock] = [
+            .details(summary: "More", body: "Hidden body", initiallyOpen: false)
+        ]
+        let closed = ReadingAttributedDocument.make(
+            blocks: blocks,
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        XCTAssertTrue(closed.string.contains("▸ More"))
+        XCTAssertFalse(closed.string.contains("Hidden body"))
+
+        let configuration = ReadingRenderConfiguration(
+            blocks: blocks,
+            noteTitles: [],
+            baseURL: nil,
+            dark: false,
+            loadLocalImages: true,
+            loadRemoteImages: false
+        )
+        let coordinator = UnifiedReadingTextView.Coordinator { _ in }
+        let textView = ReadingNSTextView()
+        coordinator.render(configuration, in: textView)
+        textView.setSelectedRange(NSRange(location: 2, length: 2))
+
+        var summaryRange = (textView.string as NSString).range(of: "More")
+        var link = try XCTUnwrap(
+            textView.attributedString().attribute(
+                .link,
+                at: summaryRange.location,
+                effectiveRange: nil
+            )
+        )
+        XCTAssertTrue(coordinator.textView(textView, clickedOnLink: link, at: summaryRange.location))
+        XCTAssertTrue(textView.string.contains("▾ More"))
+        XCTAssertTrue(textView.string.contains("Hidden body"))
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 2, length: 2))
+
+        summaryRange = (textView.string as NSString).range(of: "More")
+        link = try XCTUnwrap(
+            textView.attributedString().attribute(
+                .link,
+                at: summaryRange.location,
+                effectiveRange: nil
+            )
+        )
+        XCTAssertTrue(coordinator.textView(textView, clickedOnLink: link, at: summaryRange.location))
+        XCTAssertTrue(textView.string.contains("▸ More"))
+        XCTAssertFalse(textView.string.contains("Hidden body"))
+
+        let openConfiguration = ReadingRenderConfiguration(
+            blocks: [.details(summary: "Open", body: "Visible body", initiallyOpen: true)],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false,
+            loadLocalImages: true,
+            loadRemoteImages: false
+        )
+        coordinator.render(openConfiguration, in: textView)
+        XCTAssertTrue(textView.string.contains("▾ Open"))
+        XCTAssertTrue(textView.string.contains("Visible body"))
+        let openRange = (textView.string as NSString).range(of: "Open")
+        let openLink = try XCTUnwrap(
+            textView.attributedString().attribute(
+                .link,
+                at: openRange.location,
+                effectiveRange: nil
+            )
+        )
+        XCTAssertTrue(coordinator.textView(textView, clickedOnLink: openLink, at: openRange.location))
+        XCTAssertTrue(textView.string.contains("▸ Open"))
+        XCTAssertFalse(textView.string.contains("Visible body"))
+    }
+
+    func testReadingDefinitionDescriptionsRetainNestedBlockRendering() throws {
+        let definition = """
+        Paragraph
+
+        - First
+        - Second
+
+        ```swift
+        let value = 1
+        ```
+
+        > Quoted
+
+        | Head | Other |
+        | --- | --- |
+        | Cell | Value |
+
+        <details open>
+        <summary>Nested summary</summary>
+        Nested body
+        </details>
+        """
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [.definitionList([.init(term: "Term", definitions: [definition])])],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+
+        for expected in [
+            "Paragraph", "• First", "• Second", "let value = 1", "▏ Quoted",
+            "Head", "Other", "Cell", "Value", "Nested summary", "Nested body",
+        ] {
+            XCTAssertTrue(attributed.string.contains(expected), "Missing \(expected)")
+        }
+        XCTAssertFalse(attributed.string.contains("```"))
+        XCTAssertFalse(attributed.string.contains("- First"))
+
+        let codeRange = (attributed.string as NSString).range(of: "let value = 1")
+        let codeFont = try XCTUnwrap(
+            attributed.attribute(.font, at: codeRange.location, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertTrue(codeFont.isFixedPitch)
+
+        let summaryRange = (attributed.string as NSString).range(of: "Nested summary")
+        XCTAssertNotNil(attributed.attribute(.link, at: summaryRange.location, effectiveRange: nil))
+
+        var tableBlocks: [NSTextTableBlock] = []
+        attributed.enumerateAttribute(
+            .paragraphStyle,
+            in: NSRange(location: 0, length: attributed.length)
+        ) { value, _, _ in
+            guard let paragraph = value as? NSParagraphStyle else { return }
+            tableBlocks.append(contentsOf: paragraph.textBlocks.compactMap { $0 as? NSTextTableBlock })
+            if !paragraph.textBlocks.isEmpty {
+                XCTAssertGreaterThanOrEqual(paragraph.headIndent, 20)
+            }
+        }
+        XCTAssertEqual(tableBlocks.count, 4)
+    }
+
+    func testReadingRichHTMLTablePreservesRaggedRowsAndSpans() throws {
+        let html = """
+        <table>
+        <tr><th rowspan="2">A</th><th colspan="2">B</th></tr>
+        <tr><td>C</td><td>D</td></tr>
+        <tr><td colspan="3">E</td></tr>
+        <tr><td>Ragged</td></tr>
+        </table>
+        """
+        let table = try XCTUnwrap(GFM.parseHTMLTable(html))
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [.richTable(table)],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        var spans: Set<String> = []
+        attributed.enumerateAttribute(
+            .paragraphStyle,
+            in: NSRange(location: 0, length: attributed.length)
+        ) { value, _, _ in
+            guard let paragraph = value as? NSParagraphStyle else { return }
+            for block in paragraph.textBlocks.compactMap({ $0 as? NSTextTableBlock }) {
+                spans.insert("\(block.startingRow):\(block.rowSpan):\(block.startingColumn):\(block.columnSpan)")
+            }
+        }
+        XCTAssertEqual(spans, ["0:2:0:1", "0:1:1:2", "1:1:1:1", "1:1:2:1", "2:1:0:3", "3:1:0:1"])
+    }
+
+    func testReadingRepeatedTableAndImageUpdatesReuseTheRenderedDocument() async throws {
+        let loaded = expectation(description: "one image load")
+        loaded.expectedFulfillmentCount = 1
+        let counter = ReadingImageLoadCounter()
+        let decoded = try makeTestDecodedImage(width: 24, height: 18)
+        let coordinator = UnifiedReadingTextView.Coordinator(
+            onWiki: { _ in },
+            imageLoader: { _ in
+                await counter.increment()
+                loaded.fulfill()
+                return decoded
+            }
+        )
+        let configuration = ReadingRenderConfiguration(
+            blocks: [
+                .table([["A", "B"], ["1", "2"]], [.left, .right], hasHeader: true),
+                .lines(["![Remote](https://example.com/one.png)"]),
+            ],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false,
+            loadLocalImages: true,
+            loadRemoteImages: true
+        )
+        let textView = ReadingNSTextView()
+
+        coordinator.render(configuration, in: textView)
+        coordinator.render(configuration, in: textView)
+        coordinator.render(configuration, in: textView)
+        await fulfillment(of: [loaded], timeout: 1)
+
+        XCTAssertEqual(coordinator.documentSetCount, 1)
+        let loadCount = await counter.value
+        XCTAssertEqual(loadCount, 1)
+    }
+
     func testReadingContextMenuTargetsItsTextViewForCopyAndSelectAll() throws {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 500, height: 300),
@@ -3125,38 +3585,7 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertNotNil(renderer.nsImage)
     }
 
-    func testSpanningTableGeometryHonorsSpansWithoutOverlapAtNarrowWidths() throws {
-        let cells: [GFM.HTMLTableCell] = [
-            .init(row: 0, column: 0, rowSpan: 2, columnSpan: 1, content: "A", isHeader: true, alignment: .left),
-            .init(row: 0, column: 1, rowSpan: 1, columnSpan: 2, content: "B", isHeader: true, alignment: .center),
-            .init(row: 1, column: 1, rowSpan: 1, columnSpan: 1, content: "C", isHeader: false, alignment: .left),
-            .init(row: 1, column: 2, rowSpan: 1, columnSpan: 1, content: "D", isHeader: false, alignment: .right),
-        ]
-        let bounds = CGRect(x: 12, y: 20, width: 180, height: 74)
-        let frames = try cells.map {
-            try XCTUnwrap(SpanningTableLayout.frame(
-                for: $0,
-                in: bounds,
-                columnCount: 3,
-                rowHeights: [34, 40]
-            ))
-        }
-        XCTAssertEqual(frames[0], CGRect(x: 12, y: 20, width: 60, height: 74))
-        XCTAssertEqual(frames[1], CGRect(x: 72, y: 20, width: 120, height: 34))
-        XCTAssertEqual(frames[2], CGRect(x: 72, y: 54, width: 60, height: 40))
-        XCTAssertEqual(frames[3], CGRect(x: 132, y: 54, width: 60, height: 40))
-        for first in frames.indices {
-            for second in frames.indices where second > first {
-                XCTAssertFalse(frames[first].intersects(frames[second]))
-            }
-        }
-    }
-
-    func testReadingPreviewTableHeaderIsDistinctAndCellsFillTheirRows() async throws {
-        let headerColor = NSColor(MarkdownPreviewTableStyle.background(dark: false, isHeader: true))
-        let bodyColor = NSColor(MarkdownPreviewTableStyle.background(dark: false, isHeader: false))
-        XCTAssertNotEqual(headerColor, bodyColor)
-
+    func testReadingPreviewTableHeaderIsDistinctAndUsesOneNativeTextTable() throws {
         let renderedView = MarkdownPreviewView(
             text: "| Header One | Header Two |\n| --- | --- |\n| Body One | Body Two |",
             noteTitles: [],
@@ -3185,19 +3614,27 @@ final class EditorLifecycleTests: XCTestCase {
         }
         XCTAssertGreaterThan(headerBackgroundPixels, 500)
 
-        let metrics = try await readingPreviewTableMetrics(
-            markdown: "| #tag | Plain |\n| --- | --- |\n| Body | [^1] |",
-            paneWidth: 500
+        let textView = try XCTUnwrap(
+            allSubviews(of: ReadingNSTextView.self, in: renderedHostingView).first
         )
-        let rows = Dictionary(grouping: metrics, by: \.row)
+        var blocks: [NSTextTableBlock] = []
+        textView.attributedString().enumerateAttribute(
+            .paragraphStyle,
+            in: NSRange(location: 0, length: textView.attributedString().length)
+        ) { value, _, _ in
+            guard let paragraph = value as? NSParagraphStyle else { return }
+            blocks.append(contentsOf: paragraph.textBlocks.compactMap { $0 as? NSTextTableBlock })
+        }
+        XCTAssertEqual(blocks.count, 4)
+        let rows = Dictionary(grouping: blocks, by: \.startingRow)
         XCTAssertEqual(rows.count, 2)
         for cells in rows.values {
             XCTAssertEqual(cells.count, 2)
-            let expectedHeight = try XCTUnwrap(cells.first?.size.height)
-            for cell in cells.dropFirst() {
-                XCTAssertEqual(cell.size.height, expectedHeight, accuracy: 0.5)
-            }
         }
+        let table = try XCTUnwrap(blocks.first?.table)
+        XCTAssertTrue(blocks.allSatisfy { $0.table === table })
+        XCTAssertTrue(rows[0]?.allSatisfy { $0.backgroundColor != nil } == true)
+        XCTAssertTrue(rows[1]?.allSatisfy { $0.backgroundColor == nil } == true)
     }
 
     func testReadingPreviewFillsWideAndNarrowPanesWhileCappingItsColumn() async throws {
@@ -3377,35 +3814,6 @@ final class EditorLifecycleTests: XCTestCase {
         await fulfillment(of: [reported], timeout: 2)
         withExtendedLifetime(hostingView) {}
         return try XCTUnwrap(result)
-    }
-
-    private func readingPreviewTableMetrics(
-        markdown: String,
-        paneWidth: CGFloat
-    ) async throws -> [MarkdownPreviewTableCellLayout] {
-        let reported = expectation(description: "Preview reports table-cell layout")
-        var result: [MarkdownPreviewTableCellLayout] = []
-        var fulfilled = false
-        let view = MarkdownPreviewView(
-            text: markdown,
-            noteTitles: [],
-            onLayout: { metrics in
-                result = metrics.tableCells
-                if result.count == 4, !fulfilled {
-                    fulfilled = true
-                    reported.fulfill()
-                }
-            },
-            onWiki: { _ in }
-        )
-        .frame(width: paneWidth, height: 300, alignment: .topLeading)
-        let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = NSRect(x: 0, y: 0, width: paneWidth, height: 300)
-        hostingView.layoutSubtreeIfNeeded()
-
-        await fulfillment(of: [reported], timeout: 2)
-        withExtendedLifetime(hostingView) {}
-        return result
     }
 
     private func noteEditorSize(mode: EditorMode, paneSize: CGSize) async throws -> CGSize {
