@@ -1695,6 +1695,7 @@ struct WikiLinkPickerView: View {
     var selected: Int
     var dark: Bool
     var onChoose: (NoteMeta) -> Void
+    var onRowsMeasured: (([WikiLinkPickerRowLayout]) -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1707,7 +1708,9 @@ struct WikiLinkPickerView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(spacing: 0) {
+                        // Eager stack with a single identity per row: mixing lazy cell reuse with a
+                        // second `.id` modifier showed stale rows (duplicates / missing notes).
+                        VStack(spacing: 0) {
                             ForEach(Array(notes.enumerated()), id: \.element.id) { index, note in
                                 Button {
                                     onChoose(note)
@@ -1735,14 +1738,30 @@ struct WikiLinkPickerView: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .id(index)
+                                .background {
+                                    if onRowsMeasured != nil {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(
+                                                key: WikiLinkPickerRowsKey.self,
+                                                value: [WikiLinkPickerRowLayout(
+                                                    path: note.path,
+                                                    frame: geometry.frame(in: .named("WikiLinkPickerScroll"))
+                                                )]
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    .onChange(of: selected) { _, value in
-                        proxy.scrollTo(value, anchor: .center)
+                    .coordinateSpace(name: "WikiLinkPickerScroll")
+                    .onPreferenceChange(WikiLinkPickerRowsKey.self) { rows in
+                        onRowsMeasured?(rows)
                     }
-                    .onAppear { proxy.scrollTo(selected, anchor: .center) }
+                    .onChange(of: selected) { _, value in
+                        scroll(proxy, to: value)
+                    }
+                    .onAppear { scroll(proxy, to: selected) }
                 }
             }
             VGTheme.divider(dark: dark).frame(height: 1)
@@ -1761,6 +1780,24 @@ struct WikiLinkPickerView: View {
                 .stroke(VGTheme.divider(dark: dark), lineWidth: 1)
         )
         .preferredColorScheme(dark ? .dark : .light)
+    }
+
+    private func scroll(_ proxy: ScrollViewProxy, to index: Int) {
+        guard notes.indices.contains(index) else { return }
+        proxy.scrollTo(notes[index].id, anchor: .center)
+    }
+}
+
+struct WikiLinkPickerRowLayout: Equatable {
+    var path: String
+    var frame: CGRect
+}
+
+private struct WikiLinkPickerRowsKey: PreferenceKey {
+    static var defaultValue: [WikiLinkPickerRowLayout] = []
+
+    static func reduce(value: inout [WikiLinkPickerRowLayout], nextValue: () -> [WikiLinkPickerRowLayout]) {
+        value += nextValue()
     }
 }
 
