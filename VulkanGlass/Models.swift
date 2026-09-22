@@ -152,12 +152,20 @@ struct NoteTab: Identifiable, Equatable, Sendable {
 }
 
 struct EditorFocusRequest: Equatable, Sendable {
+    /// Where the insertion point lands when the document body takes focus.
+    enum Placement: Equatable, Sendable {
+        case start
+        case end
+    }
+
     let id: UUID
     let tabID: String
+    let placement: Placement
 
-    init(id: UUID = UUID(), tabID: String) {
+    init(id: UUID = UUID(), tabID: String, placement: Placement = .end) {
         self.id = id
         self.tabID = tabID
+        self.placement = placement
     }
 }
 

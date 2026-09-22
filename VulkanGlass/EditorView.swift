@@ -9,6 +9,7 @@ struct SourceEditor: NSViewRepresentable {
     var baseURL: URL?
     var loadRemoteImages = false
     var focusRequestID: UUID?
+    var focusPlacement: EditorFocusRequest.Placement = .end
     var onFocusRequestFulfilled: (UUID) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
@@ -61,7 +62,7 @@ struct SourceEditor: NSViewRepresentable {
         applyChrome(textView)
         context.coordinator.restyle()
         context.coordinator.onFocusRequestFulfilled = onFocusRequestFulfilled
-        context.coordinator.updateFocusRequest(focusRequestID)
+        context.coordinator.updateFocusRequest(focusRequestID, placement: focusPlacement)
         return scroll
     }
 
@@ -83,7 +84,7 @@ struct SourceEditor: NSViewRepresentable {
         }
         applyChrome(textView)
         context.coordinator.refreshWikiPopup()
-        context.coordinator.updateFocusRequest(focusRequestID)
+        context.coordinator.updateFocusRequest(focusRequestID, placement: focusPlacement)
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
@@ -125,6 +126,7 @@ struct SourceEditor: NSViewRepresentable {
         private var fulfilledFocusRequestID: UUID?
         private var activeFocusRequestID: UUID?
         private var pendingFocusRequestID: UUID?
+        private var focusPlacement: EditorFocusRequest.Placement = .end
         private var dismantling = false
         private let focus: (SourceTextView) -> Bool
 
@@ -146,8 +148,12 @@ struct SourceEditor: NSViewRepresentable {
             }
         }
 
-        func updateFocusRequest(_ id: UUID?) {
+        func updateFocusRequest(
+            _ id: UUID?,
+            placement: EditorFocusRequest.Placement = .end
+        ) {
             activeFocusRequestID = id
+            focusPlacement = placement
             guard let id else {
                 pendingFocusRequestID = nil
                 return
@@ -174,7 +180,9 @@ struct SourceEditor: NSViewRepresentable {
                     return
                 }
                 self.pendingFocusRequestID = nil
-                let insertionPoint = (textView.string as NSString).length
+                let insertionPoint = self.focusPlacement == .start
+                    ? 0
+                    : (textView.string as NSString).length
                 textView.setSelectedRange(NSRange(location: insertionPoint, length: 0))
                 if self.focus(textView) {
                     self.fulfilledFocusRequestID = id
@@ -1850,6 +1858,7 @@ struct NoteEditorView: View {
                         focusRequestID: model.editorFocusRequest?.tabID == tab.id
                             ? model.editorFocusRequest?.id
                             : nil,
+                        focusPlacement: model.editorFocusRequest?.placement ?? .end,
                         onFocusRequestFulfilled: { model.fulfillEditorFocusRequest($0) }
                     )
                         .background {
@@ -1902,7 +1911,10 @@ struct NoteEditorView: View {
                     text: model.titleEditingDraft,
                     font: .systemFont(ofSize: 34, weight: .bold),
                     commitOnDisappear: true,
-                    onChange: { model.updateTitleDraft(for: tab.id, draft: $0) }
+                    onChange: { model.updateTitleDraft(for: tab.id, draft: $0) },
+                    onSubmit: { name in
+                        Task { await model.submitTitleEditing(for: tab.id, draft: name) }
+                    }
                 ) { name in
                     Task {
                         model.updateTitleDraft(for: tab.id, draft: name)
@@ -2004,6 +2016,7 @@ struct InlineRenameField: View {
     var font: NSFont = .systemFont(ofSize: NSFont.systemFontSize)
     var commitOnDisappear: Bool
     var onChange: (String) -> Void
+    var onSubmit: ((String) -> Void)?
     var onCommit: (String) -> Void
     var onCancel: () -> Void
     @State private var draft: String
@@ -2013,6 +2026,7 @@ struct InlineRenameField: View {
         font: NSFont = .systemFont(ofSize: NSFont.systemFontSize),
         commitOnDisappear: Bool = false,
         onChange: @escaping (String) -> Void = { _ in },
+        onSubmit: ((String) -> Void)? = nil,
         onCommit: @escaping (String) -> Void,
         onCancel: @escaping () -> Void
     ) {
@@ -2020,6 +2034,7 @@ struct InlineRenameField: View {
         self.font = font
         self.commitOnDisappear = commitOnDisappear
         self.onChange = onChange
+        self.onSubmit = onSubmit
         self.onCommit = onCommit
         self.onCancel = onCancel
         _draft = State(initialValue: text)
@@ -2031,6 +2046,7 @@ struct InlineRenameField: View {
             font: font,
             commitOnDismantle: commitOnDisappear,
             onChange: onChange,
+            onSubmit: onSubmit,
             onCommit: onCommit,
             onCancel: onCancel
         )
@@ -2057,6 +2073,9 @@ struct InlineRenameTextField: NSViewRepresentable {
     var font: NSFont
     var commitOnDismantle: Bool = false
     var onChange: (String) -> Void = { _ in }
+    /// Receives a nonempty name committed with Return. Other commits (blur, teardown) and
+    /// callers without this handler use `onCommit`.
+    var onSubmit: ((String) -> Void)?
     var onCommit: (String) -> Void
     var onCancel: () -> Void
 
@@ -2183,14 +2202,14 @@ struct InlineRenameTextField: NSViewRepresentable {
                 return true
             }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                complete(commit: true)
+                complete(commit: true, submitted: true)
                 control.window?.makeFirstResponder(nil)
                 return true
             }
             return false
         }
 
-        private func complete(commit: Bool) {
+        private func complete(commit: Bool, submitted: Bool = false) {
             guard !finished, !dismantling else { return }
             finished = true
             guard commit else {
@@ -2201,6 +2220,8 @@ struct InlineRenameTextField: NSViewRepresentable {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if value.isEmpty {
                 parent.onCancel()
+            } else if submitted, let onSubmit = parent.onSubmit {
+                onSubmit(value)
             } else {
                 parent.onCommit(value)
             }

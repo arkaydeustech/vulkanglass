@@ -11,6 +11,16 @@ struct AppModelDependencies {
     var saveKeychainToken: (String) throws -> Void
     var authenticationDisabled: () -> Bool = { false }
     var chooseNewStandaloneNoteURL: @MainActor () -> URL? = { nil }
+    var syncGit: (String, String, GitCredential?) async throws -> GitStatus = { path, message, credential in
+        try await Task.detached {
+            try GitService.sync(path: path, message: message, credential: credential)
+        }.value
+    }
+    var renameFile: (URL, String, URL?) async throws -> URL = { source, name, root in
+        try await Task.detached {
+            try FileService.rename(source, to: name, root: root)
+        }.value
+    }
 
     static let live = AppModelDependencies(
         githubCLIStatus: { includeToken in
@@ -185,6 +195,8 @@ final class AppModel {
     @ObservationIgnored private var titleCommitTask: Task<Bool, Never>?
     @ObservationIgnored private var titleCommitTabID: String?
     @ObservationIgnored private var titleCommitGeneration: UUID?
+    @ObservationIgnored private var titleSubmissions: [UUID: String] = [:]
+    @ObservationIgnored private var latestTitleSubmissionID: UUID?
 
     init(
         settings: AppSettings? = nil,
@@ -499,6 +511,9 @@ final class AppModel {
         if titleEditingTabID == id {
             titleEditingTabID = nil
             titleEditingDraft = ""
+            if activeTabID == id, editorMode == .source {
+                editorFocusRequest = EditorFocusRequest(tabID: id, placement: .start)
+            }
         }
     }
 
@@ -524,11 +539,19 @@ final class AppModel {
         titleCommitTabID = target
         let task = Task { [weak self] in
             guard let self else { return false }
-            return await self.renameNote(path: target, newName: draft)
+            return await self.renameNote(path: target, newName: draft, sync: false)
         }
         titleCommitTask = task
         let committed = await task.value
         if titleCommitGeneration == generation {
+            if committed, settings.autoSync, let vaultPath = vault?.path,
+               !tabs.contains(where: { $0.path == target }) {
+                let message = "Rename \(Markdown.title(from: target)) to \(draft)"
+                Task { [weak self] in
+                    guard let self, self.vault?.path == vaultPath else { return }
+                    await self.syncNow(message: message)
+                }
+            }
             titleCommitTask = nil
             titleCommitTabID = nil
             titleCommitGeneration = nil
@@ -541,6 +564,28 @@ final class AppModel {
             titleEditingDraft = draft
         }
         return committed
+    }
+
+    /// Return in the title saves the name and hands typing over to the top of the document.
+    func submitTitleEditing(for id: String, draft: String) async {
+        guard titleEditingTabID == id || titleCommitTabID == id else { return }
+        updateTitleDraft(for: id, draft: draft)
+        let submissionID = UUID()
+        latestTitleSubmissionID = submissionID
+        titleSubmissions[submissionID] = id
+        let committed = await commitTitleEditing(for: id)
+        // A rename retargets the tracked ID, and any navigation during the commit moves the
+        // active tab away from it, so only the renamed note that is still in front takes focus.
+        let target = titleSubmissions.removeValue(forKey: submissionID)
+        guard committed,
+              latestTitleSubmissionID == submissionID,
+              let target,
+              activeTabID == target,
+              titleEditingTabID == nil,
+              editorMode == .source
+        else { return }
+        latestTitleSubmissionID = nil
+        editorFocusRequest = EditorFocusRequest(tabID: target, placement: .start)
     }
 
     /// Awaits every in-flight autosave, including debounced writes that have not fired yet.
@@ -611,12 +656,13 @@ final class AppModel {
     }
 
     func newNote() async {
+        guard await commitTitleEditing() else { return }
         if let vault {
             do {
                 let url = try FileService.createNote(in: URL(fileURLWithPath: vault.path), name: "Untitled")
                 await refreshVault()
                 await openTab(path: url.path)
-                prepareNewNoteForEditing(at: url.path)
+                prepareNewNoteForEditing(at: url.path, editingTitle: true)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -634,6 +680,7 @@ final class AppModel {
 
     func dailyNote() async {
         guard let vault else { return }
+        guard await commitTitleEditing() else { return }
         let dailyDir = URL(fileURLWithPath: vault.path).appendingPathComponent("Daily")
         let name = Markdown.dailyNoteName()
         let existing = dailyDir.appendingPathComponent(name)
@@ -666,7 +713,7 @@ final class AppModel {
 
     /// Renames a note on disk and retargets any open tab for that file.
     @discardableResult
-    func renameNote(path: String, newName: String) async -> Bool {
+    func renameNote(path: String, newName: String, sync: Bool = true) async -> Bool {
         let currentTitle = Markdown.title(from: path)
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
@@ -684,9 +731,7 @@ final class AppModel {
         let root = vault.map { URL(fileURLWithPath: $0.path) }
         do {
             let source = URL(fileURLWithPath: path)
-            let dest = try await Task.detached {
-                try FileService.rename(source, to: newName, root: root)
-            }.value
+            let dest = try await dependencies.renameFile(source, newName, root)
             retargetOpenItems(from: path, to: dest.path)
             if vault != nil {
                 await refreshVault(reconcileTabs: true)
@@ -696,7 +741,7 @@ final class AppModel {
                 })?.path, aligned != dest.path {
                     retargetOpenItems(from: dest.path, to: aligned)
                 }
-                if settings.autoSync {
+                if sync && settings.autoSync {
                     await syncNow(message: "Rename \(currentTitle) to \(Markdown.title(from: dest.path))")
                 }
             }
@@ -734,6 +779,7 @@ final class AppModel {
 
     func followWikiLink(_ target: String) async {
         guard let vault else { return }
+        guard await commitTitleEditing() else { return }
         do {
             let root = URL(fileURLWithPath: vault.path)
             let resolution = try await Task.detached {
@@ -765,12 +811,12 @@ final class AppModel {
         let credential = vault.isGitHub ? gitCredential : nil
         let msg = message ?? "Update \(activeTab?.title ?? "notes")"
         do {
-            let status = try await Task.detached {
-                try GitService.sync(path: path, message: msg, credential: credential)
-            }.value
+            let status = try await dependencies.syncGit(path, msg, credential)
+            guard self.vault?.path == path else { return }
             gitStatus = status
             await refreshVault(reconcileTabs: true)
         } catch {
+            guard self.vault?.path == path else { return }
             gitStatus = GitStatus(state: .error, message: error.localizedDescription)
             errorMessage = error.localizedDescription
         }
@@ -898,18 +944,36 @@ final class AppModel {
             titleEditingTabID = newPath
         }
         if let request = editorFocusRequest, request.tabID == oldPath {
-            editorFocusRequest = EditorFocusRequest(id: request.id, tabID: newPath)
+            editorFocusRequest = EditorFocusRequest(
+                id: request.id,
+                tabID: newPath,
+                placement: request.placement
+            )
+        }
+        if titleCommitTabID == oldPath {
+            titleCommitTabID = newPath
+        }
+        for submissionID in titleSubmissions.filter({ $0.value == oldPath }).map(\.key) {
+            titleSubmissions[submissionID] = newPath
         }
     }
 
-    /// New notes always begin in source mode with the document ready for typing.
-    private func prepareNewNoteForEditing(at path: String) {
+    /// New notes always begin in source mode. A note created with a placeholder name starts with
+    /// that name selected in the title so typing replaces it; a note whose name was already
+    /// chosen (daily notes, wiki links, a save panel) starts with the document ready for typing.
+    private func prepareNewNoteForEditing(at path: String, editingTitle: Bool = false) {
         guard tabs.contains(where: { $0.id == path }) else { return }
         editorMode = .source
         centerView = .editor
-        titleEditingTabID = nil
-        titleEditingDraft = ""
-        editorFocusRequest = EditorFocusRequest(tabID: path)
+        if editingTitle {
+            editorFocusRequest = nil
+            titleEditingTabID = path
+            titleEditingDraft = Markdown.title(from: path)
+        } else {
+            titleEditingTabID = nil
+            titleEditingDraft = ""
+            editorFocusRequest = EditorFocusRequest(tabID: path)
+        }
     }
 
     func fulfillEditorFocusRequest(_ id: UUID) {

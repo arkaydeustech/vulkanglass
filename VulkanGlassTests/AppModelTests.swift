@@ -368,7 +368,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(try FileService.read(file), "new")
     }
 
-    func testNewVaultNoteOpensInSourceModeWithDocumentFocusRequested() async throws {
+    func testNewVaultNoteOpensInSourceModeWithPlaceholderTitleReadyToReplace() async throws {
         let root = try temporaryDirectory()
         var settings = AppSettings.default()
         settings.autoSync = false
@@ -386,19 +386,23 @@ final class AppModelTests: XCTestCase {
 
         let tab = try XCTUnwrap(model.activeTab)
         XCTAssertEqual(tab.title, "Untitled")
-        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+        XCTAssertEqual(model.titleEditingDraft, "Untitled")
         XCTAssertEqual(model.editorMode, .source)
         XCTAssertEqual(model.centerView, .editor)
-        XCTAssertEqual(model.editorFocusRequest?.tabID, tab.id)
+        XCTAssertNil(model.editorFocusRequest)
         XCTAssertTrue(FileManager.default.fileExists(atPath: tab.path))
 
-        let focusRequestID = try XCTUnwrap(model.editorFocusRequest?.id)
-        await model.renameNote(path: tab.path, newName: "Project Notes")
+        await model.submitTitleEditing(for: tab.id, draft: "Project Notes")
 
         let renamed = FileService.canonicalURL(root.appendingPathComponent("Project Notes.md"))
         XCTAssertNil(model.titleEditingTabID)
-        XCTAssertEqual(model.editorFocusRequest?.id, focusRequestID)
-        XCTAssertEqual(model.editorFocusRequest?.tabID, renamed.path)
+        XCTAssertEqual(
+            model.editorFocusRequest.map { FileService.canonicalURL(URL(fileURLWithPath: $0.tabID)).path },
+            renamed.path
+        )
+        XCTAssertEqual(model.editorFocusRequest?.tabID, model.activeTabID)
+        XCTAssertEqual(model.editorFocusRequest?.placement, .start)
         XCTAssertEqual(model.activeTab?.title, "Project Notes")
         XCTAssertEqual(
             model.activeTab.map { FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path },
@@ -512,8 +516,8 @@ final class AppModelTests: XCTestCase {
             secondNewTab.path,
             "tabs=\(model.tabs.map(\.path)); files=\((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []); error=\(model.errorMessage ?? "nil")"
         )
-        XCTAssertNil(model.titleEditingTabID)
-        XCTAssertEqual(model.editorFocusRequest?.tabID, secondNewTab.id)
+        XCTAssertEqual(model.titleEditingTabID, secondNewTab.id)
+        XCTAssertNil(model.editorFocusRequest)
         XCTAssertEqual(secondNewTab.editorMode, .source)
         XCTAssertEqual(model.tabs.first(where: { $0.id == existing.path })?.editorMode, .preview)
         XCTAssertEqual(model.tabs.first(where: { $0.id == firstNewTab.id })?.editorMode, .source)
@@ -525,6 +529,44 @@ final class AppModelTests: XCTestCase {
 
         await model.setActiveTab(firstNewTab.id)
         XCTAssertEqual(model.editorMode, .source)
+    }
+
+    func testNewNoteCommitsPendingTitleBeforeChoosingNextUntitledName() async throws {
+        let root = try temporaryDirectory()
+        let model = modelWithVault(at: root)
+        await model.newNote()
+        let first = try XCTUnwrap(model.activeTab)
+        model.updateTitleDraft(for: first.id, draft: "Untitled 1")
+
+        await model.newNote()
+
+        XCTAssertEqual(model.activeTab?.title, "Untitled")
+        XCTAssertEqual(model.titleEditingTabID, model.activeTabID)
+        XCTAssertEqual(model.tabs.count, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Untitled 1.md").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Untitled.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Untitled 2.md").path))
+    }
+
+    func testFailedPendingTitleLeavesNoUnopenedCreatedNote() async throws {
+        let root = try temporaryDirectory()
+        try "taken".write(to: root.appendingPathComponent("Taken.md"), atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        await model.newNote()
+        let first = try XCTUnwrap(model.activeTab)
+        model.updateTitleDraft(for: first.id, draft: "Taken")
+
+        await model.newNote()
+        await model.dailyNote()
+        await model.followWikiLink("Wiki Target")
+
+        XCTAssertEqual(model.activeTabID, first.id)
+        XCTAssertEqual(model.titleEditingTabID, first.id)
+        XCTAssertEqual(model.titleEditingDraft, "Taken")
+        XCTAssertEqual(model.tabs.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Untitled 1.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Daily").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Wiki Target.md").path))
     }
 
     func testStandaloneNewNoteUsesInjectedSaveDestinationAndRequestsEditorFocus() async throws {
@@ -631,7 +673,7 @@ final class AppModelTests: XCTestCase {
         let root = try temporaryDirectory()
         let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
         model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
-        await model.newNote()
+        await model.dailyNote()
         let request = try XCTUnwrap(model.editorFocusRequest)
 
         model.fulfillEditorFocusRequest(UUID())
@@ -645,7 +687,7 @@ final class AppModelTests: XCTestCase {
         let closeRoot = try temporaryDirectory()
         let closeModel = AppModel(settings: .default(), bootstrapOnLaunch: false)
         closeModel.vault = VaultInfo(name: "close", path: closeRoot.path, remote: nil, branch: nil, isGitHub: false)
-        await closeModel.newNote()
+        await closeModel.dailyNote()
         let closeTabID = try XCTUnwrap(closeModel.editorFocusRequest?.tabID)
 
         await closeModel.closeTab(closeTabID)
@@ -654,7 +696,7 @@ final class AppModelTests: XCTestCase {
         let deleteRoot = try temporaryDirectory()
         let deleteModel = AppModel(settings: .default(), bootstrapOnLaunch: false)
         deleteModel.vault = VaultInfo(name: "delete", path: deleteRoot.path, remote: nil, branch: nil, isGitHub: false)
-        await deleteModel.newNote()
+        await deleteModel.dailyNote()
         let deletePath = try XCTUnwrap(deleteModel.editorFocusRequest?.tabID)
 
         await deleteModel.deletePath(deletePath)
@@ -665,7 +707,7 @@ final class AppModelTests: XCTestCase {
         let closeRoot = try temporaryDirectory()
         let closeModel = AppModel(settings: .default(), bootstrapOnLaunch: false)
         closeModel.vault = VaultInfo(name: "close", path: closeRoot.path, remote: nil, branch: nil, isGitHub: false)
-        await closeModel.newNote()
+        await closeModel.dailyNote()
         XCTAssertNotNil(closeModel.editorFocusRequest)
 
         await closeModel.closeVault()
@@ -674,7 +716,7 @@ final class AppModelTests: XCTestCase {
         let rejectRoot = try temporaryDirectory()
         let rejectModel = AppModel(settings: .default(), bootstrapOnLaunch: false)
         rejectModel.vault = VaultInfo(name: "reject", path: rejectRoot.path, remote: nil, branch: nil, isGitHub: false)
-        await rejectModel.newNote()
+        await rejectModel.dailyNote()
         XCTAssertNotNil(rejectModel.editorFocusRequest)
 
         let missingVault = rejectRoot.appendingPathComponent("Missing")
@@ -687,7 +729,7 @@ final class AppModelTests: XCTestCase {
         try "replacement".write(to: replacement, atomically: true, encoding: .utf8)
         let replaceModel = AppModel(settings: .default(), bootstrapOnLaunch: false)
         replaceModel.vault = VaultInfo(name: "replace", path: replaceRoot.path, remote: nil, branch: nil, isGitHub: false)
-        await replaceModel.newNote()
+        await replaceModel.dailyNote()
         XCTAssertNotNil(replaceModel.editorFocusRequest)
 
         await replaceModel.openStandalone(url: replacement)
@@ -961,12 +1003,15 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(cancelCount, 2)
     }
 
-    func testRenderedNewNoteFocusesDocumentWithCaretReadyToType() async throws {
+    func testRenderedNewNoteSelectsTitleSoTypingRenamesAndReturnMovesToDocument() async throws {
         let root = try temporaryDirectory()
-        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
         model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
         await model.newNote()
-        XCTAssertNotNil(model.activeTab)
+        let created = try XCTUnwrap(model.activeTab)
+        model.updateContent(created.id, "Existing body")
         let hostingView = NSHostingView(
             rootView: NoteEditorView()
                 .environment(model)
@@ -983,20 +1028,315 @@ final class AppModelTests: XCTestCase {
         window.contentView = hostingView
         window.makeKeyAndOrderFront(nil)
         hostingView.layoutSubtreeIfNeeded()
-        for _ in 0..<20 where !(window.firstResponder is SourceTextView) {
+
+        guard let (field, titleEditor) = await waitForInlineRenameEditor(in: hostingView) else {
+            return XCTFail("The new note title should take keyboard focus")
+        }
+        XCTAssertTrue(window.firstResponder === titleEditor)
+        XCTAssertEqual(titleEditor.string, "Untitled")
+        XCTAssertEqual(titleEditor.selectedRange(), NSRange(location: 0, length: "Untitled".utf16.count))
+        XCTAssertEqual(model.titleEditingTabID, created.id)
+        XCTAssertNil(model.editorFocusRequest)
+
+        titleEditor.insertText("Meeting Notes", replacementRange: titleEditor.selectedRange())
+        let coordinator = try XCTUnwrap(field.delegate as? InlineRenameTextField.Coordinator)
+        coordinator.controlTextDidChange(
+            Notification(name: NSControl.textDidChangeNotification, object: field)
+        )
+        XCTAssertEqual(model.titleEditingDraft, "Meeting Notes")
+
+        XCTAssertTrue(coordinator.control(
+            field,
+            textView: titleEditor,
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        ))
+        let renamed = FileService.canonicalURL(root.appendingPathComponent("Meeting Notes.md"))
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < deadline, !(window.firstResponder is SourceTextView) {
             await Task.yield()
             hostingView.layoutSubtreeIfNeeded()
         }
 
         let editor = try XCTUnwrap(firstDescendant(of: SourceTextView.self, in: hostingView))
-        XCTAssertEqual(model.editorMode, .source)
-        XCTAssertEqual(model.centerView, .editor)
         XCTAssertTrue(window.firstResponder === editor)
+        XCTAssertEqual(editor.string, "Existing body")
         XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: 0))
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertNil(model.editorFocusRequest)
+        XCTAssertEqual(model.activeTab?.title, "Meeting Notes")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamed.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: created.path))
+    }
+
+    func testCancellingNewNoteTitleKeepsItsNameAndFocusesBody() async throws {
+        let root = try temporaryDirectory()
+        let model = modelWithVault(at: root)
+        await model.newNote()
+        let original = try XCTUnwrap(model.activeTab)
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView()
+                .environment(model)
+                .frame(width: 700, height: 400)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 700, height: 400)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+
+        for empty in [false, true] {
+            if empty { await model.newNote() }
+            let title = await waitForInlineRenameEditor(in: hostingView)
+            let field = try XCTUnwrap(title?.0)
+            let editor = try XCTUnwrap(title?.1)
+            let path = try XCTUnwrap(model.activeTab?.path)
+            let coordinator = try XCTUnwrap(field.delegate as? InlineRenameTextField.Coordinator)
+            if empty { field.stringValue = "" }
+            XCTAssertTrue(coordinator.control(
+                field,
+                textView: editor,
+                doCommandBy: empty
+                    ? #selector(NSResponder.insertNewline(_:))
+                    : #selector(NSResponder.cancelOperation(_:))
+            ))
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(2))
+            while clock.now < deadline, !(window.firstResponder is SourceTextView) {
+                await Task.yield()
+                hostingView.layoutSubtreeIfNeeded()
+            }
+            XCTAssertTrue(window.firstResponder is SourceTextView)
+            XCTAssertNil(model.titleEditingTabID)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        }
+        XCTAssertEqual(model.tabs.first?.path, original.path)
+    }
+
+    func testSubmittingTitleThatCannotBeUsedKeepsTitleEditingWithoutDocumentFocus() async throws {
+        let root = try temporaryDirectory()
+        try "taken".write(to: root.appendingPathComponent("Taken.md"), atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.newNote()
+        let tab = try XCTUnwrap(model.activeTab)
+
+        await model.submitTitleEditing(for: tab.id, draft: "Taken")
+
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(model.activeTabID, tab.id)
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+        XCTAssertEqual(model.titleEditingDraft, "Taken")
+        XCTAssertNil(model.editorFocusRequest)
+    }
+
+    func testSubmittingTitleFocusesDocumentStartOnlyWhenTheSourceEditorIsShown() async throws {
+        let root = try temporaryDirectory()
+        let note = root.appendingPathComponent("Existing.md")
+        try "Existing body".write(to: note, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.openTab(path: note.path)
+        model.editorMode = .preview
+
+        model.beginEditingTitle(for: note.path)
+        await model.submitTitleEditing(for: note.path, draft: "Existing")
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertNil(model.editorFocusRequest)
+
+        model.editorMode = .source
+        model.beginEditingTitle(for: note.path)
+        await model.submitTitleEditing(for: note.path, draft: "Existing")
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(model.editorFocusRequest?.tabID, note.path)
+        XCTAssertEqual(model.editorFocusRequest?.placement, .start)
+    }
+
+    func testTitleSubmissionFocusesBeforeDefaultAutoSyncFinishes() async throws {
+        let root = try temporaryDirectory()
+        let syncStarted = expectation(description: "Rename sync started")
+        let syncFinished = expectation(description: "Rename sync finished")
+        let gate = TitleSyncGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.authenticationDisabled = { false }
+        dependencies.syncGit = { _, _, _ in
+            syncStarted.fulfill()
+            await gate.wait()
+            syncFinished.fulfill()
+            return GitStatus(state: .idle)
+        }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.newNote()
+        let original = try XCTUnwrap(model.activeTab)
+
+        await model.submitTitleEditing(for: original.id, draft: "Renamed")
+        await fulfillment(of: [syncStarted], timeout: 2)
+
+        let request = try XCTUnwrap(model.editorFocusRequest)
+        XCTAssertEqual(request.tabID, model.activeTabID)
+        XCTAssertEqual(request.placement, .start)
+        model.fulfillEditorFocusRequest(request.id)
+        model.updateContent(request.tabID, "Typed while syncing")
+        gate.release()
+        await fulfillment(of: [syncFinished], timeout: 2)
+        XCTAssertNil(model.editorFocusRequest)
+        XCTAssertEqual(model.activeTab?.content, "Typed while syncing")
+    }
+
+    func testOverlappingTitleSubmissionsFocusOnlyTheLatestRenamedTab() async throws {
+        let root = try temporaryDirectory()
+        let renameStarted = expectation(description: "Rename started")
+        let gate = TitleSyncGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.renameFile = { source, name, root in
+            renameStarted.fulfill()
+            await gate.wait()
+            return try FileService.rename(source, to: name, root: root)
+        }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.newNote()
+        let original = try XCTUnwrap(model.activeTab)
+
+        let first = Task { await model.submitTitleEditing(for: original.id, draft: "First") }
+        await fulfillment(of: [renameStarted], timeout: 2)
+        let second = Task { await model.submitTitleEditing(for: original.id, draft: "First") }
+        await drainMainQueue()
+        gate.release()
+        await first.value
+        await second.value
+
+        XCTAssertEqual(model.activeTab?.title, "First")
+        XCTAssertEqual(model.editorFocusRequest?.tabID, model.activeTabID)
+        XCTAssertEqual(model.editorFocusRequest?.placement, .start)
+        XCTAssertNil(model.titleEditingTabID)
+    }
+
+    func testTabSwitchDuringSlowTitleRenameDoesNotStealFocus() async throws {
+        let root = try temporaryDirectory()
+        let other = root.appendingPathComponent("Other.md")
+        try "other".write(to: other, atomically: true, encoding: .utf8)
+        let renameStarted = expectation(description: "Rename started")
+        let gate = TitleSyncGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.renameFile = { source, name, root in
+            renameStarted.fulfill()
+            await gate.wait()
+            return try FileService.rename(source, to: name, root: root)
+        }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.openTab(path: other.path)
+        await model.newNote()
+        let original = try XCTUnwrap(model.activeTab)
+
+        let submission = Task { await model.submitTitleEditing(for: original.id, draft: "Renamed") }
+        await fulfillment(of: [renameStarted], timeout: 2)
+        let navigation = Task { await model.setActiveTab(other.path) }
+        await Task.yield()
+        gate.release()
+        await submission.value
+        await navigation.value
+
+        XCTAssertEqual(model.activeTabID, other.path)
         XCTAssertNil(model.editorFocusRequest)
         XCTAssertNil(model.titleEditingTabID)
-        XCTAssertEqual(model.activeTab?.content, "")
-        XCTAssertEqual(editor.string, "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Renamed.md").path))
+    }
+
+    func testClosingTabDuringSlowTitleRenameClosesRenamedTab() async throws {
+        let root = try temporaryDirectory()
+        let renameStarted = expectation(description: "Rename started")
+        let gate = TitleSyncGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.renameFile = { source, name, root in
+            renameStarted.fulfill()
+            await gate.wait()
+            return try FileService.rename(source, to: name, root: root)
+        }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.newNote()
+        let original = try XCTUnwrap(model.activeTab)
+
+        let submission = Task { await model.submitTitleEditing(for: original.id, draft: "Renamed") }
+        await fulfillment(of: [renameStarted], timeout: 2)
+        let closing = Task { await model.closeTab(original.id) }
+        await Task.yield()
+        gate.release()
+        await submission.value
+        await closing.value
+
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertNil(model.activeTabID)
+        XCTAssertNil(model.editorFocusRequest)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Renamed.md").path))
+    }
+
+    func testCancelledTitleAndRetargetedStartRequestKeepDocumentFocus() async throws {
+        let root = try temporaryDirectory()
+        let model = modelWithVault(at: root)
+        await model.newNote()
+        let original = try XCTUnwrap(model.activeTab)
+
+        model.endEditingTitle(for: original.id)
+        let request = try XCTUnwrap(model.editorFocusRequest)
+        XCTAssertEqual(request.placement, .start)
+        await model.renameNote(path: original.path, newName: "Renamed", sync: false)
+
+        XCTAssertEqual(model.editorFocusRequest?.id, request.id)
+        XCTAssertEqual(model.editorFocusRequest?.tabID, model.activeTabID)
+        XCTAssertEqual(model.editorFocusRequest?.placement, .start)
+    }
+
+    func testInlineRenameReturnUsesSubmitHandlerWhileBlurStillCommits() throws {
+        var committed: [String] = []
+        var submitted: [String] = []
+        var draft = "Untitled"
+        let representable = InlineRenameTextField(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            font: .systemFont(ofSize: 13),
+            onSubmit: { submitted.append($0) },
+            onCommit: { committed.append($0) },
+            onCancel: { XCTFail("A nonempty name should not cancel") }
+        )
+        let returnCoordinator = InlineRenameTextField.Coordinator(parent: representable)
+        let returnField = InlineRenameNSTextField(string: "  Named  ")
+        returnCoordinator.textField = returnField
+
+        XCTAssertTrue(returnCoordinator.control(
+            returnField,
+            textView: NSTextView(),
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        ))
+        XCTAssertEqual(submitted, ["Named"])
+        XCTAssertEqual(committed, [])
+
+        let dismantleRepresentable = InlineRenameTextField(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            font: .systemFont(ofSize: 13),
+            commitOnDismantle: true,
+            onSubmit: { submitted.append($0) },
+            onCommit: { committed.append($0) },
+            onCancel: { XCTFail("A nonempty name should not cancel") }
+        )
+        let dismantleCoordinator = InlineRenameTextField.Coordinator(parent: dismantleRepresentable)
+        let dismantleField = InlineRenameNSTextField(string: "Left Behind")
+        dismantleCoordinator.textField = dismantleField
+        dismantleCoordinator.prepareForDismantle()
+
+        XCTAssertEqual(submitted, ["Named"])
+        XCTAssertEqual(committed, ["Left Behind"])
     }
 
     func testDailyNoteFocusWinsAfterCommandPaletteFieldDismisses() async throws {
@@ -1047,6 +1387,59 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: 0))
         XCTAssertNil(model.editorFocusRequest)
         XCTAssertFalse(model.commandOpen)
+    }
+
+    func testNewNoteTitleWinsFocusAfterCommandPaletteFieldDismisses() async throws {
+        let root = try temporaryDirectory()
+        let model = modelWithVault(at: root)
+        model.commandOpen = true
+        let hostingView = NSHostingView(
+            rootView: FocusContentionEditorView()
+                .environment(model)
+                .frame(width: 700, height: 400)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 700, height: 400)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let palette = try XCTUnwrap(firstDescendant(of: NSTextField.self, in: hostingView))
+        XCTAssertTrue(window.makeFirstResponder(palette))
+        let paletteEditor = try XCTUnwrap(palette.currentEditor() as? NSTextView)
+        XCTAssertTrue(window.firstResponder === paletteEditor)
+
+        let creation = Task { await model.newNote() }
+        model.commandOpen = false
+        await creation.value
+        let title = await waitForInlineRenameEditor(in: hostingView)
+        let titleEditor = try XCTUnwrap(title?.1)
+        XCTAssertTrue(window.firstResponder === titleEditor)
+        XCTAssertEqual(titleEditor.selectedRange(), NSRange(location: 0, length: "Untitled".utf16.count))
+        XCTAssertEqual(model.titleEditingTabID, model.activeTabID)
+    }
+
+    func testSourceEditorFocusRequestCanPlaceCaretAtDocumentStart() async {
+        let requestID = UUID()
+        var fulfilled: [UUID] = []
+        let coordinator = SourceEditor.Coordinator(onChange: { _ in }, focus: { _ in true })
+        let editor = SourceTextView()
+        editor.string = "Existing body"
+        editor.setSelectedRange(NSRange(location: 4, length: 3))
+        coordinator.textView = editor
+        coordinator.onFocusRequestFulfilled = { fulfilled.append($0) }
+
+        coordinator.updateFocusRequest(requestID, placement: .start)
+        await drainMainQueue()
+
+        XCTAssertEqual(fulfilled, [requestID])
+        XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: 0))
     }
 
     func testSourceEditorFocusRequestIsSingleFlightAndPlacesCaretAtEnd() async {
@@ -1676,6 +2069,23 @@ final class AppModelTests: XCTestCase {
             await Task.yield()
         } while clock.now < deadline
         return nil
+    }
+}
+
+@MainActor
+private final class TitleSyncGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }
 
