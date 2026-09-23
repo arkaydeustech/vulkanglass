@@ -246,6 +246,31 @@ class PipelineTests(unittest.TestCase):
         for check in (github, notary, packages, sparkle):
             check.assert_called_once()
 
+    def test_check_reports_every_prerequisite_instead_of_stopping(self) -> None:
+        not_main = release.ReleaseError("HEAD is not the main branch")
+        no_key = release.ReleaseError("SPARKLE_PUBLIC_ED_KEY is not set")
+        printed = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            release, "DEVELOPER_DIR", Path(temporary)
+        ), mock.patch.object(release, "run"), mock.patch.object(
+            release, "read_versions", return_value=("1.2.3", "v1.2.3")
+        ), mock.patch.object(release, "check_git_state", side_effect=not_main), mock.patch.object(
+            release, "check_github"
+        ), mock.patch.object(release, "signing_identity", return_value="identity"), mock.patch.object(
+            release, "check_notary_profile"
+        ) as notary, mock.patch.object(release, "resolve_packages"), mock.patch.object(
+            release, "check_sparkle_key", side_effect=no_key
+        ), mock.patch.object(release, "latest_published_build", return_value=None), mock.patch.object(
+            release, "git", return_value="42"
+        ), contextlib.redirect_stdout(printed):
+            with self.assertRaisesRegex(release.ReleaseError, "2 of 8 prerequisites"):
+                release.check()
+        notary.assert_called_once()
+        report = printed.getvalue()
+        self.assertIn("✓ Notarization credentials", report)
+        self.assertIn("✗ Sparkle signing key", report)
+        self.assertIn("HEAD is not the main branch", report)
+
     def test_archive_export_uses_developer_id_options(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(release, "WORK", Path(temporary)):
             prepared = sample_release()

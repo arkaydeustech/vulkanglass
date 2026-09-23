@@ -718,7 +718,47 @@ def setup() -> None:
 
 
 def check() -> None:
-    prepare(argparse.Namespace(), publishing=True)
+    """Report every publishing prerequisite, rather than stopping at the first."""
+    if not DEVELOPER_DIR.exists():
+        raise ReleaseError("Xcode.app not found at /Applications/Xcode.app")
+    run([sys.executable, str(ROOT / "scripts" / "generate_xcodeproj.py")])
+    results: list[tuple[str, str | None]] = []
+
+    def verify(description: str, action) -> bool:
+        try:
+            action()
+        except ReleaseError as error:
+            results.append((description, str(error)))
+            return False
+        results.append((description, None))
+        return True
+
+    versions: list[str] = []
+    if verify("Version sources agree", lambda: versions.extend(read_versions())):
+        verify(
+            "Clean main, identical to origin/main, with an unused tag",
+            lambda: check_git_state(*versions, publishing=True),
+        )
+    verify("GitHub push access", check_github)
+    verify("Developer ID certificate", signing_identity)
+    verify("Notarization credentials", check_notary_profile)
+    if verify("Sparkle tools", resolve_packages):
+        verify("Sparkle signing key", check_sparkle_key)
+    verify(
+        "Build number is newer than the published release",
+        lambda: choose_build_number(
+            int(git("rev-list", "--count", "HEAD")), latest_published_build()
+        ),
+    )
+
+    step("Release prerequisites")
+    for description, problem in results:
+        print(f"  {'✗' if problem else '✓'} {description}")
+        if problem:
+            print(f"      {problem}")
+    failed = sum(problem is not None for _, problem in results)
+    if failed:
+        raise ReleaseError(f"{failed} of {len(results)} prerequisites are not met")
     print("All release prerequisites are met.")
 
 
