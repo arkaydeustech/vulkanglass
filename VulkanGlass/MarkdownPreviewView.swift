@@ -738,6 +738,7 @@ enum ReadingAttributedDocument {
                 }(),
             ]))
         }
+        applyLineSpacing(to: result)
         return result
     }
 
@@ -883,6 +884,20 @@ enum ReadingAttributedDocument {
                 as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
             paragraph.headIndent += amount
             paragraph.firstLineHeadIndent += amount
+            updates.append((range, paragraph))
+        }
+        for (range, paragraph) in updates {
+            attributed.addAttribute(.paragraphStyle, value: paragraph, range: range)
+        }
+    }
+
+    private static func applyLineSpacing(to attributed: NSMutableAttributedString) {
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        var updates: [(NSRange, NSMutableParagraphStyle)] = []
+        attributed.enumerateAttribute(.paragraphStyle, in: fullRange) { value, range, _ in
+            let paragraph = (value as? NSParagraphStyle)?.mutableCopy()
+                as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+            paragraph.lineSpacing = VGTheme.documentLineSpacing
             updates.append((range, paragraph))
         }
         for (range, paragraph) in updates {

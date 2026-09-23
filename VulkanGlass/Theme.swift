@@ -58,6 +58,14 @@ enum VGTheme {
     static let readingColumnMaxWidth: CGFloat = 780
     static let documentHorizontalPadding: CGFloat = 56
     static let readingBottomPadding: CGFloat = 96
+    /// Extra leading between lines of note text in both the editor and reading view.
+    static let documentLineSpacing: CGFloat = 3
+
+    static var documentParagraphStyle: NSParagraphStyle {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = documentLineSpacing
+        return paragraph
+    }
     static let collapsedLeftTitleBarInset = max(0, trafficLightsInset - ribbonWidth)
 
     /// Keeps prose readable in a wide pane without overflowing a narrow one.

@@ -194,7 +194,7 @@ enum LivePreview {
                 .obliqueness: 0,
                 .baselineOffset: 0,
                 .strikethroughStyle: 0,
-                .paragraphStyle: NSParagraphStyle.default
+                .paragraphStyle: VGTheme.documentParagraphStyle
             ],
             range: all
         )
@@ -640,11 +640,13 @@ enum LivePreview {
             if typing[.font] == nil {
                 typing[.font] = NSFont.systemFont(ofSize: 16)
             }
+            typing[.paragraphStyle] = VGTheme.documentParagraphStyle
             return typing
         }
         return [
             .font: NSFont.systemFont(ofSize: 16),
-            .foregroundColor: textColor(dark: dark)
+            .foregroundColor: textColor(dark: dark),
+            .paragraphStyle: VGTheme.documentParagraphStyle
         ]
     }
 

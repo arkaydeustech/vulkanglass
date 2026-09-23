@@ -3039,6 +3039,156 @@ final class EditorLifecycleTests: XCTestCase {
         withExtendedLifetime((window, hostingView)) {}
     }
 
+    func testEditorAndReadingTextUseDocumentLineSpacing() {
+        let storage = NSTextStorage(string: "Intro\n- one\n1. two\nPlain")
+        _ = LivePreview.apply(
+            to: storage,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: false
+        )
+        for location in [0, 6, 12, 19] {
+            let style = storage.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle
+            XCTAssertEqual(style?.lineSpacing, VGTheme.documentLineSpacing, "Editor offset \(location)")
+        }
+
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [.lines(["Intro", "- one", "1. two"]), .lines(["Plain"])],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        attributed.enumerateAttribute(
+            .paragraphStyle,
+            in: NSRange(location: 0, length: attributed.length)
+        ) { value, range, _ in
+            XCTAssertEqual(
+                (value as? NSParagraphStyle)?.lineSpacing,
+                VGTheme.documentLineSpacing,
+                "Reading range \(range)"
+            )
+        }
+    }
+
+    func testReadingLineSpacingPreservesStructuredParagraphStyles() throws {
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [
+                .table([["Left cell", "Right cell"]], [.left, .right], hasHeader: false),
+                .code(language: "swift", code: "let value = 1"),
+                .definitionList([.init(term: "Term", definitions: ["Definition body"])]),
+            ],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        let text = attributed.string as NSString
+
+        func style(at needle: String) throws -> NSParagraphStyle {
+            let match = text.range(of: needle)
+            let location = try XCTUnwrap(
+                match.location == NSNotFound ? nil : match.location,
+                "Missing \(needle)"
+            )
+            return try XCTUnwrap(
+                attributed.attribute(.paragraphStyle, at: location, effectiveRange: nil)
+                    as? NSParagraphStyle
+            )
+        }
+
+        let left = try style(at: "Left cell")
+        let right = try style(at: "Right cell")
+        for (paragraph, column, alignment) in [
+            (left, 0, NSTextAlignment.left),
+            (right, 1, NSTextAlignment.right),
+        ] {
+            XCTAssertEqual(paragraph.lineSpacing, VGTheme.documentLineSpacing)
+            let block = try XCTUnwrap(paragraph.textBlocks.first as? NSTextTableBlock)
+            XCTAssertEqual(block.startingRow, 0)
+            XCTAssertEqual(block.startingColumn, column)
+            XCTAssertEqual(paragraph.alignment, alignment)
+        }
+        XCTAssertTrue(
+            (left.textBlocks.first as? NSTextTableBlock)?.table ===
+                (right.textBlocks.first as? NSTextTableBlock)?.table
+        )
+
+        let code = try style(at: "let value = 1")
+        XCTAssertEqual(code.lineSpacing, VGTheme.documentLineSpacing)
+        XCTAssertEqual(code.paragraphSpacing, 4)
+
+        let definition = try style(at: "Definition body")
+        XCTAssertEqual(definition.lineSpacing, VGTheme.documentLineSpacing)
+        XCTAssertEqual(definition.headIndent, 20)
+        XCTAssertEqual(definition.firstLineHeadIndent, 20)
+
+        let bottom = try XCTUnwrap(
+            attributed.attribute(.paragraphStyle, at: attributed.length - 1, effectiveRange: nil)
+                as? NSParagraphStyle
+        )
+        XCTAssertEqual(bottom.lineSpacing, VGTheme.documentLineSpacing)
+        XCTAssertEqual(bottom.paragraphSpacing, VGTheme.readingBottomPadding)
+    }
+
+    func testLivePreviewFixedHeightParagraphsSurviveApply() throws {
+        let tableText = "| A | B |\n| --- | --- |\n| 1 | 2 |\n\nend"
+        let tableStorage = NSTextStorage(string: tableText)
+        let tableEnd = (tableText as NSString).length
+        let tables = LivePreview.apply(
+            to: tableStorage,
+            caret: tableEnd,
+            selection: NSRange(location: tableEnd, length: 0),
+            dark: false
+        ).tables
+        let table = try XCTUnwrap(tables.first)
+        XCTAssertFalse(table.separatorVisible)
+        let separator = try XCTUnwrap(
+            tableStorage.attribute(
+                .paragraphStyle, at: table.separatorRange.location, effectiveRange: nil
+            ) as? NSParagraphStyle
+        )
+        XCTAssertEqual(separator.minimumLineHeight, 0.01)
+        XCTAssertEqual(separator.maximumLineHeight, 0.01)
+        for row in table.rows {
+            let style = try XCTUnwrap(
+                tableStorage.attribute(.paragraphStyle, at: row.range.location, effectiveRange: nil)
+                    as? NSParagraphStyle
+            )
+            XCTAssertEqual(style.minimumLineHeight, 38)
+            XCTAssertEqual(style.maximumLineHeight, 38)
+        }
+
+        for (text, height) in [
+            ("```swift\nlet value = 1\n```\nend", CGFloat(18)),
+            ("> [!NOTE]\n> detail\nend", CGFloat(22)),
+        ] {
+            let storage = NSTextStorage(string: text)
+            let end = (text as NSString).length
+            _ = LivePreview.apply(
+                to: storage,
+                caret: end,
+                selection: NSRange(location: end, length: 0),
+                dark: false
+            )
+            let style = try XCTUnwrap(
+                storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+            )
+            XCTAssertEqual(style.minimumLineHeight, height)
+            XCTAssertEqual(style.maximumLineHeight, height)
+        }
+    }
+
+    func testLivePreviewTypingAttributesUseDocumentParagraphStyle() throws {
+        let plain = LivePreview.typingAttributes(at: 2, in: "Plain text", dark: false)
+        let bold = LivePreview.typingAttributes(
+            at: 3, tokens: LivePreview.tokens(in: "**bold**"), dark: false
+        )
+        for attributes in [plain, bold] {
+            let paragraph = try XCTUnwrap(attributes[.paragraphStyle] as? NSParagraphStyle)
+            XCTAssertEqual(paragraph, VGTheme.documentParagraphStyle)
+            XCTAssertEqual(paragraph.lineSpacing, VGTheme.documentLineSpacing)
+        }
+    }
+
     func testReadingAttributedDocumentIncludesEveryStructuredBlockInOneString() {
         let richTable = GFM.HTMLTable(
             rows: [["Wide heading", ""], ["Left", "Right"]],
