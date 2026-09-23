@@ -65,12 +65,13 @@ struct WelcomeView: View {
 
     private var rightColumn: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("RECENT VAULTS")
+            Text("RECENT")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(VGTheme.textFaint(dark: model.dark))
-            if model.settings.recentVaults.isEmpty {
+            let recents = model.settings.recentItems
+            if recents.isEmpty {
                 Spacer()
-                Text("No recent GitHub vaults yet.")
+                Text("No recent vaults or files yet.")
                     .font(.caption)
                     .foregroundStyle(VGTheme.textFaint(dark: model.dark))
                     .frame(maxWidth: .infinity)
@@ -78,24 +79,8 @@ struct WelcomeView: View {
             } else {
                 ScrollView {
                     VStack(spacing: 2) {
-                        ForEach(model.settings.recentVaults) { vault in
-                            Button {
-                                Task { await model.openVault(path: vault.path) }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(vault.name).foregroundStyle(VGTheme.textNormal(dark: model.dark))
-                                    Text(vault.remote ?? vault.path)
-                                        .font(.caption2)
-                                        .foregroundStyle(VGTheme.textFaint(dark: model.dark))
-                                        .lineLimit(1)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 8)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .background(VGTheme.hover(dark: model.dark).opacity(0.001))
+                        ForEach(recents) { item in
+                            recentRow(item)
                         }
                     }
                 }
@@ -104,6 +89,37 @@ struct WelcomeView: View {
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(VGTheme.backgroundPrimary(dark: model.dark))
+    }
+
+    private func recentRow(_ item: RecentItem) -> some View {
+        Button {
+            Task { await model.openRecent(item) }
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: item.symbolName)
+                    .foregroundStyle(VGTheme.textFaint(dark: model.dark))
+                    .frame(width: 16)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name).foregroundStyle(VGTheme.textNormal(dark: model.dark))
+                    Text(item.detail)
+                        .font(.caption2)
+                        .foregroundStyle(VGTheme.textFaint(dark: model.dark))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(VGTheme.hover(dark: model.dark).opacity(0.001))
+        .help(item.path)
+        .contextMenu {
+            Button("Remove from Recents") { model.removeRecent(item) }
+        }
     }
 
     private func action(_ symbol: String, _ title: String, _ subtitle: String, run: @escaping () -> Void) -> some View {
@@ -138,5 +154,22 @@ struct WelcomeView: View {
             return "GitHub CLI detected — run gh auth login, or add a token"
         }
         return "Personal access token for clone, create, and sync"
+    }
+}
+
+extension RecentItem {
+    var symbolName: String {
+        switch self {
+        case .vault: "folder"
+        case .file: "doc.text"
+        }
+    }
+
+    /// The remote for a GitHub vault, otherwise where the vault or file lives.
+    var detail: String {
+        switch self {
+        case .vault(let vault): vault.remote ?? (vault.path as NSString).abbreviatingWithTildeInPath
+        case .file(let file): (file.path as NSString).abbreviatingWithTildeInPath
+        }
     }
 }

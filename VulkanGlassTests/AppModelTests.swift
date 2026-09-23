@@ -2264,6 +2264,158 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testOpeningStandaloneFileAddsItToRecents() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Loose Note.md")
+        try "loose".write(to: file, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.recentVaults = [
+            RecentVault(name: "Notes", path: "/tmp/notes", remote: nil, lastOpened: 1)
+        ]
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+
+        await model.openStandalone(url: file)
+
+        let canonical = FileService.canonicalURL(file).path
+        XCTAssertEqual(model.settings.recentFiles.map(\.path), [canonical])
+        XCTAssertEqual(model.settings.recentFiles.first?.name, "Loose Note")
+        XCTAssertEqual(model.settings.recentItems.map(\.id), ["file:\(canonical)", "vault:/tmp/notes"])
+    }
+
+    func testReopeningStandaloneFileMovesItToTheTopWithoutDuplicates() async throws {
+        let root = try temporaryDirectory()
+        let first = root.appendingPathComponent("First.md")
+        let second = root.appendingPathComponent("Second.md")
+        try "one".write(to: first, atomically: true, encoding: .utf8)
+        try "two".write(to: second, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+
+        await model.openExternalFiles([first])
+        await model.openExternalFiles([second])
+        await model.openExternalFiles([first])
+
+        XCTAssertEqual(model.settings.recentFiles.map(\.name), ["First", "Second"])
+    }
+
+    func testOpeningVaultNoteDoesNotAddItToRecentFiles() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Idea.md")
+        try "vault note".write(to: file, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+
+        await model.openExternalFiles([file])
+
+        XCTAssertFalse(model.tabs.isEmpty)
+        XCTAssertTrue(model.settings.recentFiles.isEmpty)
+    }
+
+    func testNewStandaloneNoteIsAddedToRecents() async throws {
+        let root = try temporaryDirectory()
+        let url = root.appendingPathComponent("Fresh.md")
+        var dependencies = AppModelDependencies.live
+        dependencies.chooseNewStandaloneNoteURL = { url }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+
+        await model.newNote()
+
+        XCTAssertEqual(model.settings.recentFiles.map(\.path), [FileService.canonicalURL(url).path])
+    }
+
+    func testOpenRecentFileOpensItStandalone() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Recent.md")
+        try "# Recent".write(to: file, atomically: true, encoding: .utf8)
+        let canonical = FileService.canonicalURL(file).path
+        let recent = RecentFile(name: "Recent", path: canonical, lastOpened: 0)
+        var settings = AppSettings.default()
+        settings.recentFiles = [recent]
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+
+        await model.openRecent(.file(recent))
+
+        XCTAssertNil(model.vault)
+        XCTAssertTrue(model.inWorkspace)
+        XCTAssertEqual(model.activeTab?.content, "# Recent")
+        XCTAssertEqual(model.activeTab?.isStandalone, true)
+        XCTAssertGreaterThan(model.settings.recentFiles.first?.lastOpened ?? 0, 0)
+    }
+
+    func testOpenRecentVaultOpensTheVault() async throws {
+        let root = try temporaryDirectory()
+        try "# Welcome".write(to: root.appendingPathComponent("Welcome.md"), atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+
+        await model.openRecent(.vault(RecentVault(name: "vault", path: root.path, remote: nil, lastOpened: 0)))
+
+        XCTAssertEqual(model.vault?.path, root.path)
+        XCTAssertEqual(model.settings.recentVaults.map(\.path), [root.path])
+    }
+
+    func testOpeningMissingRecentFileStaysOnWelcomeAndForgetsIt() async throws {
+        let missing = try temporaryDirectory().appendingPathComponent("Gone.md")
+        let gone = RecentFile(name: "Gone", path: missing.path, lastOpened: 2)
+        let kept = RecentFile(name: "Kept", path: "/tmp/kept.md", lastOpened: 1)
+        var settings = AppSettings.default()
+        settings.recentFiles = [gone, kept]
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+
+        await model.openRecent(.file(gone))
+
+        XCTAssertFalse(model.inWorkspace)
+        XCTAssertEqual(model.errorMessage, FileServiceError.missingFile("Gone").localizedDescription)
+        XCTAssertEqual(model.settings.recentFiles, [kept])
+    }
+
+    func testRenamingStandaloneFileRetargetsItsRecentEntry() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Draft.md")
+        try "draft".write(to: file, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        await model.openStandalone(url: file)
+        let path = try XCTUnwrap(model.activeTab?.path)
+
+        let renamed = await model.renameNote(path: path, newName: "Final")
+
+        XCTAssertTrue(renamed)
+        let dest = FileService.canonicalURL(root.appendingPathComponent("Final.md")).path
+        XCTAssertEqual(model.settings.recentFiles.map(\.path), [dest])
+        XCTAssertEqual(model.settings.recentFiles.first?.name, "Final")
+    }
+
+    func testRemoveAndClearRecents() {
+        let vault = RecentVault(name: "Notes", path: "/tmp/notes", remote: nil, lastOpened: 1)
+        let file = RecentFile(name: "Loose", path: "/tmp/loose.md", lastOpened: 2)
+        var settings = AppSettings.default()
+        settings.recentVaults = [vault]
+        settings.recentFiles = [file]
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+
+        model.removeRecent(.file(file))
+        XCTAssertTrue(model.settings.recentFiles.isEmpty)
+        XCTAssertEqual(model.settings.recentVaults, [vault])
+
+        model.settings.recentFiles = [file]
+        model.clearRecents()
+        XCTAssertTrue(model.settings.recentItems.isEmpty)
+    }
+
+    func testRecentItemsInterleaveVaultsAndFilesByLastOpened() {
+        var settings = AppSettings.default()
+        settings.recentVaults = [
+            RecentVault(name: "Newest vault", path: "/v/new", remote: nil, lastOpened: 30),
+            RecentVault(name: "Old vault", path: "/v/old", remote: nil, lastOpened: 10)
+        ]
+        settings.recentFiles = [
+            RecentFile(name: "Middle file", path: "/f/mid.md", lastOpened: 20),
+            RecentFile(name: "Oldest file", path: "/f/old.md", lastOpened: 5)
+        ]
+
+        XCTAssertEqual(
+            settings.recentItems.map(\.name),
+            ["Newest vault", "Middle file", "Old vault", "Oldest file"]
+        )
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

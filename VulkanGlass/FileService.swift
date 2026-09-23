@@ -6,6 +6,7 @@ enum FileServiceError: LocalizedError, Equatable {
     case invalidRelativePath(String)
     case outsideRoot(String)
     case missingVault(String)
+    case missingFile(String)
     case nameTaken(String)
     case symbolicLinkRenameUnsupported(String)
 
@@ -19,6 +20,8 @@ enum FileServiceError: LocalizedError, Equatable {
             return "The requested path is outside the vault: \(path)"
         case .missingVault(let name):
             return "The vault “\(name)” doesn’t exist."
+        case .missingFile(let name):
+            return "The file “\(name)” doesn’t exist."
         case .nameTaken(let name):
             return "A file named \(name) already exists."
         case .symbolicLinkRenameUnsupported(let path):
