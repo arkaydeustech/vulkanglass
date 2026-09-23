@@ -35,9 +35,9 @@ stay in that Mac's login Keychain; no release secrets are stored in GitHub.
 5. Creates, signs, notarizes, and staples `VulkanGlass.dmg` for the website.
 6. Zips the app for Sparkle and runs Sparkle's `generate_appcast`, which signs the
    zip with the Keychain key and writes `appcast.xml` with embedded release notes.
-7. Tags the commit, pushes the tag, uploads the disk image, zip, and appcast to a
-   draft GitHub release, and publishes it as the latest release once all assets
-   are present.
+7. Rechecks the commit and clean tree, tags the exact commit that was built,
+   pushes the tag, uploads the disk image, zip, and appcast to a draft GitHub
+   release, and publishes it as the latest release once all assets are present.
 
 Only builds made this way carry the update feed and key. Development builds,
 tests, and `mise run install` builds leave `SPARKLE_FEED_URL` and
@@ -76,6 +76,12 @@ release's assets.
    Losing it means installed apps can no longer be updated; changing it breaks
    updates for every installed copy.
 
+The Quick Look extension uses only App Sandbox and user-selected file access
+entitlements. [Apple documents App Sandbox entitlements as unrestricted on
+macOS](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles),
+so Developer ID provisioning profiles are not required for either target. The
+release script verifies the exported extension's signature and entitlements.
+
 `mise run release:check` confirms everything is in place without building.
 
 The first update-capable release must already contain the feed URL and public
@@ -103,9 +109,13 @@ To rehearse without publishing, run `mise run release:build`. It produces the
 same files in `output/release/v<version>/` and tags or uploads nothing. It also
 runs from an uncommitted or non-`main` checkout, with a warning.
 
-If publishing fails after the tag was pushed, fix the problem and delete the tag
-before retrying: `git push origin :refs/tags/v<version>` and
-`git tag -d v<version>`. Delete any draft release with `gh release delete`.
+If publishing fails while the GitHub release is still a draft, fix the problem,
+delete the draft release with `gh release delete`, then remove the pushed tag
+with `git push origin :refs/tags/v<version>` and `git tag -d v<version>` before
+retrying. If the release is already public, keep its tag and assets; inspect the
+release and appcast before taking any recovery action. A temporary failure to
+check the appcast after publication prints a warning and leaves the command
+successful.
 
 ## Build numbers
 
@@ -117,8 +127,9 @@ builds keep build number 1, so they are always older than any release.
 
 ## Verification
 
-- `mise run test:release` covers the release script's version, build number,
-  appcast, signing identity, and release note logic.
+- `mise run test:release` covers the release script's validation and mocked
+  process flow. A full signed archive/export, notarization, and GitHub publish
+  still require the release maintainer's credentials and are only run on request.
 - `python3 scripts/build.py` builds and launches with authentication and updates
   disabled. Debug builds only enable Sparkle with an explicit `--enable-updates`
   argument, and have no feed unless one is supplied as a build setting; XCTest

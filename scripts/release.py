@@ -42,6 +42,7 @@ NOTARY_PROFILE = "vulkanglass-notary"
 BUNDLE_ID = "app.vulkanglass.desktop"
 APP_NAME = "VulkanGlass.app"
 QUICK_LOOK_NAME = "VulkanGlassQuickLook.appex"
+QUICK_LOOK_BUNDLE_ID = f"{BUNDLE_ID}.quicklook"
 DMG_NAME = "VulkanGlass.dmg"
 VOLUME_NAME = "Vulkan Glass"
 
@@ -67,6 +68,7 @@ class Release:
     build_number: int
     identity: str
     notes: str
+    source_sha: str
 
     @property
     def directory(self) -> Path:
@@ -281,26 +283,28 @@ def check_github() -> None:
         raise ReleaseError(f"The GitHub CLI cannot push to {REPOSITORY}. Run `gh auth login`.")
 
 
-def check_git_state(version: str, tag: str, publishing: bool) -> None:
+def check_git_state(version: str, tag: str, publishing: bool) -> str:
     problems = []
+    head = git("rev-parse", "HEAD")
     if git("status", "--porcelain"):
         problems.append("the working tree has uncommitted changes")
     if git("rev-parse", "--abbrev-ref", "HEAD") != "main":
         problems.append("HEAD is not the main branch")
     else:
         git("fetch", "--quiet", "origin", "main")
-        if git("rev-parse", "HEAD") != git("rev-parse", "origin/main"):
+        if head != git("rev-parse", "origin/main"):
             problems.append("main is not identical to origin/main")
     if git("tag", "--list", tag) or git("ls-remote", "--tags", "origin", f"refs/tags/{tag}"):
         problems.append(
             f"tag {tag} already exists; bump the version (docs/version-update.md)"
         )
     if not problems:
-        return
+        return head
     message = "; ".join(problems)
     if publishing:
         raise ReleaseError(f"Cannot publish {version}: {message}.")
     print(f"warning: this build could not be published as-is: {message}.")
+    return head
 
 
 def read_versions() -> tuple[str, str]:
@@ -322,11 +326,35 @@ def latest_published_build() -> int | None:
             numbers = published_build_numbers(response.read().decode())
     except urllib.error.HTTPError as error:
         if error.code == 404:
+            if published_release_exists():
+                raise ReleaseError(
+                    "The published appcast is missing although a GitHub release exists; "
+                    "cannot verify the previous build number."
+                ) from error
             return None
         raise ReleaseError(f"Could not read the published appcast: {error}") from error
     except urllib.error.URLError as error:
         raise ReleaseError(f"Could not read the published appcast: {error}") from error
-    return max(numbers, default=None)
+    except (ET.ParseError, UnicodeError) as error:
+        raise ReleaseError(f"The published appcast is invalid: {error}") from error
+    if not numbers:
+        raise ReleaseError("The published appcast has no valid build number")
+    return max(numbers)
+
+
+def published_release_exists() -> bool:
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=1",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "VulkanGlass-release"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            releases = json.load(response)
+    except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as error:
+        raise ReleaseError(f"Could not check prior GitHub releases: {error}") from error
+    if not isinstance(releases, list):
+        raise ReleaseError("Could not check prior GitHub releases: unexpected API response")
+    return any(not item.get("draft", False) for item in releases if isinstance(item, dict))
 
 
 def previous_release_subjects() -> list[str] | None:
@@ -346,7 +374,7 @@ def prepare(args: argparse.Namespace, publishing: bool) -> Release:
     step("Checking release prerequisites")
     run([sys.executable, str(ROOT / "scripts" / "generate_xcodeproj.py")])
     version, tag = read_versions()
-    check_git_state(version, tag, publishing)
+    source_sha = check_git_state(version, tag, publishing)
     if publishing:
         check_github()
     identity = signing_identity()
@@ -366,7 +394,7 @@ def prepare(args: argparse.Namespace, publishing: bool) -> Release:
         else release_notes(version, previous_release_subjects())
     )
     print(f"Release {version} (build {build_number}) is ready to build.")
-    return Release(version, tag, build_number, identity, notes)
+    return Release(version, tag, build_number, identity, notes, source_sha)
 
 
 # Build steps
@@ -445,8 +473,25 @@ def verify_app(app: Path, release: Release) -> None:
     for key in ("CFBundleShortVersionString", "CFBundleVersion"):
         if extension_info.get(key) != info[key]:
             raise ReleaseError(f"The Quick Look extension's {key} does not match the app")
+    if extension_info.get("CFBundleIdentifier") != QUICK_LOOK_BUNDLE_ID:
+        raise ReleaseError("The Quick Look extension has an unexpected bundle identifier")
 
     run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)])
+    extension_bundle = extension.parent.parent
+    run(["codesign", "--verify", "--strict", "--verbose=2", str(extension_bundle)])
+    entitlements_output = output(
+        ["codesign", "--display", "--entitlements", "-", "--xml", str(extension_bundle)]
+    ).stdout
+    try:
+        entitlements = plistlib.loads(entitlements_output.encode())
+    except (ValueError, TypeError) as error:
+        raise ReleaseError("The Quick Look extension's signed entitlements are unreadable") from error
+    for entitlement in (
+        "com.apple.security.app-sandbox",
+        "com.apple.security.files.user-selected.read-only",
+    ):
+        if entitlements.get(entitlement) is not True:
+            raise ReleaseError(f"The Quick Look extension signature lacks {entitlement}")
     details = output(["codesign", "--display", "--verbose=4", str(app)]).stderr
     for required, meaning in (
         (f"TeamIdentifier={TEAM_ID}", "signed by the release team"),
@@ -589,7 +634,9 @@ def build(release: Release) -> list[Path]:
 
 def publish(release: Release, assets: list[Path]) -> None:
     step(f"Publishing {release.tag}")
-    run(["git", "tag", "--annotate", release.tag, "--message", f"Vulkan Glass {release.version}"])
+    if check_git_state(release.version, release.tag, publishing=True) != release.source_sha:
+        raise ReleaseError("HEAD moved since the release was built; refusing to tag a different commit")
+    run(["git", "tag", "--annotate", release.tag, "--message", f"Vulkan Glass {release.version}", release.source_sha])
     run(["git", "push", "origin", f"refs/tags/{release.tag}"])
     # Upload into a draft first so the latest/download links never see a
     # release with missing assets.
@@ -620,12 +667,15 @@ def publish(release: Release, assets: list[Path]) -> None:
         )
     run(["gh", "release", "edit", release.tag, "--repo", REPOSITORY, "--draft=false", "--latest"])
 
-    published = latest_published_build()
-    if published != release.build_number:
-        print(
-            f"warning: {FEED_URL} still reports build {published}. "
-            "GitHub can take a minute to update the latest release."
-        )
+    try:
+        published = latest_published_build()
+        if published != release.build_number:
+            print(
+                f"warning: {FEED_URL} still reports build {published}. "
+                "GitHub can take a minute to update the latest release."
+            )
+    except ReleaseError as error:
+        print(f"warning: release is already public; could not verify the appcast: {error}")
     print(f"\nPublished https://github.com/{REPOSITORY}/releases/tag/{release.tag}")
 
 
@@ -713,6 +763,8 @@ def main() -> None:
         sys.exit(f"release: {error}")
     except subprocess.CalledProcessError as error:
         sys.exit(f"release: command failed with exit status {error.returncode}")
+    except OSError as error:
+        sys.exit(f"release: {error}")
 
 
 if __name__ == "__main__":
