@@ -13,7 +13,12 @@ struct CommandPaletteView: View {
             ("preview", "Toggle reading view", "⌘E", {
                 model.editorMode = model.editorMode == .source ? .preview : .source
             }),
-            ("sync", "Sync vault to GitHub", "⌘S", { Task { await model.saveActive(sync: true) } }),
+            (
+                "sync",
+                model.activeTab?.savesAutomatically == false ? "Save file" : "Sync vault to GitHub",
+                "⌘S",
+                { Task { await model.saveActive(sync: true) } }
+            ),
             ("file", "Open Markdown file (not in a vault)", "", { model.openStandaloneFile() }),
             ("clone", "Clone GitHub vault", "", { model.cloneOpen = true }),
             ("create", "Create GitHub vault", "", { model.createOpen = true }),

@@ -149,6 +149,18 @@ struct NoteTab: Identifiable, Equatable, Sendable {
     var editorMode: EditorMode = .preview
 
     var dirty: Bool { content != originalContent }
+
+    /// Vault notes live in a GitHub repository, so edits are written (and synced) as the user
+    /// types. Standalone Markdown files outside any vault are only written when the user saves
+    /// them with ⌘S or File ▸ Save.
+    var savesAutomatically: Bool { !isStandalone }
+}
+
+/// The answer to "save changes before closing?" for files that are only saved on request.
+enum UnsavedChangesDecision: Sendable {
+    case save
+    case discard
+    case cancel
 }
 
 struct EditorFocusRequest: Equatable, Sendable {
