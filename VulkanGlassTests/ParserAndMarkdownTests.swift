@@ -3808,6 +3808,71 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertEqual(VGTheme.documentHorizontalInset(paneWidth: 0), padding)
     }
 
+    func testDocumentScrollViewKeepsTheColumnCentredAcrossResizes() throws {
+        let scroll = DocumentScrollView(frame: NSRect(x: 0, y: 0, width: 1_000, height: 400))
+        scroll.hasVerticalScroller = true
+        let textView = SourceTextView(frame: NSRect(origin: .zero, size: scroll.contentSize))
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.string = "Body"
+
+        // A text view installed into an already sized scroll view takes the centred inset.
+        scroll.documentView = textView
+        XCTAssertEqual(
+            textView.textContainerInset.width,
+            VGTheme.documentHorizontalInset(paneWidth: 1_000),
+            accuracy: 0.5
+        )
+
+        for paneWidth: CGFloat in [600, 1_200, 780, 900, 600] {
+            scroll.setFrameSize(NSSize(width: paneWidth, height: 400))
+            scroll.layoutSubtreeIfNeeded()
+            try assertCentredReadingColumn(of: textView, paneWidth: paneWidth)
+        }
+    }
+
+    func testReadingColumnFollowsThePaneWhenItIsResized() async throws {
+        let reported = expectation(description: "Preview reports its first layout")
+        var fulfilled = false
+        let hostingView = NSHostingView(rootView: MarkdownPreviewView(
+            text: "Body",
+            noteTitles: [],
+            onLayout: { _ in
+                if !fulfilled {
+                    fulfilled = true
+                    reported.fulfill()
+                }
+            },
+            onWiki: { _ in }
+        ))
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+        await fulfillment(of: [reported], timeout: 2)
+
+        let readingView = try XCTUnwrap(firstSubview(of: ReadingNSTextView.self, in: hostingView))
+        for paneWidth: CGFloat in [600, 1_200, 900, 600] {
+            hostingView.setFrameSize(NSSize(width: paneWidth, height: 400))
+            hostingView.layoutSubtreeIfNeeded()
+            // Resizing reuses the same text view rather than rebuilding it.
+            XCTAssertIdentical(
+                firstSubview(of: ReadingNSTextView.self, in: hostingView),
+                readingView,
+                "Pane width: \(paneWidth)"
+            )
+            XCTAssertEqual(
+                readingView.convert(readingView.textContainerOrigin, to: hostingView).x,
+                VGTheme.documentHorizontalInset(paneWidth: paneWidth),
+                accuracy: 1,
+                "Pane width: \(paneWidth)"
+            )
+            try assertCentredReadingColumn(of: readingView, paneWidth: paneWidth)
+        }
+        withExtendedLifetime(hostingView) {}
+    }
+
     func testNoteEditorFillsItsPaneInReadingAndSourceModes() async throws {
         let paneSize = CGSize(width: 1_000, height: 600)
         for mode in [EditorMode.preview, .source] {
@@ -3890,6 +3955,7 @@ final class EditorLifecycleTests: XCTestCase {
                 accuracy: 1,
                 "The scroller should sit at the pane's trailing edge. Pane width: \(paneWidth)"
             )
+            try assertCentredReadingColumn(of: readingView, paneWidth: paneWidth)
 
             model.editorMode = .source
             await fulfillment(of: [sourceReported], timeout: 2)
@@ -3909,6 +3975,7 @@ final class EditorLifecycleTests: XCTestCase {
                 accuracy: 1,
                 "Pane width: \(paneWidth)"
             )
+            try assertCentredReadingColumn(of: textView, paneWidth: paneWidth)
             withExtendedLifetime(hostingView) {}
         }
     }
@@ -4022,6 +4089,39 @@ final class EditorLifecycleTests: XCTestCase {
         await fulfillment(of: [reported], timeout: 2)
         withExtendedLifetime(hostingView) {}
         return try XCTUnwrap(result)
+    }
+
+    /// Checks both edges of a note's text: equal insets either side, so the text fills the
+    /// reading column. A legacy scroller takes its width from the text view, not the inset.
+    private func assertCentredReadingColumn(
+        of textView: NSTextView,
+        paneWidth: CGFloat,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let scroll = try XCTUnwrap(textView.enclosingScrollView, file: file, line: line)
+        let container = try XCTUnwrap(textView.textContainer, file: file, line: line)
+        let inset = VGTheme.documentHorizontalInset(paneWidth: paneWidth)
+        let scrollerWidth = paneWidth - scroll.contentSize.width
+        XCTAssertEqual(scroll.frame.width, paneWidth, accuracy: 1, "Pane width: \(paneWidth)", file: file, line: line)
+        XCTAssertEqual(
+            textView.textContainerInset.width,
+            inset,
+            accuracy: 0.5,
+            "Pane width: \(paneWidth)",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            container.containerSize.width,
+            VGTheme.readingColumnWidth(paneWidth: paneWidth)
+                - 2 * VGTheme.documentHorizontalPadding
+                - scrollerWidth,
+            accuracy: 1,
+            "Pane width: \(paneWidth)",
+            file: file,
+            line: line
+        )
     }
 
     private func firstSubview<T: NSView>(of type: T.Type, in root: NSView) -> T? {
