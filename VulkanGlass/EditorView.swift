@@ -1825,14 +1825,25 @@ enum NoteEditorLeadingElement {
 
 struct NoteEditorView: View {
     @Environment(AppModel.self) private var model
+    /// The tab group whose active tab to show; nil shows the app-wide active tab.
+    var groupID: UUID? = nil
     var onDocumentLeading: ((NoteEditorLeadingElement, CGFloat) -> Void)? = nil
     var onLayout: ((CGSize) -> Void)? = nil
 
+    private var displayedTabID: String? {
+        if let groupID {
+            model.tabGroupLayout.group(groupID)?.activeTabID
+        } else {
+            model.activeTabID
+        }
+    }
+
     var body: some View {
-        if let tab = model.activeTab, let index = model.tabs.firstIndex(where: { $0.id == tab.id }) {
+        if let id = displayedTabID, let index = model.tabs.firstIndex(where: { $0.id == id }) {
+            let tab = model.tabs[index]
             VStack(alignment: .leading, spacing: 0) {
                 titleRow(tab)
-                if model.editorMode == .preview {
+                if tab.editorMode == .preview {
                     MarkdownPreviewView(
                         text: tab.content,
                         noteTitles: Set(model.notes.map { $0.title.lowercased() }),

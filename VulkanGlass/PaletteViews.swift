@@ -13,6 +13,8 @@ struct CommandPaletteView: View {
             ("preview", "Toggle reading view", "⌘E", {
                 model.editorMode = model.editorMode == .source ? .preview : .source
             }),
+            ("split-right", "Split right", "⌘\\", { model.splitActiveTab(.trailing) }),
+            ("split-down", "Split down", "⇧⌘\\", { model.splitActiveTab(.bottom) }),
             ("sync", "Sync vault to GitHub", "⌘S", { Task { await model.saveActive(sync: true) } }),
             ("file", "Open Markdown file (not in a vault)", "", { model.openStandaloneFile() }),
             ("clone", "Clone GitHub vault", "", { model.cloneOpen = true }),

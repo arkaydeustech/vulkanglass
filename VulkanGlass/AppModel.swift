@@ -118,8 +118,24 @@ final class AppModel {
     var vault: VaultInfo?
     var fileTree: [FileNode] = []
     var notes: [NoteMeta] = []
-    var tabs: [NoteTab] = []
-    var activeTabID: String?
+    var tabs: [NoteTab] = [] {
+        didSet {
+            let ids = tabs.map(\.id)
+            guard ids != oldValue.map(\.id) else { return }
+            updateTabGroupLayout { $0.reconcile(with: ids) }
+        }
+    }
+    /// How open tabs are divided between tab groups and where those groups sit on screen.
+    private(set) var tabGroupLayout = TabGroupLayout()
+    /// Divider position of each pane split, as the first pane's share of the split.
+    private(set) var paneSplitFractions: [UUID: CGFloat] = [:]
+    /// The tab being dragged between tab groups, if any.
+    @ObservationIgnored var draggedTabID: String?
+    /// The focused tab group's active tab.
+    var activeTabID: String? {
+        get { tabGroupLayout.activeTabID }
+        set { updateTabGroupLayout { $0.activate(newValue) } }
+    }
     var titleEditingTabID: String?
     private(set) var titleEditingDraft = ""
     private(set) var editorFocusRequest: EditorFocusRequest?
@@ -498,9 +514,6 @@ final class AppModel {
             editorFocusRequest = nil
         }
         tabs.removeAll { $0.id == resolvedTarget }
-        if activeTabID == resolvedTarget {
-            activeTabID = tabs.last?.id
-        }
     }
 
     func setActiveTab(_ id: String) async {
@@ -524,8 +537,82 @@ final class AppModel {
         centerView = .editor
     }
 
+    /// Tabs of one tab group, in the group's order.
+    func tabs(inGroup id: UUID) -> [NoteTab] {
+        guard let group = tabGroupLayout.group(id) else { return [] }
+        return group.tabIDs.compactMap { tabID in tabs.first { $0.id == tabID } }
+    }
+
+    /// Focuses a tab group, making its active tab the app-wide active tab.
+    func focusGroup(_ id: UUID) {
+        guard id != tabGroupLayout.focusedGroupID, tabGroupLayout.group(id) != nil else { return }
+        updateTabGroupLayout { $0.focus(id) }
+        // The graph fills the focused pane, so a newly focused pane returns to its note.
+        centerView = .editor
+    }
+
+    /// Whether dropping a dragged tab on a zone of a tab group would do anything.
+    func canDropTab(_ id: String, on groupID: UUID, zone: PaneDropZone) -> Bool {
+        tabGroupLayout.canDrop(id, on: groupID, zone: zone)
+    }
+
+    /// Drops a dragged tab onto a pane. The centre moves it into that tab group; an edge splits
+    /// the pane in half and gives the tab a new group on that side.
+    func dropTab(_ id: String, on groupID: UUID, zone: PaneDropZone) {
+        guard canDropTab(id, on: groupID, zone: zone) else { return }
+        updateTabGroupLayout { $0.drop(id, on: groupID, zone: zone) }
+        centerView = .editor
+    }
+
+    /// Whether the active tab can split off into a new group (other tabs must stay behind).
+    var canSplitActiveTab: Bool {
+        guard let activeTabID else { return false }
+        return canDropTab(activeTabID, on: tabGroupLayout.focusedGroupID, zone: .trailing)
+    }
+
+    /// Moves the active tab into a new group on one side of the focused pane.
+    func splitActiveTab(_ zone: PaneDropZone) {
+        guard zone != .center, let activeTabID else { return }
+        dropTab(activeTabID, on: tabGroupLayout.focusedGroupID, zone: zone)
+    }
+
+    /// Moves a tab into a tab group's strip at `index` (the end when nil), or reorders it
+    /// within its own group.
+    func moveTab(_ id: String, toGroup groupID: UUID, at index: Int? = nil) {
+        guard tabGroupLayout.groupID(containing: id) != nil,
+              tabGroupLayout.group(groupID) != nil
+        else { return }
+        updateTabGroupLayout { $0.move(id, to: groupID, at: index) }
+        centerView = .editor
+    }
+
+    /// Moves the divider of a pane split. The fraction is the first pane's share.
+    func resizePaneSplit(_ id: UUID, fraction: CGFloat) {
+        paneSplitFractions[id] = min(max(fraction, 0), 1)
+    }
+
+    func paneSplitFraction(_ id: UUID) -> CGFloat {
+        paneSplitFractions[id] ?? 0.5
+    }
+
+    /// Applies a layout change, publishing it only when something actually moved and
+    /// forgetting divider positions of splits that no longer exist.
+    private func updateTabGroupLayout(_ change: (inout TabGroupLayout) -> Void) {
+        var layout = tabGroupLayout
+        change(&layout)
+        guard layout != tabGroupLayout else { return }
+        tabGroupLayout = layout
+        let liveSplits = Set(layout.root.splitIDs)
+        if paneSplitFractions.keys.contains(where: { !liveSplits.contains($0) }) {
+            paneSplitFractions = paneSplitFractions.filter { liveSplits.contains($0.key) }
+        }
+    }
+
     func beginEditingTitle(for id: String) {
         guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        if let groupID = tabGroupLayout.groupID(containing: id) {
+            updateTabGroupLayout { $0.focus(groupID) }
+        }
         editorFocusRequest = nil
         titleEditingTabID = id
         titleEditingDraft = tab.title
@@ -799,7 +886,6 @@ final class AppModel {
                 editorFocusRequest = nil
             }
             tabs.removeAll { $0.path == path || $0.path.hasPrefix(prefix) }
-            if let activeTabID, removedIDs.contains(activeTabID) { self.activeTabID = tabs.last?.id }
             await refreshVault()
         } catch {
             errorMessage = error.localizedDescription
@@ -962,12 +1048,11 @@ final class AppModel {
         if let task = saveTasks.removeValue(forKey: oldPath) {
             task.cancel()
         }
+        // Retarget the group first so the renamed tab keeps its group and position.
+        updateTabGroupLayout { $0.renameTab(from: oldPath, to: newPath) }
         if let index = tabs.firstIndex(where: { $0.path == oldPath }) {
             tabs[index].path = newPath
             tabs[index].title = Markdown.title(from: newPath)
-        }
-        if activeTabID == oldPath {
-            activeTabID = newPath
         }
         if titleEditingTabID == oldPath {
             titleEditingTabID = newPath

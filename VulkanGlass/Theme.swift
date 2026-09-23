@@ -5,6 +5,8 @@ enum VGTheme {
     static let accent = Color(red: 0.08, green: 0.72, blue: 0.65)
     static let accentHover = Color(red: 0.05, green: 0.58, blue: 0.53)
     static let textAccent = Color(red: 0.18, green: 0.83, blue: 0.75)
+    /// Blue that marks where a dragged tab will land.
+    static let dropTarget = Color(red: 0.23, green: 0.51, blue: 0.96)
 
     static func backgroundPrimary(dark: Bool) -> Color {
         dark ? Color(red: 0.118, green: 0.118, blue: 0.118) : Color.white
@@ -55,6 +57,8 @@ enum VGTheme {
     static let splitHandleWidth: CGFloat = 10
     static let splitGlowDuration: TimeInterval = 0.18
     static let editorMinWidth: CGFloat = 320
+    /// Smallest width or height a tab group pane can be dragged down to.
+    static let tabGroupMinLength: CGFloat = 160
     static let readingColumnMaxWidth: CGFloat = 780
     static let documentHorizontalPadding: CGFloat = 56
     static let readingBottomPadding: CGFloat = 96

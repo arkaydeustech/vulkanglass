@@ -94,6 +94,13 @@ struct VulkanGlassApp: App {
                 .keyboardShortcut("e", modifiers: .command)
                 Button("Open graph view") { model.centerView = .graph }
                     .keyboardShortcut("g", modifiers: .command)
+                Divider()
+                Button("Split right") { model.splitActiveTab(.trailing) }
+                    .keyboardShortcut("\\", modifiers: .command)
+                    .disabled(!model.canSplitActiveTab)
+                Button("Split down") { model.splitActiveTab(.bottom) }
+                    .keyboardShortcut("\\", modifiers: [.command, .shift])
+                    .disabled(!model.canSplitActiveTab)
             }
             CommandMenu("Go") {
                 Button("Open today's daily note") { Task { await model.dailyNote() } }
