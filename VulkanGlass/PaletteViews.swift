@@ -177,7 +177,9 @@ struct PaletteSearchField: NSViewRepresentable {
     func updateNSView(_ nsView: NSTextField, context: Context) {
         context.coordinator.parent = self
         nsView.placeholderString = placeholder
-        if nsView.stringValue != text {
+        // A SwiftUI update can arrive while AppKit's field editor holds a newer draft.
+        // Replacing stringValue then would discard the user's in-progress query and caret.
+        if nsView.currentEditor() == nil, nsView.stringValue != text {
             nsView.stringValue = text
         }
     }

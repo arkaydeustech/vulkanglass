@@ -5,9 +5,123 @@ import SwiftUI
 
 @MainActor
 final class PaletteSearchFieldTests: XCTestCase {
+    func testHostedCommandPaletteAndQuickSwitcherTakeKeyboardFocusAndRestoreIt() async throws {
+        for kind in [PaletteKind.command, .switcher] {
+            let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                styleMask: [.titled],
+                backing: .buffered,
+                defer: false
+            )
+            defer { window.orderOut(nil) }
+            let document = SourceTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+            document.string = "Note body"
+            let updater = AppUpdater(configuration: UpdateConfiguration(info: [:]), disabled: true)
+            let hostingView = NSHostingView(rootView: RootView(updater: updater).environment(model))
+            hostingView.frame = window.contentView!.bounds
+            window.contentView?.addSubview(document)
+            window.contentView?.addSubview(hostingView)
+            window.makeKeyAndOrderFront(nil)
+            XCTAssertTrue(window.makeFirstResponder(document))
+
+            switch kind {
+            case .command:
+                model.commandOpen = true
+            case .switcher:
+                model.switcherOpen = true
+            }
+            let mountedField = await waitForPaletteField(in: hostingView)
+            let field = try XCTUnwrap(mountedField)
+            let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+            XCTAssertTrue(window.firstResponder === editor, "\(kind) should own first responder")
+
+            sendKey("g", keyCode: 5, to: window)
+            XCTAssertEqual(field.stringValue, "g")
+            let coordinator = try XCTUnwrap(field.delegate as? PaletteSearchField.Coordinator)
+            XCTAssertEqual(coordinator.parent.text, "g")
+            XCTAssertEqual(document.string, "Note body")
+
+            switch kind {
+            case .command: model.commandOpen = false
+            case .switcher: model.switcherOpen = false
+            }
+            hostingView.layoutSubtreeIfNeeded()
+            await drainMainQueue()
+            XCTAssertNil(paletteField(in: hostingView))
+            XCTAssertTrue(window.firstResponder === document, "\(kind) should restore the editor")
+        }
+    }
+
+    func testHostedSearchFieldPreservesActiveDraftDuringBindingUpdates() async throws {
+        let state = PaletteQueryState()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        let hostingView = NSHostingView(rootView: HostedPaletteSearchField(state: state))
+        hostingView.frame = window.contentView!.bounds
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        let mountedField = await waitForPaletteField(in: hostingView)
+        let field = try XCTUnwrap(mountedField)
+
+        sendKey("x", keyCode: 7, to: window)
+        XCTAssertEqual(field.stringValue, "x")
+        XCTAssertEqual(state.text, "x")
+
+        state.text = "external"
+        hostingView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        XCTAssertEqual(field.stringValue, "x", "An active field editor keeps its draft")
+
+        XCTAssertTrue(window.makeFirstResponder(hostingView))
+        state.text = "replacement"
+        hostingView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        XCTAssertEqual(field.stringValue, "replacement")
+
+        state.show = false
+        hostingView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        XCTAssertNil(firstDescendant(of: NSTextField.self, in: hostingView))
+    }
+
+    func testDismantleBeforeFocusPreventsLaterFocusAttempts() async {
+        var attempts = 0
+        let coordinator = PaletteSearchField.Coordinator(
+            parent: PaletteSearchField(text: .constant(""), placeholder: "", onSubmit: {}, onCancel: {}),
+            focus: { _ in attempts += 1; return true }
+        )
+        let field = NSTextField()
+        coordinator.attach(field)
+        coordinator.prepareForDismantle()
+        await drainMainQueue()
+        coordinator.requestFocus()
+        await drainMainQueue()
+        XCTAssertEqual(attempts, 0)
+        XCTAssertNil(coordinator.previousResponder)
+    }
+
+    func testFocusRetryStopsAfterEightAttempts() async {
+        var attempts = 0
+        let coordinator = PaletteSearchField.Coordinator(
+            parent: PaletteSearchField(text: .constant(""), placeholder: "", onSubmit: {}, onCancel: {}),
+            focus: { _ in attempts += 1; return false }
+        )
+        let field = NSTextField()
+        coordinator.attach(field)
+        for _ in 0..<10 { await drainMainQueue() }
+        XCTAssertEqual(attempts, 8)
+        withExtendedLifetime(field) {}
+    }
+
     func testPaletteFieldTakesFocusFromDocumentSoTypingGoesToTheQuery() async throws {
-        var query = ""
-        let (window, document, field, coordinator) = makePalette(query: { query }, setQuery: { query = $0 })
+        let state = PaletteQueryState()
+        let (window, document, field, coordinator) = makePalette(state: state)
         defer { window.orderOut(nil) }
         XCTAssertTrue(window.makeFirstResponder(document))
 
@@ -23,7 +137,7 @@ final class PaletteSearchFieldTests: XCTestCase {
             Notification(name: NSControl.textDidChangeNotification, object: field)
         )
 
-        XCTAssertEqual(query, "graph")
+        XCTAssertEqual(state.text, "graph")
         XCTAssertEqual(document.string, "Note body")
     }
 
@@ -84,7 +198,7 @@ final class PaletteSearchFieldTests: XCTestCase {
     }
 
     func testDismissingPaletteReturnsFocusToTheDocument() async {
-        let (window, document, field, coordinator) = makePalette(query: { "" }, setQuery: { _ in })
+        let (window, document, field, coordinator) = makePalette(state: PaletteQueryState())
         defer { window.orderOut(nil) }
         XCTAssertTrue(window.makeFirstResponder(document))
         coordinator.attach(field)
@@ -99,7 +213,7 @@ final class PaletteSearchFieldTests: XCTestCase {
     }
 
     func testDismissingPaletteKeepsFocusACommandMovedElsewhere() async {
-        let (window, document, field, coordinator) = makePalette(query: { "" }, setQuery: { _ in })
+        let (window, document, field, coordinator) = makePalette(state: PaletteQueryState())
         defer { window.orderOut(nil) }
         let other = NSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 40))
         window.contentView?.addSubview(other)
@@ -139,8 +253,7 @@ final class PaletteSearchFieldTests: XCTestCase {
     }
 
     private func makePalette(
-        query: @escaping () -> String,
-        setQuery: @escaping (String) -> Void
+        state: PaletteQueryState
     ) -> (NSWindow, NSTextView, NSTextField, PaletteSearchField.Coordinator) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
@@ -156,7 +269,7 @@ final class PaletteSearchFieldTests: XCTestCase {
         window.makeKeyAndOrderFront(nil)
         let coordinator = PaletteSearchField.Coordinator(
             parent: PaletteSearchField(
-                text: Binding(get: query, set: setQuery),
+                text: Binding(get: { state.text }, set: { state.text = $0 }),
                 placeholder: "Type a command…",
                 onSubmit: {},
                 onCancel: {}
@@ -172,5 +285,79 @@ final class PaletteSearchFieldTests: XCTestCase {
                 continuation.resume()
             }
         }
+    }
+
+    private func waitForPaletteField(in root: NSView) async -> NSTextField? {
+        for _ in 0..<50 {
+            root.layoutSubtreeIfNeeded()
+            if let field = paletteField(in: root),
+               field.currentEditor() != nil {
+                return field
+            }
+            await drainMainQueue()
+        }
+        return nil
+    }
+
+    private func paletteField(in root: NSView) -> NSTextField? {
+        if let field = root as? NSTextField,
+           field.delegate is PaletteSearchField.Coordinator { return field }
+        for subview in root.subviews {
+            if let field = paletteField(in: subview) { return field }
+        }
+        return nil
+    }
+
+    private func firstDescendant<View: NSView>(of type: View.Type, in root: NSView) -> View? {
+        if let match = root as? View { return match }
+        for subview in root.subviews {
+            if let match = firstDescendant(of: type, in: subview) { return match }
+        }
+        return nil
+    }
+
+    private func sendKey(_ character: String, keyCode: UInt16, to window: NSWindow) {
+        let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: character,
+            charactersIgnoringModifiers: character,
+            isARepeat: false,
+            keyCode: keyCode
+        )!
+        window.sendEvent(event)
+    }
+}
+
+private enum PaletteKind {
+    case command
+    case switcher
+}
+
+@MainActor
+private final class PaletteQueryState: ObservableObject {
+    @Published var text = ""
+    @Published var show = true
+}
+
+private struct HostedPaletteSearchField: View {
+    @ObservedObject var state: PaletteQueryState
+
+    var body: some View {
+        Group {
+            if state.show {
+                PaletteSearchField(
+                    text: $state.text,
+                    placeholder: "Type a command…",
+                    onSubmit: {},
+                    onCancel: {}
+                )
+            }
+        }
+        .frame(width: 300, height: 30)
     }
 }

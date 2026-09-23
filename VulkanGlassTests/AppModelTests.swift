@@ -1370,7 +1370,10 @@ final class AppModelTests: XCTestCase {
             }
         }
         let field = try XCTUnwrap(paletteField)
-        XCTAssertTrue(window.makeFirstResponder(field))
+        for _ in 0..<50 where field.currentEditor() == nil {
+            await Task.yield()
+            hostingView.layoutSubtreeIfNeeded()
+        }
         let paletteEditor = try XCTUnwrap(field.currentEditor() as? NSTextView)
         XCTAssertTrue(window.firstResponder === paletteEditor)
 
@@ -1411,7 +1414,10 @@ final class AppModelTests: XCTestCase {
         hostingView.layoutSubtreeIfNeeded()
 
         let palette = try XCTUnwrap(firstDescendant(of: NSTextField.self, in: hostingView))
-        XCTAssertTrue(window.makeFirstResponder(palette))
+        for _ in 0..<50 where palette.currentEditor() == nil {
+            await Task.yield()
+            hostingView.layoutSubtreeIfNeeded()
+        }
         let paletteEditor = try XCTUnwrap(palette.currentEditor() as? NSTextView)
         XCTAssertTrue(window.firstResponder === paletteEditor)
 
@@ -2364,17 +2370,19 @@ private final class SystemAppearanceFeed {
 
 private struct FocusContentionEditorView: View {
     @Environment(AppModel.self) private var model
-    @FocusState private var paletteFocused: Bool
     @State private var query = ""
 
     var body: some View {
         ZStack {
             NoteEditorView()
             if model.commandOpen {
-                TextField("Command", text: $query)
-                    .focused($paletteFocused)
+                PaletteSearchField(
+                    text: $query,
+                    placeholder: "Type a command…",
+                    onSubmit: {},
+                    onCancel: { model.commandOpen = false }
+                )
                     .frame(width: 240)
-                    .onAppear { paletteFocused = true }
             }
         }
     }
