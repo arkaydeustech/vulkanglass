@@ -30,7 +30,7 @@ Older builds without Sparkle need one manual installation of that release.
    never commit it. Normal development builds do not invoke this tool.
 3. Choose a stable, publicly readable HTTPS appcast URL. One option for this
    repository is
-   `https://github.com/arkaydeus/vulkanglass/releases/latest/download/appcast.xml`.
+   `https://github.com/arkaydeustech/vulkanglass/releases/latest/download/appcast.xml`.
    This URL only works after each latest non-prerelease release includes an
    `appcast.xml` asset and the repository/assets are publicly accessible.
    Private GitHub assets requiring a PAT are not supported by this setup.
@@ -67,7 +67,7 @@ Do not remove signature verification to work around a packaging problem.
 
    ```bash
    build/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast \
-     --download-url-prefix https://github.com/arkaydeus/vulkanglass/releases/download/v0.3/ \
+     --download-url-prefix https://github.com/arkaydeustech/vulkanglass/releases/download/v0.3/ \
      output/updates
    ```
 
