@@ -395,6 +395,35 @@ final class AppModel {
         Task { await openStandalone(url: url) }
     }
 
+    /// Opens Markdown files handed over by the system (Finder "Open With", double-click, or a drop
+    /// on the Dock icon). Files inside the open vault open as vault tabs; with no vault they join
+    /// the standalone tabs. A mixed selection keeps the vault and opens outside files as
+    /// standalone tabs; an entirely outside selection switches to standalone once.
+    func openExternalFiles(_ urls: [URL]) async {
+        let files = urls
+            .filter { $0.isFileURL && !FileService.directoryExists(at: $0.path) }
+            .map { FileService.canonicalURL($0) }
+        let keepVault = vault.map { current in
+            files.contains { isInside(vault: current, path: $0.path) }
+        } ?? false
+        for file in files {
+            if let vault, isInside(vault: vault, path: file.path) {
+                await openTab(path: file.path)
+            } else if keepVault {
+                await openTab(path: file.path, standalone: true)
+            } else if vault == nil, !tabs.isEmpty {
+                await openTab(path: file.path, standalone: true)
+            } else {
+                await openStandalone(url: file)
+            }
+        }
+    }
+
+    private func isInside(vault: VaultInfo, path: String) -> Bool {
+        let root = FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path
+        return path.hasPrefix(root + "/")
+    }
+
     /// Opens a local folder as a vault (expected to be a git repo).
     func openLocalVault() async {
         let panel = NSOpenPanel()
@@ -1062,16 +1091,11 @@ final class AppModel {
     }
 
     func openStandalone(url: URL) async {
-        guard await commitTitleEditing() else { return }
-        guard await flushDirtyTabs() else { return }
-        let inheritedEditorMode = editorMode
-        vault = nil
-        fileTree = []
-        notes = []
-        editorFocusRequest = nil
-        gitStatus = GitStatus(state: .idle, message: "Standalone file — not a GitHub vault")
         do {
             let text = try FileService.read(url)
+            guard await commitTitleEditing() else { return }
+            guard await flushDirtyTabs() else { return }
+            let inheritedEditorMode = editorMode
             let tab = NoteTab(
                 path: url.path,
                 title: Markdown.title(from: url.path),
@@ -1080,6 +1104,11 @@ final class AppModel {
                 isStandalone: true,
                 editorMode: inheritedEditorMode
             )
+            vault = nil
+            fileTree = []
+            notes = []
+            editorFocusRequest = nil
+            gitStatus = GitStatus(state: .idle, message: "Standalone file — not a GitHub vault")
             titleEditingTabID = nil
             titleEditingDraft = ""
             tabs = [tab]

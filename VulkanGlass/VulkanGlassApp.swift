@@ -3,7 +3,33 @@ import SwiftUI
 
 @MainActor
 final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
-    var model: AppModel?
+    /// Set once the main window appears. Files opened before then (a cold launch from Finder)
+    /// are queued and opened as soon as the model arrives.
+    var model: AppModel? {
+        didSet { openPendingFiles() }
+    }
+    /// Reopens the main window when Finder hands over a file after the user closed it.
+    var openMainWindow: (() -> Void)?
+    /// The most recent external open; each one waits for the previous so files open in order.
+    private(set) var externalOpenTask: Task<Void, Never>?
+    private var pendingFileURLs: [URL] = []
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        pendingFileURLs.append(contentsOf: urls)
+        openMainWindow?()
+        openPendingFiles()
+    }
+
+    private func openPendingFiles() {
+        guard let model, !pendingFileURLs.isEmpty else { return }
+        let urls = pendingFileURLs
+        pendingFileURLs = []
+        let previous = externalOpenTask
+        externalOpenTask = Task { @MainActor in
+            await previous?.value
+            await model.openExternalFiles(urls)
+        }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model, model.tabs.contains(where: { $0.dirty }) else { return .terminateNow }
@@ -26,10 +52,8 @@ struct VulkanGlassApp: App {
             RootView(updater: updater)
                 .environment(model)
                 .frame(minWidth: 860, minHeight: 560)
-                .onAppear {
-                    appDelegate.model = model
-                    updater.start()
-                }
+                .modifier(AppDelegateBridge(appDelegate: appDelegate, model: model))
+                .onAppear { updater.start() }
         }
         .defaultSize(width: 1320, height: 860)
         .windowStyle(.hiddenTitleBar)
@@ -121,6 +145,28 @@ struct VulkanGlassApp: App {
                 Button("Settings…") { model.settingsOpen = true }
                     .keyboardShortcut(",", modifiers: .command)
             }
+        }
+    }
+}
+
+/// Connects the app delegate, which receives Finder's open-document events, to the model and to
+/// the scene's window opener.
+struct AppDelegateBridge: ViewModifier {
+    let appDelegate: VulkanGlassAppDelegate
+    let model: AppModel
+    var openWindowOverride: (() -> Void)? = nil
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content.onAppear {
+            appDelegate.openMainWindow = {
+                if let openWindowOverride {
+                    openWindowOverride()
+                } else {
+                    openWindow(id: "main")
+                }
+            }
+            appDelegate.model = model
         }
     }
 }

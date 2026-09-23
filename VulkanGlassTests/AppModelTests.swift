@@ -1991,6 +1991,254 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    func testFinderOpenFromWelcomeLoadsFileAsStandaloneTab() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Readme.md")
+        try "# Hello from Finder".write(to: file, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        XCTAssertFalse(model.inWorkspace)
+
+        await model.openExternalFiles([file])
+
+        let tab = try XCTUnwrap(model.activeTab)
+        XCTAssertTrue(model.inWorkspace)
+        XCTAssertEqual(tab.path, FileService.canonicalURL(file).path)
+        XCTAssertEqual(tab.title, "Readme")
+        XCTAssertEqual(tab.content, "# Hello from Finder")
+        XCTAssertTrue(tab.isStandalone)
+        XCTAssertEqual(model.centerView, .editor)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testFinderOpenAddsTabsToAnExistingStandaloneSession() async throws {
+        let root = try temporaryDirectory()
+        let first = root.appendingPathComponent("First.md")
+        let second = root.appendingPathComponent("Second.md")
+        try "one".write(to: first, atomically: true, encoding: .utf8)
+        try "two".write(to: second, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+
+        await model.openExternalFiles([first])
+        await model.openExternalFiles([second])
+        await model.openExternalFiles([first])
+
+        XCTAssertEqual(model.tabs.map(\.title), ["First", "Second"])
+        XCTAssertTrue(model.tabs.allSatisfy(\.isStandalone))
+        XCTAssertEqual(model.activeTab?.title, "First")
+    }
+
+    func testFinderOpenOfVaultFileOpensItInsideTheVault() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Notes/Idea.md")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "vault note".write(to: file, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+
+        await model.openExternalFiles([file])
+
+        XCTAssertEqual(model.vault?.path, root.path)
+        let tab = try XCTUnwrap(model.activeTab)
+        XCTAssertFalse(tab.isStandalone)
+        XCTAssertEqual(tab.path, FileService.canonicalURL(file).path)
+        XCTAssertEqual(tab.content, "vault note")
+    }
+
+    func testFinderOpenOfFileOutsideTheVaultOpensItStandalone() async throws {
+        let vaultRoot = try temporaryDirectory()
+        let elsewhere = try temporaryDirectory().appendingPathComponent("Loose.md")
+        try "loose".write(to: elsewhere, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: vaultRoot)
+
+        await model.openExternalFiles([elsewhere])
+
+        XCTAssertNil(model.vault)
+        XCTAssertEqual(model.tabs.count, 1)
+        XCTAssertEqual(model.activeTab?.content, "loose")
+        XCTAssertEqual(model.activeTab?.isStandalone, true)
+    }
+
+    func testFinderOpenOfUnreadableOutsideFilePreservesActiveVault() async throws {
+        let vaultRoot = try temporaryDirectory()
+        let existing = vaultRoot.appendingPathComponent("Existing.md")
+        let invalid = try temporaryDirectory().appendingPathComponent("Invalid.md")
+        try "original".write(to: existing, atomically: true, encoding: .utf8)
+        try Data([0xFF]).write(to: invalid)
+        let model = modelWithVault(at: vaultRoot)
+        await model.refreshVault()
+        let treeNames = model.fileTree.map(\.name)
+        let notePaths = model.notes.map(\.path)
+        await model.openTab(path: existing.path)
+        model.tabs[0].content = "unsaved"
+        let originalStatus = GitStatus(state: .idle, message: "Vault status")
+        model.gitStatus = originalStatus
+
+        await model.openExternalFiles([invalid])
+
+        XCTAssertEqual(model.vault?.path, vaultRoot.path)
+        XCTAssertEqual(model.fileTree.map(\.name), treeNames)
+        XCTAssertEqual(model.notes.map(\.path), notePaths)
+        XCTAssertEqual(model.tabs.map(\.path), [existing.path])
+        XCTAssertEqual(model.activeTabID, existing.path)
+        XCTAssertEqual(model.activeTab?.content, "unsaved")
+        XCTAssertTrue(model.activeTab?.dirty == true)
+        XCTAssertEqual(model.gitStatus?.message, originalStatus.message)
+        XCTAssertEqual(try String(contentsOf: existing, encoding: .utf8), "original")
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testStandalonePanelRouteAlsoPreservesVaultOnUnreadableFile() async throws {
+        let vaultRoot = try temporaryDirectory()
+        let invalid = try temporaryDirectory().appendingPathComponent("Invalid.md")
+        try Data([0xFF]).write(to: invalid)
+        let model = modelWithVault(at: vaultRoot)
+
+        await model.openStandalone(url: invalid)
+
+        XCTAssertEqual(model.vault?.path, vaultRoot.path)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testFinderMixedBatchKeepsVaultAndEverySelectedTab() async throws {
+        let vaultRoot = try temporaryDirectory()
+        let existing = vaultRoot.appendingPathComponent("Existing.md")
+        let inside = vaultRoot.appendingPathComponent("Inside.md")
+        let outside = try temporaryDirectory().appendingPathComponent("Outside.md")
+        try "original".write(to: existing, atomically: true, encoding: .utf8)
+        try "inside".write(to: inside, atomically: true, encoding: .utf8)
+        try "outside".write(to: outside, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: vaultRoot)
+        await model.openTab(path: existing.path)
+        model.tabs[0].content = "unsaved"
+        let delegate = VulkanGlassAppDelegate()
+        delegate.model = model
+
+        delegate.application(NSApplication.shared, open: [inside, outside])
+        await delegate.externalOpenTask?.value
+
+        XCTAssertEqual(model.vault?.path, vaultRoot.path)
+        XCTAssertEqual(model.tabs.map(\.title), ["Existing", "Inside", "Outside"])
+        XCTAssertEqual(model.tabs.map(\.isStandalone), [false, false, true])
+        XCTAssertEqual(model.activeTab?.title, "Outside")
+        XCTAssertTrue(model.tabs[0].dirty)
+        XCTAssertEqual(try String(contentsOf: existing, encoding: .utf8), "original")
+
+        let reversed = modelWithVault(at: vaultRoot)
+        await reversed.openExternalFiles([outside, inside])
+        XCTAssertEqual(reversed.vault?.path, vaultRoot.path)
+        XCTAssertEqual(reversed.tabs.map(\.title), ["Outside", "Inside"])
+        XCTAssertEqual(reversed.tabs.map(\.isStandalone), [true, false])
+    }
+
+    func testFinderOutsideBatchSwitchesOnceAndKeepsEverySelectedTab() async throws {
+        let vaultRoot = try temporaryDirectory()
+        let existing = vaultRoot.appendingPathComponent("Existing.md")
+        let elsewhere = try temporaryDirectory()
+        let first = elsewhere.appendingPathComponent("First.md")
+        let second = elsewhere.appendingPathComponent("Second.md")
+        try "original".write(to: existing, atomically: true, encoding: .utf8)
+        try "first".write(to: first, atomically: true, encoding: .utf8)
+        try "second".write(to: second, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: vaultRoot)
+        await model.openTab(path: existing.path)
+        model.tabs[0].content = "saved before switch"
+
+        await model.openExternalFiles([first, second])
+
+        XCTAssertNil(model.vault)
+        XCTAssertEqual(model.tabs.map(\.title), ["First", "Second"])
+        XCTAssertTrue(model.tabs.allSatisfy(\.isStandalone))
+        XCTAssertEqual(model.activeTab?.title, "Second")
+        XCTAssertEqual(try String(contentsOf: existing, encoding: .utf8), "saved before switch")
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testFinderOpenIgnoresDirectoriesAndReportsUnreadableFiles() async throws {
+        let root = try temporaryDirectory()
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+
+        await model.openExternalFiles([root])
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertNil(model.errorMessage)
+
+        await model.openExternalFiles([root.appendingPathComponent("Missing.md")])
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testAppDelegateQueuesFinderOpensUntilTheModelIsReady() async throws {
+        let root = try temporaryDirectory()
+        let first = root.appendingPathComponent("Cold.md")
+        let second = root.appendingPathComponent("Warm.md")
+        try "cold".write(to: first, atomically: true, encoding: .utf8)
+        try "warm".write(to: second, atomically: true, encoding: .utf8)
+        let delegate = VulkanGlassAppDelegate()
+        var windowRequests = 0
+        delegate.openMainWindow = { windowRequests += 1 }
+
+        delegate.application(NSApplication.shared, open: [first])
+        XCTAssertNil(delegate.externalOpenTask)
+
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        delegate.model = model
+        await delegate.externalOpenTask?.value
+        XCTAssertEqual(model.activeTab?.content, "cold")
+
+        delegate.application(NSApplication.shared, open: [second])
+        await delegate.externalOpenTask?.value
+        XCTAssertEqual(model.tabs.map(\.title), ["Cold", "Warm"])
+        XCTAssertEqual(model.activeTab?.content, "warm")
+        XCTAssertEqual(windowRequests, 2)
+    }
+
+    func testAppDelegateBridgeDrainsColdOpenAndRequestsClosedWindowReopen() async throws {
+        let root = try temporaryDirectory()
+        let first = root.appendingPathComponent("Cold.md")
+        let second = root.appendingPathComponent("Reopen.md")
+        try "cold".write(to: first, atomically: true, encoding: .utf8)
+        try "reopen".write(to: second, atomically: true, encoding: .utf8)
+        let delegate = VulkanGlassAppDelegate()
+        delegate.application(NSApplication.shared, open: [first])
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        var reopenRequests = 0
+        let hostingView = NSHostingView(
+            rootView: Text("Bridge")
+                .modifier(AppDelegateBridge(
+                    appDelegate: delegate,
+                    model: model,
+                    openWindowOverride: { reopenRequests += 1 }
+                ))
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        for _ in 0..<20 where delegate.model == nil {
+            hostingView.layoutSubtreeIfNeeded()
+            await drainMainQueue()
+        }
+
+        XCTAssertTrue(delegate.model === model)
+        await delegate.externalOpenTask?.value
+        XCTAssertEqual(model.activeTab?.content, "cold")
+
+        window.close()
+        await drainMainQueue()
+        delegate.application(NSApplication.shared, open: [second])
+        await delegate.externalOpenTask?.value
+        XCTAssertEqual(reopenRequests, 1)
+        XCTAssertEqual(model.activeTab?.content, "reopen")
+    }
+
     private func disabledAuthDependencies(
         onSave: @escaping (String) -> Void = { _ in }
     ) -> AppModelDependencies {
