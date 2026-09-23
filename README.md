@@ -21,12 +21,17 @@ mise install
 | `mise run install` | Build a Release app and install it in `/Applications` |
 | `mise run project` | Regenerate `VulkanGlass.xcodeproj` |
 | `mise run icons` | Regenerate the app icon assets |
+| `mise run release` | Build, notarize, and publish the current `main` as a GitHub release |
+| `mise run release:build` | Build, notarize, and package a release without publishing |
+| `mise run release:check` | Verify the release prerequisites without building |
+| `mise run release:setup` | One-time Sparkle signing key setup |
 | `mise run test` | Run the `VulkanGlassTests` XCTest suite |
 | `mise run test:install` | Run the installer unit tests |
+| `mise run test:release` | Run the release script unit tests |
 | `mise run test:lint` | Verify the oxlint rules actually apply |
 | `mise run lint` | Lint with [oxlint](https://oxc.rs) |
 | `mise run format` | Format with [oxfmt](https://oxc.rs) |
-| `mise run check` | Check formatting and lint, then run the installer and lint self-tests |
+| `mise run check` | Check formatting and lint, then run the script unit tests and lint self-tests |
 
 Node and the oxc tools are pinned in `mise.toml`, with their download URLs and
 checksums recorded in `mise.lock`; the Python scripts below still run under the
@@ -132,5 +137,14 @@ installation, and relaunch. Use **Vulkan Glass > Check for Updates…** or the
 Updates section in Settings. Sparkle asks before enabling automatic checks, and
 the preference can be changed later in Settings. Release feed and signing-key
 setup, publishing, and verification are documented in
-[docs/app-updates.md](docs/app-updates.md). Updates remain disabled until a valid
-release feed and public key are configured.
+[docs/app-updates.md](docs/app-updates.md). Only builds made by the release
+script carry the update feed and public key; development and `mise run install`
+builds have updates disabled.
+
+## Releases
+
+Releases are built, notarized, and published from the maintainer's Mac with
+`mise run release`, which tags the current `main` commit and publishes a GitHub
+release. The newest disk image is always available at
+<https://github.com/arkaydeustech/vulkanglass/releases/latest/download/VulkanGlass.dmg>.
+See [docs/app-updates.md](docs/app-updates.md).

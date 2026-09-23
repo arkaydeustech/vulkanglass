@@ -14,92 +14,121 @@ The existing application termination delegate saves dirty notes before allowing
 quit; a failed save cancels termination. Sparkle handles network errors,
 unsupported macOS versions, invalid signatures, and installation permissions.
 
-## One-time release configuration
+## How releases work
 
-The repository does not yet have a published update feed or a signing key.
-Until configured, update controls are disabled with an explanation. Do not ship
-a bootstrap release expecting to configure its trusted key afterward: the first
-update-capable distributed app must already contain the feed URL and public key.
-Older builds without Sparkle need one manual installation of that release.
+Releases are built and published from the release maintainer's Mac by
+`scripts/release.py`, never by CI. Signing, notarization, and the Sparkle key
+stay in that Mac's login Keychain; no release secrets are stored in GitHub.
 
-1. Build once to resolve the pinned Sparkle package. Its tools are in
-   `build/SourcePackages/artifacts/sparkle/Sparkle/bin/`.
-2. Run that directory’s `generate_keys` tool on the release maintainer’s Mac.
-   This is an explicit release setup action: it creates a private signing key in
-   the login Keychain and prints the public key. Back up the private key securely;
-   never commit it. Normal development builds do not invoke this tool.
-3. Choose a stable, publicly readable HTTPS appcast URL. One option for this
-   repository is
-   `https://github.com/arkaydeustech/vulkanglass/releases/latest/download/appcast.xml`.
-   This URL only works after each latest non-prerelease release includes an
-   `appcast.xml` asset and the repository/assets are publicly accessible.
-   Private GitHub assets requiring a PAT are not supported by this setup.
-4. Set `SPARKLE_FEED_URL` and `SPARKLE_PUBLIC_ED_KEY` in
-   `scripts/generate_xcodeproj.py`, then regenerate the project. These are public
-   values and should be committed so every subsequent build has the same trust
-   configuration. Alternatively, supply these two Xcode build settings when
-   creating release archives. `VulkanGlass/Info.plist` expands those settings.
+`mise run release` (`python3 scripts/release.py publish`):
 
-Keep the existing ad-hoc signing configuration for local development. For public
-macOS distribution, configure Developer ID signing and notarization separately
-once the team and certificate are available. Include Sparkle’s nested helpers and
-the Quick Look extension in signing/export verification; follow
-[Sparkle’s distribution guidance](https://sparkle-project.org/documentation/).
-Do not remove signature verification to work around a packaging problem.
+1. Regenerates the project and checks that the working tree is clean, `main`
+   matches `origin/main`, the version in `scripts/generate_xcodeproj.py` matches
+   the `GitHubService.swift` user agent, and the tag `v<version>` does not exist.
+2. Checks the Developer ID certificate, notarization credentials, and that the
+   Keychain's Sparkle key matches `SPARKLE_PUBLIC_ED_KEY` in `scripts/release.py`.
+3. Archives a Release build signed with Developer ID and the hardened runtime,
+   with the build number, `SPARKLE_FEED_URL`, and `SPARKLE_PUBLIC_ED_KEY` supplied
+   as build settings, then exports it for Developer ID distribution.
+4. Verifies the app's versions, feed, key, and signature, notarizes and staples
+   it, and checks it with Gatekeeper.
+5. Creates, signs, notarizes, and staples `VulkanGlass.dmg` for the website.
+6. Zips the app for Sparkle and runs Sparkle's `generate_appcast`, which signs the
+   zip with the Keychain key and writes `appcast.xml` with embedded release notes.
+7. Tags the commit, pushes the tag, uploads the disk image, zip, and appcast to a
+   draft GitHub release, and publishes it as the latest release once all assets
+   are present.
 
-## Publishing each update
+Only builds made this way carry the update feed and key. Development builds,
+tests, and `mise run install` builds leave `SPARKLE_FEED_URL` and
+`SPARKLE_PUBLIC_ED_KEY` empty, so their update controls are disabled with an
+explanation.
 
-1. Follow [version-update.md](version-update.md). **Increase `CFBundleVersion`
-   for every published update**, even if the public version also changes.
-   Sparkle compares build numbers, not the public version label.
-2. Build/export the configured Release app, sign and notarize it as appropriate,
-   and finish stapling before packaging. Verify its embedded `SUFeedURL` and
-   `SUPublicEDKey` and its code signature.
-3. Put the app in a ZIP preserving permissions and symlinks, for example:
+The stable public URLs always point at the newest release:
 
-   ```bash
-   mkdir -p output/updates
-   ditto -c -k --sequesterRsrc --keepParent /path/to/VulkanGlass.app output/updates/VulkanGlass-0.3-2.zip
-   ```
+- Website download: `https://github.com/arkaydeustech/vulkanglass/releases/latest/download/VulkanGlass.dmg`
+- Update feed: `https://github.com/arkaydeustech/vulkanglass/releases/latest/download/appcast.xml`
 
-4. Use Sparkle’s `generate_appcast` to sign the archive and generate the feed.
-   For a GitHub release tagged `v0.3`, for example:
+Each appcast lists only its own release; Sparkle needs only the newest entry.
+Download URLs in an appcast are tag-specific, so never delete a published
+release's assets.
+
+## One-time setup on the release Mac
+
+1. **Developer ID certificate.** The login Keychain needs a valid
+   "Developer ID Application" certificate for team `QWD87G9T3P`
+   (`security find-identity -v -p codesigning`).
+2. **Notarization credentials.** Store them once as a Keychain profile. With an
+   Apple ID and an app-specific password from <https://account.apple.com>:
 
    ```bash
-   build/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast \
-     --download-url-prefix https://github.com/arkaydeustech/vulkanglass/releases/download/v0.3/ \
-     output/updates
+   xcrun notarytool store-credentials vulkanglass-notary \
+     --apple-id <your Apple ID> --team-id QWD87G9T3P
    ```
 
-   Use a clean staging directory for a single release with this tag-specific URL
-   prefix. Optionally put a matching `.html` or `.md` release-notes file beside
-   the ZIP before generation. The generator needs access to the signing key;
-   use its `--help` for file-based signing in CI. Do not put private keys in the
-   output directory or upload them. The public key embedded in both the old and
-   new app must match the signing key.
-5. Upload `appcast.xml`, the ZIP, and any referenced release notes/deltas to the
-   same release. Check every enclosure URL resolves to the exact signed bytes.
-   Publish only when all assets are present. Keep older download URLs available.
-   No publishing is performed by the app or normal build scripts.
+   An App Store Connect API key also works: pass `--key`, `--key-id`, and
+   `--issuer` instead of `--apple-id`.
+3. **Sparkle signing key.** Run `mise run release:setup`. It creates the key in
+   the login Keychain if none exists (macOS may ask for Keychain access) and
+   prints the public key. Commit that value as `SPARKLE_PUBLIC_ED_KEY` in
+   `scripts/release.py`. Back up the private key offline with Sparkle's
+   `generate_keys -x <file>` as the command suggests, and never commit it.
+   Losing it means installed apps can no longer be updated; changing it breaks
+   updates for every installed copy.
+
+`mise run release:check` confirms everything is in place without building.
+
+The first update-capable release must already contain the feed URL and public
+key. Copies installed before it (0.2.1 and earlier) have no updater
+configuration and need one manual installation from the disk image.
+
+## Publishing a release
+
+1. Bump the version following [version-update.md](version-update.md) and merge
+   it to `main`. The build number is set automatically.
+2. On the release Mac, check out `main`, pull, and run:
+
+   ```bash
+   mise run release
+   ```
+
+   Pass `--notes <file>` to use hand-written Markdown release notes. By default
+   the notes list the `feat`, `fix`, and `perf` commit subjects since the previous
+   tag; the first release uses a short summary instead.
+3. Notarization usually takes a few minutes per submission, and there are two
+   (the app, then the disk image). macOS may ask `codesign` and
+   `generate_appcast` for Keychain access; choose **Always Allow**.
+
+To rehearse without publishing, run `mise run release:build`. It produces the
+same files in `output/release/v<version>/` and tags or uploads nothing. It also
+runs from an uncommitted or non-`main` checkout, with a warning.
+
+If publishing fails after the tag was pushed, fix the problem and delete the tag
+before retrying: `git push origin :refs/tags/v<version>` and
+`git tag -d v<version>`. Delete any draft release with `gh release delete`.
+
+## Build numbers
+
+Sparkle compares `CFBundleVersion`, not the public version. The release script
+uses the number of commits in `main`'s history, which only grows, and refuses to
+publish a build number that is not larger than the one in the published appcast.
+`--build-number <n>` overrides it if the history ever changes. Development
+builds keep build number 1, so they are always older than any release.
 
 ## Verification
 
+- `mise run test:release` covers the release script's version, build number,
+  appcast, signing identity, and release note logic.
 - `python3 scripts/build.py` builds and launches with authentication and updates
   disabled. Debug builds only enable Sparkle with an explicit `--enable-updates`
-  argument; XCTest hosts always disable it, even with that argument.
+  argument, and have no feed unless one is supplied as a build setting; XCTest
+  hosts always disable updates, even with that argument.
 - Run the XCTest suite as documented in the repository. `AppUpdaterTests` uses
   a mock driver to cover trust configuration, lifecycle, persisted preference
   handling, availability gating, startup failures, and the test/development guard.
   It also constructs the real Sparkle adapter, exercises its KVO preference
   bridge, and verifies startup fails closed against the unconfigured test host
   before any network request can begin.
-- For an actual installation smoke test, use two **disposable copies** with the
-  same bundle ID and public key and increasing build numbers. Configure a test
-  HTTPS feed before building. Launch the older copy with `--disable-auth
-  --enable-updates` when using Debug. Check for updates, accept the download,
-  relaunch, and verify the newer version and saved notes. Also test cancellation,
-  an unreachable feed, a corrupt archive, and refusing quit after a failed save.
-  Do not point a development feed at a working installation.
-
-A real signed-feed download/install/relaunch test needs the maintainer’s release
-configuration and signed update assets; the offline unit suite does not replace it.
+- After publishing, install the previous release from its disk image, choose
+  **Check for Updates…**, install the update, and confirm the new version
+  relaunches with saved notes intact.
