@@ -165,6 +165,56 @@ final class QuickLookPreviewTests: XCTestCase {
         XCTAssertTrue(controller.view.subviews.isEmpty)
     }
 
+    @MainActor
+    func testQuickLookCentresTheReadingColumnInAWideWindow() async throws {
+        let document = QuickLookPreviewDocument(
+            text: "Body",
+            baseURL: FileManager.default.temporaryDirectory,
+            blocks: MDBlock.parse("Body")
+        )
+        let hostingView = NSHostingView(rootView: QuickLookMarkdownView(document: document))
+        for paneWidth: CGFloat in [500, 1_000] {
+            hostingView.frame = NSRect(x: 0, y: 0, width: paneWidth, height: 400)
+            hostingView.layoutSubtreeIfNeeded()
+            let readingView = try await readingTextView(in: hostingView)
+            let scroll = try XCTUnwrap(readingView.enclosingScrollView)
+
+            XCTAssertEqual(
+                readingView.convert(readingView.textContainerOrigin, to: hostingView).x,
+                VGTheme.documentHorizontalInset(paneWidth: paneWidth),
+                accuracy: 1,
+                "Pane width: \(paneWidth)"
+            )
+            XCTAssertEqual(
+                scroll.convert(scroll.bounds, to: hostingView).maxX,
+                paneWidth,
+                accuracy: 1,
+                "The scroller should sit at the window's trailing edge. Pane width: \(paneWidth)"
+            )
+        }
+        withExtendedLifetime(hostingView) {}
+    }
+
+    /// SwiftUI may install the reading view's AppKit host a run-loop turn after layout.
+    @MainActor
+    private func readingTextView(in root: NSView) async throws -> ReadingNSTextView {
+        for _ in 0..<20 {
+            root.layoutSubtreeIfNeeded()
+            if let match = firstSubview(of: ReadingNSTextView.self, in: root) { return match }
+            await Task.yield()
+        }
+        return try XCTUnwrap(firstSubview(of: ReadingNSTextView.self, in: root))
+    }
+
+    @MainActor
+    private func firstSubview<T: NSView>(of type: T.Type, in root: NSView) -> T? {
+        if let match = root as? T { return match }
+        for subview in root.subviews {
+            if let match = firstSubview(of: type, in: subview) { return match }
+        }
+        return nil
+    }
+
     private func temporaryFileURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).md")
