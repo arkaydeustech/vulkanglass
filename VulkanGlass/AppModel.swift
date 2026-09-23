@@ -3,6 +3,38 @@ import Foundation
 import Observation
 import UniformTypeIdentifiers
 
+@MainActor
+enum UnsavedChangesAlert {
+    static func make(titles: [String]) -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        if titles.count == 1, let title = titles.first {
+            alert.messageText = "Do you want to save the changes made to “\(title)”?"
+            alert.informativeText = "Your changes will be lost if you don’t save them."
+        } else {
+            alert.messageText = "Do you want to save the changes made to \(titles.count) files?"
+            alert.informativeText = "Unsaved: \(titles.joined(separator: ", ")). "
+                + "Your changes will be lost if you don’t save them."
+        }
+        let save = alert.addButton(withTitle: "Save")
+        save.keyEquivalent = "\r"
+        let discard = alert.addButton(withTitle: "Don’t Save")
+        discard.keyEquivalent = "d"
+        discard.keyEquivalentModifierMask = .command
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        return alert
+    }
+
+    static func decision(for response: NSApplication.ModalResponse) -> UnsavedChangesDecision {
+        switch response {
+        case .alertFirstButtonReturn: .save
+        case .alertSecondButtonReturn: .discard
+        default: .cancel
+        }
+    }
+}
+
 struct AppModelDependencies {
     var githubCLIStatus: (Bool) async -> GitHubCLIStatus
     var githubUser: (String) async throws -> GitHubUser
@@ -42,26 +74,7 @@ struct AppModelDependencies {
             return panel.url
         },
         confirmUnsavedChanges: { titles in
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            if titles.count == 1, let title = titles.first {
-                alert.messageText = "Do you want to save the changes made to “\(title)”?"
-                alert.informativeText = "Your changes will be lost if you don’t save them."
-            } else {
-                alert.messageText = "Do you want to save the changes made to \(titles.count) files?"
-                alert.informativeText = "Unsaved: \(titles.joined(separator: ", ")). "
-                    + "Your changes will be lost if you don’t save them."
-            }
-            alert.addButton(withTitle: "Save")
-            let discard = alert.addButton(withTitle: "Don’t Save")
-            discard.keyEquivalent = "d"
-            discard.keyEquivalentModifierMask = .command
-            alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn: return .save
-            case .alertSecondButtonReturn: return .discard
-            default: return .cancel
-            }
+            UnsavedChangesAlert.decision(for: UnsavedChangesAlert.make(titles: titles).runModal())
         }
     )
 }
@@ -308,7 +321,7 @@ final class AppModel {
                 busyMessage = nil
                 return
             }
-            rejectMissingVault(path: path, name: URL(fileURLWithPath: path).lastPathComponent)
+            await rejectMissingVault(path: path, name: URL(fileURLWithPath: path).lastPathComponent)
             return
         }
         let info = await Task.detached { GitService.inspect(path: path) }.value
@@ -319,7 +332,7 @@ final class AppModel {
     func openVault(_ info: VaultInfo) async {
         guard FileService.directoryExists(at: info.path) else {
             guard await commitTitleEditing() else { return }
-            rejectMissingVault(path: info.path, name: info.name)
+            await rejectMissingVault(path: info.path, name: info.name)
             return
         }
         if (!tabs.isEmpty || vault != nil), vault?.path != info.path {
@@ -701,8 +714,8 @@ final class AppModel {
                 tabs[index].originalContent = tabs[index].content
             }
             updateMetadata(for: tab.path, content: tab.content)
-            if vault != nil {
-                if sync { await syncNow(message: "Update \(tab.title)") }
+            if vault != nil, sync, tab.savesAutomatically {
+                await syncNow(message: "Update \(tab.title)")
             }
             return true
         } catch {
@@ -1074,8 +1087,12 @@ final class AppModel {
     }
 
     /// Shows a toast and returns to the welcome screen when a vault folder is gone.
-    private func rejectMissingVault(path: String, name: String) {
+    private func rejectMissingVault(path: String, name: String) async {
         busyMessage = nil
+        let clearsWorkspace = vault == nil || vault?.path == path
+        if clearsWorkspace {
+            guard await resolveUnsavedStandaloneChanges() else { return }
+        }
         errorMessage = FileServiceError.missingVault(name).localizedDescription
         forgetRecent(path: path)
         if vault == nil || vault?.path == path {
@@ -1155,10 +1172,13 @@ final class AppModel {
 
     func openStandalone(url: URL) async {
         do {
-            let text = try FileService.read(url)
+            // Reject unreadable replacements before changing or flushing the current workspace.
+            _ = try FileService.read(url)
             guard await commitTitleEditing() else { return }
             guard await resolveUnsavedStandaloneChanges() else { return }
             guard await flushDirtyTabs() else { return }
+            // A Save decision may have changed this same file since the readability check.
+            let text = try FileService.read(url)
             let inheritedEditorMode = editorMode
             let tab = NoteTab(
                 path: url.path,

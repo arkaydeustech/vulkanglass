@@ -13,6 +13,9 @@ final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
     /// The most recent external open; each one waits for the previous so files open in order.
     private(set) var externalOpenTask: Task<Void, Never>?
     private var pendingFileURLs: [URL] = []
+    var replyToTermination: (NSApplication, Bool) -> Void = { application, ready in
+        application.reply(toApplicationShouldTerminate: ready)
+    }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         pendingFileURLs.append(contentsOf: urls)
@@ -35,7 +38,7 @@ final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
         guard let model, model.tabs.contains(where: { $0.dirty }) else { return .terminateNow }
         Task { @MainActor in
             let ready = await model.prepareToTerminate()
-            sender.reply(toApplicationShouldTerminate: ready)
+            replyToTermination(sender, ready)
         }
         return .terminateLater
     }
