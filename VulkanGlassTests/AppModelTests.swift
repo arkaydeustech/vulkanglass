@@ -338,10 +338,13 @@ final class AppModelTests: XCTestCase {
         let b = root.appendingPathComponent("B.md")
         try "a".write(to: a, atomically: true, encoding: .utf8)
         try "b".write(to: b, atomically: true, encoding: .utf8)
-        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
         model.tabs = [
-            NoteTab(path: a.path, title: "A", content: "a", originalContent: "a", isStandalone: true),
-            NoteTab(path: b.path, title: "B", content: "b", originalContent: "b", isStandalone: true)
+            NoteTab(path: a.path, title: "A", content: "a", originalContent: "a", isStandalone: false),
+            NoteTab(path: b.path, title: "B", content: "b", originalContent: "b", isStandalone: false)
         ]
         model.activeTabID = a.path
 
@@ -358,14 +361,237 @@ final class AppModelTests: XCTestCase {
         let root = try temporaryDirectory()
         let file = root.appendingPathComponent("Note.md")
         try "old".write(to: file, atomically: true, encoding: .utf8)
-        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
-        model.tabs = [NoteTab(path: file.path, title: "Note", content: "new", originalContent: "old", isStandalone: true)]
+        let prompts = UnsavedChangesPrompts(decision: .cancel)
+        let model = manualSaveModel(prompts: prompts)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = [NoteTab(path: file.path, title: "Note", content: "new", originalContent: "old", isStandalone: false)]
         model.activeTabID = file.path
 
         await model.closeTab(file.path)
 
         XCTAssertTrue(model.tabs.isEmpty)
         XCTAssertEqual(try FileService.read(file), "new")
+        XCTAssertTrue(prompts.asked.isEmpty)
+    }
+
+    func testStandaloneEditsAreNotAutosavedUntilTheUserSaves() async throws {
+        let root = try temporaryDirectory()
+        let a = root.appendingPathComponent("A.md")
+        let b = root.appendingPathComponent("B.md")
+        try "a".write(to: a, atomically: true, encoding: .utf8)
+        try "b".write(to: b, atomically: true, encoding: .utf8)
+        let model = manualSaveModel(prompts: UnsavedChangesPrompts(decision: .cancel))
+        model.tabs = [
+            NoteTab(path: a.path, title: "A", content: "a", originalContent: "a", isStandalone: true),
+            NoteTab(path: b.path, title: "B", content: "b", originalContent: "b", isStandalone: true)
+        ]
+        model.activeTabID = a.path
+
+        model.updateContent(a.path, "edited a")
+        await model.setActiveTab(b.path)
+        model.updateContent(b.path, "edited b")
+        await model.awaitPendingSaves()
+        await model.flushDirtyTabs()
+
+        XCTAssertEqual(try FileService.read(a), "a")
+        XCTAssertEqual(try FileService.read(b), "b")
+        XCTAssertTrue(model.tabs.allSatisfy(\.dirty))
+        XCTAssertEqual(model.saveCommandTitle, "Save")
+
+        await model.saveActive(sync: true)
+
+        XCTAssertEqual(try FileService.read(b), "edited b")
+        XCTAssertEqual(try FileService.read(a), "a")
+        XCTAssertFalse(model.tabs[1].dirty)
+        XCTAssertTrue(model.tabs[0].dirty)
+    }
+
+    func testSavingStandaloneFileBesideAVaultDoesNotSyncTheVault() async throws {
+        let vaultRoot = try temporaryDirectory()
+        let file = try temporaryDirectory().appendingPathComponent("Loose.md")
+        try "old".write(to: file, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = true
+        var dependencies = disabledAuthDependencies()
+        dependencies.authenticationDisabled = { false }
+        dependencies.syncGit = { _, _, _ in
+            XCTFail("a standalone file is not part of the vault's repository")
+            return GitStatus(state: .synced)
+        }
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: vaultRoot.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = [NoteTab(path: file.path, title: "Loose", content: "old", originalContent: "old", isStandalone: true)]
+        model.activeTabID = file.path
+
+        model.updateContent(file.path, "new")
+        await model.awaitPendingSaves()
+        XCTAssertEqual(try FileService.read(file), "old")
+
+        await model.saveActive(sync: true)
+
+        XCTAssertEqual(try FileService.read(file), "new")
+        XCTAssertFalse(model.tabs[0].dirty)
+    }
+
+    func testVaultNoteSaveCommandStillSyncs() {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        XCTAssertEqual(model.saveCommandTitle, "Save and sync")
+        model.tabs = [NoteTab(path: "/vault/Note.md", title: "Note", content: "", originalContent: "", isStandalone: false)]
+        model.activeTabID = "/vault/Note.md"
+        XCTAssertEqual(model.saveCommandTitle, "Save and sync")
+    }
+
+    func testClosingUnsavedStandaloneTabAsksBeforeClosing() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Note.md")
+        try "old".write(to: file, atomically: true, encoding: .utf8)
+        let prompts = UnsavedChangesPrompts(decision: .cancel)
+        let model = manualSaveModel(prompts: prompts)
+        model.tabs = [NoteTab(path: file.path, title: "Note", content: "new", originalContent: "old", isStandalone: true)]
+        model.activeTabID = file.path
+
+        await model.closeTab(file.path)
+
+        XCTAssertEqual(prompts.asked, [["Note"]])
+        XCTAssertEqual(model.tabs.map(\.content), ["new"])
+        XCTAssertEqual(try FileService.read(file), "old")
+
+        prompts.decision = .discard
+        await model.closeTab(file.path)
+
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertEqual(try FileService.read(file), "old")
+    }
+
+    func testClosingUnsavedStandaloneTabCanSaveFirst() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Note.md")
+        try "old".write(to: file, atomically: true, encoding: .utf8)
+        let prompts = UnsavedChangesPrompts(decision: .save)
+        let model = manualSaveModel(prompts: prompts)
+        model.tabs = [NoteTab(path: file.path, title: "Note", content: "new", originalContent: "old", isStandalone: true)]
+        model.activeTabID = file.path
+
+        await model.closeTab(file.path)
+
+        XCTAssertEqual(prompts.asked, [["Note"]])
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertEqual(try FileService.read(file), "new")
+    }
+
+    func testClosingCleanStandaloneTabDoesNotAsk() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Note.md")
+        try "same".write(to: file, atomically: true, encoding: .utf8)
+        let prompts = UnsavedChangesPrompts(decision: .cancel)
+        let model = manualSaveModel(prompts: prompts)
+        model.tabs = [NoteTab(path: file.path, title: "Note", content: "same", originalContent: "same", isStandalone: true)]
+        model.activeTabID = file.path
+
+        await model.closeTab(file.path)
+
+        XCTAssertTrue(prompts.asked.isEmpty)
+        XCTAssertTrue(model.tabs.isEmpty)
+    }
+
+    func testFailedSaveFromClosePromptKeepsTheTabOpen() async {
+        let path = "/dev/null/Note.md"
+        let model = manualSaveModel(prompts: UnsavedChangesPrompts(decision: .save))
+        model.tabs = [NoteTab(path: path, title: "Note", content: "new", originalContent: "old", isStandalone: true)]
+        model.activeTabID = path
+
+        await model.closeTab(path)
+
+        XCTAssertEqual(model.tabs.map(\.path), [path])
+        XCTAssertTrue(model.tabs[0].dirty)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testReplacingUnsavedStandaloneTabsAsksOnceForAllOfThem() async throws {
+        let root = try temporaryDirectory()
+        let a = root.appendingPathComponent("A.md")
+        let b = root.appendingPathComponent("B.md")
+        let replacement = root.appendingPathComponent("Replacement.md")
+        try "a".write(to: a, atomically: true, encoding: .utf8)
+        try "b".write(to: b, atomically: true, encoding: .utf8)
+        try "replacement".write(to: replacement, atomically: true, encoding: .utf8)
+        let prompts = UnsavedChangesPrompts(decision: .cancel)
+        let model = manualSaveModel(prompts: prompts)
+        model.tabs = [
+            NoteTab(path: a.path, title: "A", content: "edited a", originalContent: "a", isStandalone: true),
+            NoteTab(path: b.path, title: "B", content: "edited b", originalContent: "b", isStandalone: true)
+        ]
+        model.activeTabID = a.path
+
+        await model.openStandalone(url: replacement)
+
+        XCTAssertEqual(prompts.asked, [["A", "B"]])
+        XCTAssertEqual(model.tabs.map(\.path), [a.path, b.path])
+        XCTAssertEqual(try FileService.read(a), "a")
+
+        prompts.decision = .save
+        await model.openStandalone(url: replacement)
+
+        XCTAssertEqual(model.tabs.map(\.path), [replacement.path])
+        XCTAssertEqual(try FileService.read(a), "edited a")
+        XCTAssertEqual(try FileService.read(b), "edited b")
+    }
+
+    func testClosingVaultAsksAboutUnsavedStandaloneTabs() async throws {
+        let root = try temporaryDirectory()
+        let note = root.appendingPathComponent("Note.md")
+        let loose = try temporaryDirectory().appendingPathComponent("Loose.md")
+        try "note".write(to: note, atomically: true, encoding: .utf8)
+        try "loose".write(to: loose, atomically: true, encoding: .utf8)
+        let prompts = UnsavedChangesPrompts(decision: .cancel)
+        let model = manualSaveModel(prompts: prompts)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = [
+            NoteTab(path: note.path, title: "Note", content: "note", originalContent: "note", isStandalone: false),
+            NoteTab(path: loose.path, title: "Loose", content: "edited", originalContent: "loose", isStandalone: true)
+        ]
+        model.activeTabID = note.path
+
+        await model.closeVault()
+
+        XCTAssertEqual(prompts.asked, [["Loose"]])
+        XCTAssertNotNil(model.vault)
+        XCTAssertEqual(model.tabs.count, 2)
+
+        prompts.decision = .discard
+        await model.closeVault()
+
+        XCTAssertNil(model.vault)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertEqual(try FileService.read(loose), "loose")
+    }
+
+    func testQuittingFlushesVaultNotesAndAsksAboutStandaloneFiles() async throws {
+        let root = try temporaryDirectory()
+        let note = root.appendingPathComponent("Note.md")
+        let loose = try temporaryDirectory().appendingPathComponent("Loose.md")
+        try "note".write(to: note, atomically: true, encoding: .utf8)
+        try "loose".write(to: loose, atomically: true, encoding: .utf8)
+        let prompts = UnsavedChangesPrompts(decision: .cancel)
+        let model = manualSaveModel(prompts: prompts)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = [
+            NoteTab(path: note.path, title: "Note", content: "edited note", originalContent: "note", isStandalone: false),
+            NoteTab(path: loose.path, title: "Loose", content: "edited loose", originalContent: "loose", isStandalone: true)
+        ]
+
+        let cancelled = await model.prepareToTerminate()
+
+        XCTAssertFalse(cancelled)
+        XCTAssertEqual(prompts.asked, [["Loose"]])
+        XCTAssertEqual(try FileService.read(note), "edited note")
+        XCTAssertEqual(try FileService.read(loose), "loose")
+
+        prompts.decision = .save
+        let saved = await model.prepareToTerminate()
+
+        XCTAssertTrue(saved)
+        XCTAssertEqual(try FileService.read(loose), "edited loose")
     }
 
     func testNewVaultNoteOpensInSourceModeWithPlaceholderTitleReadyToReplace() async throws {
@@ -1962,10 +2188,30 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(try FileService.read(source), "source")
     }
 
+    func testRenamingStandaloneFileKeepsUnsavedEditsUnwritten() async throws {
+        let root = try temporaryDirectory()
+        let source = root.appendingPathComponent("Solo.md")
+        try "body".write(to: source, atomically: true, encoding: .utf8)
+        let model = manualSaveModel(prompts: UnsavedChangesPrompts(decision: .cancel))
+        model.tabs = [NoteTab(path: source.path, title: "Solo", content: "edited", originalContent: "body", isStandalone: true)]
+        model.activeTabID = source.path
+
+        await model.renameNote(path: source.path, newName: "Renamed")
+
+        let destination = root.appendingPathComponent("Renamed.md")
+        XCTAssertEqual(model.activeTabID, destination.path)
+        XCTAssertEqual(try FileService.read(destination), "body")
+        XCTAssertTrue(model.activeTab?.dirty == true)
+
+        await model.saveActive(sync: false)
+
+        XCTAssertEqual(try FileService.read(destination), "edited")
+    }
+
     func testRenameStopsWhenDirtyTabCannotBeSaved() async {
         let source = "/dev/null/Unsaved.md"
         let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
-        model.tabs = [NoteTab(path: source, title: "Unsaved", content: "new", originalContent: "old", isStandalone: true)]
+        model.tabs = [NoteTab(path: source, title: "Unsaved", content: "new", originalContent: "old", isStandalone: false)]
         model.activeTabID = source
 
         await model.renameNote(path: source, newName: "Renamed")
@@ -2264,6 +2510,18 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    /// A model whose "save changes?" prompt answers from `prompts` instead of showing an alert.
+    private func manualSaveModel(prompts: UnsavedChangesPrompts) -> AppModel {
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        var dependencies = disabledAuthDependencies()
+        dependencies.confirmUnsavedChanges = { titles in
+            prompts.asked.append(titles)
+            return prompts.decision
+        }
+        return AppModel(settings: settings, bootstrapOnLaunch: false, dependencies: dependencies)
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -2386,4 +2644,15 @@ private func firstDescendant<View: NSView>(of type: View.Type, in root: NSView) 
         if let match = firstDescendant(of: type, in: subview) { return match }
     }
     return nil
+}
+
+/// Records the unsaved-changes prompts a model shows and answers them with `decision`.
+@MainActor
+private final class UnsavedChangesPrompts {
+    var decision: UnsavedChangesDecision
+    var asked: [[String]] = []
+
+    init(decision: UnsavedChangesDecision) {
+        self.decision = decision
+    }
 }

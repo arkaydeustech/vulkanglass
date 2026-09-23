@@ -1,6 +1,6 @@
 # Vulkan Glass
 
-Native macOS SwiftUI app for Markdown notes. Vaults are GitHub repositories; saving a note commits and pushes. Individual `.md` files can be opened outside a vault.
+Native macOS SwiftUI app for Markdown notes. Vaults are GitHub repositories; saving a note commits and pushes. Individual `.md` files can be opened outside a vault; those are not autosaved — save them with ⌘S or File ▸ Save, and closing or quitting asks before discarding unsaved edits.
 
 Accent color is teal. Layout follows Obsidian (ribbon, file tree, editor, backlinks, graph).
 

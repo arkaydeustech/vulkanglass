@@ -34,8 +34,8 @@ final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model, model.tabs.contains(where: { $0.dirty }) else { return .terminateNow }
         Task { @MainActor in
-            let saved = await model.flushDirtyTabs()
-            sender.reply(toApplicationShouldTerminate: saved)
+            let ready = await model.prepareToTerminate()
+            sender.reply(toApplicationShouldTerminate: ready)
         }
         return .terminateLater
     }
@@ -72,8 +72,9 @@ struct VulkanGlassApp: App {
                     .keyboardShortcut("v", modifiers: [.command, .shift])
                 Button("Clone GitHub vault…") { model.cloneOpen = true }
                 Divider()
-                Button("Save and sync") { Task { await model.saveActive(sync: true) } }
+                Button(model.saveCommandTitle) { Task { await model.saveActive(sync: true) } }
                     .keyboardShortcut("s", modifiers: .command)
+                    .disabled(model.activeTab == nil)
             }
             CommandMenu("View") {
                 Button("Command palette") { model.commandOpen = true }
