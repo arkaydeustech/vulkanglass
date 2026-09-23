@@ -4,7 +4,6 @@ import SwiftUI
 
 struct MarkdownPreviewLayoutMetrics: Equatable {
     var scrollSurfaceSize: CGSize?
-    var readingColumnSize: CGSize?
     var contentLeading: CGFloat?
 }
 
@@ -17,7 +16,6 @@ private enum MarkdownPreviewLayoutPreferenceKey: PreferenceKey {
     ) {
         let next = nextValue()
         value.scrollSurfaceSize = next.scrollSurfaceSize ?? value.scrollSurfaceSize
-        value.readingColumnSize = next.readingColumnSize ?? value.readingColumnSize
         value.contentLeading = next.contentLeading ?? value.contentLeading
     }
 }
@@ -83,42 +81,53 @@ struct MarkdownPreviewView: View {
                 loadRemoteImages: loadRemoteImages,
                 onWiki: onWiki
             )
-            .frame(
-                width: VGTheme.readingColumnWidth(paneWidth: paneWidth),
-                height: geometry.size.height,
-                alignment: .topLeading
-            )
+            // The scroll view spans the pane so its scroller sits at the trailing edge;
+            // DocumentScrollView centres the reading column inside it.
+            .frame(width: paneWidth, height: geometry.size.height, alignment: .topLeading)
             .background {
                 if onLayout != nil {
-                    GeometryReader { columnGeometry in
+                    GeometryReader { surfaceGeometry in
                         Color.clear.preference(
                             key: MarkdownPreviewLayoutPreferenceKey.self,
                             value: MarkdownPreviewLayoutMetrics(
-                                readingColumnSize: columnGeometry.size,
-                                contentLeading: columnGeometry.frame(
+                                scrollSurfaceSize: surfaceGeometry.size,
+                                contentLeading: surfaceGeometry.frame(
                                     in: .named(layoutCoordinateSpace ?? "MarkdownPreviewLayout")
-                                ).minX + VGTheme.documentHorizontalPadding
+                                ).minX + VGTheme.documentHorizontalInset(paneWidth: paneWidth)
                             )
                         )
                     }
-                }
-            }
-            .frame(minWidth: paneWidth, alignment: .leading)
-            .background {
-                if onLayout != nil {
-                    Color.clear.preference(
-                        key: MarkdownPreviewLayoutPreferenceKey.self,
-                        value: MarkdownPreviewLayoutMetrics(scrollSurfaceSize: geometry.size)
-                    )
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .coordinateSpace(name: "MarkdownPreviewLayout")
         .onPreferenceChange(MarkdownPreviewLayoutPreferenceKey.self) { metrics in
-            guard metrics.scrollSurfaceSize != nil, metrics.readingColumnSize != nil else { return }
+            guard metrics.scrollSurfaceSize != nil, metrics.contentLeading != nil else { return }
             onLayout?(metrics)
         }
+    }
+}
+
+/// Scrolls a note across its whole pane, so the scroller sits at the pane's trailing
+/// edge, and insets the text view so a wide pane centres the reading column.
+final class DocumentScrollView: NSScrollView {
+    override func setFrameSize(_ newSize: NSSize) {
+        // Update the inset before the text view is resized, so its width-tracking
+        // container is sized once with the new inset.
+        updateDocumentInset(paneWidth: newSize.width)
+        super.setFrameSize(newSize)
+    }
+
+    override var documentView: NSView? {
+        didSet { updateDocumentInset(paneWidth: frame.width) }
+    }
+
+    private func updateDocumentInset(paneWidth: CGFloat) {
+        guard let textView = documentView as? NSTextView else { return }
+        let inset = VGTheme.documentHorizontalInset(paneWidth: paneWidth)
+        guard abs(textView.textContainerInset.width - inset) > 0.5 else { return }
+        textView.textContainerInset.width = inset
     }
 }
 
@@ -158,7 +167,7 @@ struct UnifiedReadingTextView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = DocumentScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder

@@ -3787,18 +3787,25 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertTrue(rows[1]?.allSatisfy { $0.backgroundColor == nil } == true)
     }
 
-    func testReadingPreviewFillsWideAndNarrowPanesWhileCappingItsColumn() async throws {
+    func testReadingPreviewFillsWideAndNarrowPanesWhileCentringItsColumn() async throws {
         for paneWidth: CGFloat in [1_000, 600, 100] {
             let metrics = try await readingPreviewMetrics(paneWidth: paneWidth)
             let scrollWidth = try XCTUnwrap(metrics.scrollSurfaceSize?.width)
-            let columnWidth = try XCTUnwrap(metrics.readingColumnSize?.width)
             XCTAssertEqual(scrollWidth, paneWidth, accuracy: 1)
             XCTAssertEqual(
-                columnWidth,
-                VGTheme.readingColumnWidth(paneWidth: paneWidth),
+                try XCTUnwrap(metrics.contentLeading),
+                VGTheme.documentHorizontalInset(paneWidth: paneWidth),
                 accuracy: 1
             )
         }
+    }
+
+    func testDocumentInsetCentresTheReadingColumnInWidePanes() {
+        let padding = VGTheme.documentHorizontalPadding
+        XCTAssertEqual(VGTheme.documentHorizontalInset(paneWidth: 1_000), 110 + padding)
+        XCTAssertEqual(VGTheme.documentHorizontalInset(paneWidth: 780), padding)
+        XCTAssertEqual(VGTheme.documentHorizontalInset(paneWidth: 600), padding)
+        XCTAssertEqual(VGTheme.documentHorizontalInset(paneWidth: 0), padding)
     }
 
     func testNoteEditorFillsItsPaneInReadingAndSourceModes() async throws {
@@ -3855,10 +3862,11 @@ final class EditorLifecycleTests: XCTestCase {
             hostingView.layoutSubtreeIfNeeded()
 
             await fulfillment(of: [titleReported, previewReported], timeout: 2)
+            hostingView.layoutSubtreeIfNeeded()
             let resolvedTitleLeading = try XCTUnwrap(titleLeading)
             XCTAssertEqual(
                 resolvedTitleLeading,
-                VGTheme.documentHorizontalPadding,
+                VGTheme.documentHorizontalInset(paneWidth: paneWidth),
                 accuracy: 1,
                 "Pane width: \(paneWidth)"
             )
@@ -3867,6 +3875,20 @@ final class EditorLifecycleTests: XCTestCase {
                 resolvedTitleLeading,
                 accuracy: 1,
                 "Pane width: \(paneWidth)"
+            )
+            let readingView = try XCTUnwrap(firstSubview(of: ReadingNSTextView.self, in: hostingView))
+            XCTAssertEqual(
+                readingView.convert(readingView.textContainerOrigin, to: hostingView).x,
+                resolvedTitleLeading,
+                accuracy: 1,
+                "Pane width: \(paneWidth)"
+            )
+            let readingScroll = try XCTUnwrap(readingView.enclosingScrollView)
+            XCTAssertEqual(
+                readingScroll.convert(readingScroll.bounds, to: hostingView).maxX,
+                paneWidth,
+                accuracy: 1,
+                "The scroller should sit at the pane's trailing edge. Pane width: \(paneWidth)"
             )
 
             model.editorMode = .source
