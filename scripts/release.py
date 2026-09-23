@@ -49,7 +49,7 @@ VOLUME_NAME = "Vulkan Glass"
 # Public values embedded in every release. The matching private key lives only
 # in the release maintainer's login Keychain (see `release.py setup`). Every
 # published app trusts this key, so never change it without a migration plan.
-SPARKLE_PUBLIC_ED_KEY = ""
+SPARKLE_PUBLIC_ED_KEY = "SFrWmZbsFPcOp0DLhXi0inL1895NkukUehmnXjIez9E="
 FEED_URL = f"https://github.com/{REPOSITORY}/releases/latest/download/appcast.xml"
 
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"

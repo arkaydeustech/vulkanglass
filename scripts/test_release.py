@@ -114,9 +114,12 @@ class KeyAndIdentityTests(unittest.TestCase):
             "https://github.com/arkaydeustech/vulkanglass/releases/latest/download/appcast.xml",
         )
 
-    def test_committed_public_key_is_unset_or_valid(self) -> None:
-        key = release.SPARKLE_PUBLIC_ED_KEY
-        self.assertTrue(key == "" or release.is_valid_public_key(key))
+    def test_committed_public_key_is_the_release_key(self) -> None:
+        # Every installed release trusts this key; changing it breaks updates.
+        self.assertEqual(
+            release.SPARKLE_PUBLIC_ED_KEY, "SFrWmZbsFPcOp0DLhXi0inL1895NkukUehmnXjIez9E="
+        )
+        self.assertTrue(release.is_valid_public_key(release.SPARKLE_PUBLIC_ED_KEY))
 
 
 class ReleaseNotesTests(unittest.TestCase):
