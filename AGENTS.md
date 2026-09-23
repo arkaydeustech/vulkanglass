@@ -21,6 +21,11 @@
   Apple Development identity unless a development team and certificate have been
   explicitly configured for the workspace.
 - Follow `docs/version-update.md` when changing the app version or build number.
+- Releases are built and published locally by `scripts/release.py` (see
+  `docs/app-updates.md`). Only run `mise run release` or `mise run release:build`
+  when the user explicitly asks: they use the Developer ID key and Keychain,
+  submit to Apple's notary service, and `release` publishes a public GitHub
+  release. `mise run test:release` is safe to run at any time.
 
 ## Safe development launches
 
