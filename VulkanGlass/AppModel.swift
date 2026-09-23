@@ -473,6 +473,46 @@ final class AppModel {
         await openVault(path: url.path)
     }
 
+    /// Reopens an entry from the recents list: a vault, or a standalone Markdown file.
+    /// A file that has since vanished toasts and drops out of the list.
+    func openRecent(_ item: RecentItem) async {
+        switch item {
+        case .vault(let vault):
+            await openVault(path: vault.path)
+        case .file(let file):
+            guard FileManager.default.fileExists(atPath: file.path),
+                  !FileService.directoryExists(at: file.path)
+            else {
+                errorMessage = FileServiceError.missingFile(file.name).localizedDescription
+                forgetRecentFile(path: file.path)
+                return
+            }
+            if let existing = tabs.first(where: {
+                $0.isStandalone && FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path == file.path
+            }) {
+                await openTab(path: existing.path)
+                return
+            }
+            await openStandalone(url: URL(fileURLWithPath: file.path))
+        }
+    }
+
+    /// Removes one entry from the recents list without touching it on disk.
+    func removeRecent(_ item: RecentItem) {
+        switch item {
+        case .vault(let vault): forgetRecent(path: vault.path)
+        case .file(let file): forgetRecentFile(path: file.path)
+        }
+    }
+
+    /// Empties both the recent vaults and the recent files lists.
+    func clearRecents() {
+        guard !settings.recentVaults.isEmpty || !settings.recentFiles.isEmpty else { return }
+        settings.recentVaults = []
+        settings.recentFiles = []
+        SettingsStore.save(settings)
+    }
+
     /// Opens or focuses a tab for a note path.
     func openTab(path: String, standalone: Bool = false, content: String? = nil) async {
         if activeTabID != path {
@@ -484,6 +524,7 @@ final class AppModel {
             titleEditingDraft = ""
             activeTabID = existing.id
             centerView = .editor
+            if existing.isStandalone { rememberFile(path: path) }
             return
         }
         do {
@@ -508,6 +549,7 @@ final class AppModel {
             titleEditingDraft = ""
             activeTabID = tab.id
             centerView = .editor
+            if standalone { rememberFile(path: path) }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -838,6 +880,7 @@ final class AppModel {
             let source = URL(fileURLWithPath: path)
             let dest = try await dependencies.renameFile(source, newName, root)
             retargetOpenItems(from: path, to: dest.path)
+            retargetRecentFile(from: path, to: dest.path)
             if vault != nil {
                 await refreshVault(reconcileTabs: true)
                 if let aligned = notes.first(where: {
@@ -1132,6 +1175,44 @@ final class AppModel {
         SettingsStore.save(settings)
     }
 
+    /// Records a Markdown file opened on its own so it appears in the recents list.
+    private func rememberFile(path: String) {
+        let canonical = FileService.canonicalURL(URL(fileURLWithPath: path)).path
+        let entry = RecentFile(
+            name: Markdown.title(from: canonical),
+            path: canonical,
+            lastOpened: Date().timeIntervalSince1970
+        )
+        settings.recentFiles = [entry] + settings.recentFiles.filter { $0.path != canonical }
+        settings.recentFiles = Array(settings.recentFiles.prefix(12))
+        SettingsStore.save(settings)
+    }
+
+    /// Drops a vanished file from the recents list.
+    private func forgetRecentFile(path: String) {
+        let remaining = settings.recentFiles.filter { $0.path != path }
+        guard remaining.count != settings.recentFiles.count else { return }
+        settings.recentFiles = remaining
+        SettingsStore.save(settings)
+    }
+
+    /// Keeps a renamed standalone file's recents entry pointing at its new name.
+    private func retargetRecentFile(from oldPath: String, to newPath: String) {
+        let oldCanonical = FileService.canonicalURL(URL(fileURLWithPath: oldPath)).path
+        guard let index = settings.recentFiles.firstIndex(where: {
+            $0.path == oldPath || $0.path == oldCanonical
+        }) else { return }
+        let canonical = FileService.canonicalURL(URL(fileURLWithPath: newPath)).path
+        var entry = settings.recentFiles[index]
+        entry.name = Markdown.title(from: canonical)
+        entry.path = canonical
+        settings.recentFiles[index] = entry
+        settings.recentFiles = settings.recentFiles.enumerated()
+            .filter { $0.offset == index || $0.element.path != canonical }
+            .map(\.element)
+        SettingsStore.save(settings)
+    }
+
     private func updateMetadata(for path: String, content: String) {
         guard let vault else { return }
         let canonicalRoot = FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path
@@ -1179,6 +1260,10 @@ final class AppModel {
             guard await flushDirtyTabs() else { return }
             // A Save decision may have changed this same file since the readability check.
             let text = try FileService.read(url)
+            saveTasks.values.forEach { $0.cancel() }
+            saveTasks = [:]
+            syncTask?.cancel()
+            syncTask = nil
             let inheritedEditorMode = editorMode
             let tab = NoteTab(
                 path: url.path,
@@ -1198,6 +1283,7 @@ final class AppModel {
             tabs = [tab]
             activeTabID = tab.id
             centerView = .editor
+            rememberFile(path: url.path)
         } catch {
             errorMessage = error.localizedDescription
         }

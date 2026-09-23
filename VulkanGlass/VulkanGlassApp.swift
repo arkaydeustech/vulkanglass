@@ -74,6 +74,14 @@ struct VulkanGlassApp: App {
                 Button("Open GitHub vault…") { Task { await model.openLocalVault() } }
                     .keyboardShortcut("v", modifiers: [.command, .shift])
                 Button("Clone GitHub vault…") { model.cloneOpen = true }
+                Menu("Open Recent") {
+                    ForEach(model.settings.recentItems) { item in
+                        Button(item.name) { Task { await model.openRecent(item) } }
+                    }
+                    Divider()
+                    Button("Clear Menu") { model.clearRecents() }
+                        .disabled(model.settings.recentItems.isEmpty)
+                }
                 Divider()
                 Button(model.saveCommandTitle) { Task { await model.saveActive(sync: true) } }
                     .keyboardShortcut("s", modifiers: .command)
