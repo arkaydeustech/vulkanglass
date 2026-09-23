@@ -1,9 +1,9 @@
+import AppKit
 import SwiftUI
 
 struct CommandPaletteView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
-    @FocusState private var focused: Bool
 
     private var commands: [(id: String, label: String, hint: String, run: () -> Void)] {
         [
@@ -13,7 +13,12 @@ struct CommandPaletteView: View {
             ("preview", "Toggle reading view", "⌘E", {
                 model.editorMode = model.editorMode == .source ? .preview : .source
             }),
-            ("sync", "Sync vault to GitHub", "⌘S", { Task { await model.saveActive(sync: true) } }),
+            (
+                "sync",
+                model.activeTab?.savesAutomatically == false ? "Save file" : "Sync vault to GitHub",
+                "⌘S",
+                { Task { await model.saveActive(sync: true) } }
+            ),
             ("file", "Open Markdown file (not in a vault)", "", { model.openStandaloneFile() }),
             ("clone", "Clone GitHub vault", "", { model.cloneOpen = true }),
             ("create", "Create GitHub vault", "", { model.createOpen = true }),
@@ -30,11 +35,13 @@ struct CommandPaletteView: View {
     var body: some View {
         paletteBackdrop(onDismiss: close) {
             VStack(spacing: 0) {
-                TextField("Type a command…", text: $query)
-                    .textFieldStyle(.plain)
-                    .padding(14)
-                    .focused($focused)
-                    .onSubmit { filtered.first?.run(); close() }
+                PaletteSearchField(
+                    text: $query,
+                    placeholder: "Type a command…",
+                    onSubmit: { filtered.first?.run(); close() },
+                    onCancel: close
+                )
+                .padding(14)
                 Divider()
                 ScrollView {
                     VStack(spacing: 0) {
@@ -62,7 +69,6 @@ struct CommandPaletteView: View {
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(VGTheme.divider(dark: model.dark)))
-            .onAppear { focused = true }
             .onExitCommand { close() }
         }
     }
@@ -76,7 +82,6 @@ struct CommandPaletteView: View {
 struct QuickSwitcherView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
-    @FocusState private var focused: Bool
 
     var filtered: [NoteMeta] {
         let q = query.lowercased()
@@ -86,16 +91,18 @@ struct QuickSwitcherView: View {
     var body: some View {
         paletteBackdrop(onDismiss: close) {
             VStack(spacing: 0) {
-                TextField("Jump to note…", text: $query)
-                    .textFieldStyle(.plain)
-                    .padding(14)
-                    .focused($focused)
-                    .onSubmit {
+                PaletteSearchField(
+                    text: $query,
+                    placeholder: "Jump to note…",
+                    onSubmit: {
                         if let first = filtered.first {
                             Task { await model.openTab(path: first.path) }
                             close()
                         }
-                    }
+                    },
+                    onCancel: close
+                )
+                .padding(14)
                 Divider()
                 ScrollView {
                     VStack(spacing: 0) {
@@ -121,7 +128,6 @@ struct QuickSwitcherView: View {
             .frame(width: 560)
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            .onAppear { focused = true }
             .onExitCommand { close() }
         }
     }
@@ -139,6 +145,174 @@ private func paletteBackdrop<Content: View>(
     ZStack {
         Color.black.opacity(0.4).ignoresSafeArea().onTapGesture(perform: onDismiss)
         content().offset(y: -80)
+    }
+}
+
+/// Search field for the command palette and quick switcher. SwiftUI's @FocusState cannot take
+/// first responder away from the note's NSTextView, so typing kept editing the document behind
+/// the palette. This AppKit field claims first responder when it appears and, if nothing else has
+/// taken focus by the time it is dismissed, hands focus back to whatever held it before.
+struct PaletteSearchField: NSViewRepresentable {
+    @Binding var text: String
+    var placeholder: String
+    var onSubmit: () -> Void
+    var onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: text)
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.isEditable = true
+        field.isSelectable = true
+        field.placeholderString = placeholder
+        field.setAccessibilityLabel(placeholder)
+        field.font = .systemFont(ofSize: NSFont.systemFontSize)
+        field.lineBreakMode = .byTruncatingTail
+        field.cell?.usesSingleLineMode = true
+        field.delegate = context.coordinator
+        context.coordinator.attach(field)
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        nsView.placeholderString = placeholder
+        // A SwiftUI update can arrive while AppKit's field editor holds a newer draft.
+        // Replacing stringValue then would discard the user's in-progress query and caret.
+        if nsView.currentEditor() == nil, nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSTextField, coordinator: Coordinator) {
+        coordinator.prepareForDismantle()
+        nsView.delegate = nil
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: PaletteSearchField
+        weak var textField: NSTextField?
+        /// The responder that had focus before the palette opened, restored on dismissal.
+        private(set) weak var previousResponder: NSResponder?
+        private weak var window: NSWindow?
+        private let focus: (NSTextField) -> Bool
+        private var focused = false
+        private var focusRequestPending = false
+        private var dismantling = false
+
+        init(
+            parent: PaletteSearchField,
+            focus: @escaping (NSTextField) -> Bool = {
+                guard let window = $0.window else { return false }
+                return window.makeFirstResponder($0)
+            }
+        ) {
+            self.parent = parent
+            self.focus = focus
+        }
+
+        func attach(_ textField: NSTextField) {
+            self.textField = textField
+            requestFocus()
+        }
+
+        /// The field is not in a window until SwiftUI mounts it, so focus asynchronously and retry
+        /// a few times rather than relying on the first run-loop pass.
+        func requestFocus(remainingAttempts: Int = 8) {
+            guard !focused, !focusRequestPending, !dismantling else { return }
+            focusRequestPending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.focusRequestPending = false
+                guard let textField = self.textField, !self.dismantling else { return }
+                if let window = textField.window {
+                    self.window = window
+                    if self.previousResponder == nil {
+                        self.previousResponder = Self.restorableResponder(
+                            window.firstResponder,
+                            excluding: textField
+                        )
+                    }
+                }
+                if self.focus(textField) {
+                    self.focused = true
+                } else if remainingAttempts > 1 {
+                    self.requestFocus(remainingAttempts: remainingAttempts - 1)
+                }
+            }
+        }
+
+        func prepareForDismantle() {
+            dismantling = true
+            guard focused, let window, let previousResponder else { return }
+            let textField = textField
+            // Let SwiftUI remove the field and run the chosen command first. Only restore focus
+            // if the palette still owns it; a command that moved focus elsewhere keeps its choice.
+            DispatchQueue.main.async {
+                guard Self.paletteOwnsFocus(in: window, field: textField),
+                      Self.canRestore(previousResponder, in: window)
+                else { return }
+                window.makeFirstResponder(previousResponder)
+            }
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let textField = notification.object as? NSTextField else { return }
+            parent.text = textField.stringValue
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                parent.onSubmit()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onCancel()
+                return true
+            }
+            return false
+        }
+
+        /// A field editor stands in for its text field; restoring the shared editor itself would
+        /// not reattach it, so remember the owning control instead.
+        static func restorableResponder(
+            _ responder: NSResponder?,
+            excluding textField: NSTextField
+        ) -> NSResponder? {
+            guard let responder, !(responder is NSWindow) else { return nil }
+            if let editor = responder as? NSTextView, editor.isFieldEditor {
+                guard let owner = editor.delegate as? NSTextField, owner !== textField else {
+                    return nil
+                }
+                return owner
+            }
+            return responder === textField ? nil : responder
+        }
+
+        static func paletteOwnsFocus(in window: NSWindow, field: NSTextField?) -> Bool {
+            guard let responder = window.firstResponder else { return true }
+            if responder === window { return true }
+            if let field, responder === field { return true }
+            if let editor = responder as? NSTextView, editor.isFieldEditor {
+                // A detached field editor has no delegate once the palette field is torn down.
+                return editor.delegate == nil || editor.delegate === field
+            }
+            return false
+        }
+
+        static func canRestore(_ responder: NSResponder, in window: NSWindow) -> Bool {
+            guard let view = responder as? NSView else { return false }
+            return view.window === window && view.acceptsFirstResponder
+        }
     }
 }
 

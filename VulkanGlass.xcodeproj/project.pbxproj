@@ -60,6 +60,7 @@
 		4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */; };
 		0008B1898EB1B9ACA79DC4A6 /* GitServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E091D111CB3836061C3D76 /* GitServiceTests.swift */; };
 		73429833E75444B2B54E8F58 /* GraphAndFileServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */; };
+		A024950F98F3A5135D9670D0 /* PaletteSearchFieldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FB0B4390DC2705F0EB9D64C /* PaletteSearchFieldTests.swift */; };
 		9B2AF4F97D758C0C68D2545A /* ParserAndMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */; };
 		50552FC725A83E7B9687814D /* QuickLookPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */; };
 		B276852630900D7E2BA5C81D /* WikiLinkPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 409CD772ED7093F43F555624 /* WikiLinkPickerTests.swift */; };
@@ -147,6 +148,7 @@
 				7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */,
 				E5E091D111CB3836061C3D76 /* GitServiceTests.swift */,
 				64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */,
+				6FB0B4390DC2705F0EB9D64C /* PaletteSearchFieldTests.swift */,
 				4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */,
 				616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */,
 				409CD772ED7093F43F555624 /* WikiLinkPickerTests.swift */,
@@ -210,6 +212,7 @@
 		7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCLIServiceTests.swift; sourceTree = "<group>"; };
 		E5E091D111CB3836061C3D76 /* GitServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitServiceTests.swift; sourceTree = "<group>"; };
 		64C50551879500249E6F2601 /* GraphAndFileServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphAndFileServiceTests.swift; sourceTree = "<group>"; };
+		6FB0B4390DC2705F0EB9D64C /* PaletteSearchFieldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteSearchFieldTests.swift; sourceTree = "<group>"; };
 		4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParserAndMarkdownTests.swift; sourceTree = "<group>"; };
 		616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewTests.swift; sourceTree = "<group>"; };
 		409CD772ED7093F43F555624 /* WikiLinkPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WikiLinkPickerTests.swift; sourceTree = "<group>"; };
@@ -266,6 +269,7 @@
 				4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */,
 				0008B1898EB1B9ACA79DC4A6 /* GitServiceTests.swift in Sources */,
 				73429833E75444B2B54E8F58 /* GraphAndFileServiceTests.swift in Sources */,
+				A024950F98F3A5135D9670D0 /* PaletteSearchFieldTests.swift in Sources */,
 				9B2AF4F97D758C0C68D2545A /* ParserAndMarkdownTests.swift in Sources */,
 				50552FC725A83E7B9687814D /* QuickLookPreviewTests.swift in Sources */,
 				B276852630900D7E2BA5C81D /* WikiLinkPickerTests.swift in Sources */,

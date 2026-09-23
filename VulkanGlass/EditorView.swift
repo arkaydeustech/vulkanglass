@@ -17,7 +17,7 @@ struct SourceEditor: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = DocumentScrollView()
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
@@ -1866,7 +1866,9 @@ struct NoteEditorView: View {
                                 GeometryReader { geometry in
                                     let leading = geometry.frame(
                                         in: .named("NoteEditorLayout")
-                                    ).minX + VGTheme.documentHorizontalPadding
+                                    ).minX + VGTheme.documentHorizontalInset(
+                                        paneWidth: geometry.size.width
+                                    )
                                     Color.clear
                                         .onAppear {
                                             onDocumentLeading?(.sourceBody, leading)
@@ -1954,9 +1956,11 @@ struct NoteEditorView: View {
             }
         }
         .padding(.horizontal, VGTheme.documentHorizontalPadding)
+        // Share the body's centred reading column so the title keeps its leading edge.
+        .frame(maxWidth: VGTheme.readingColumnMaxWidth, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .padding(.top, 24)
         .padding(.bottom, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

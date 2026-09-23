@@ -73,6 +73,12 @@ enum VGTheme {
         min(readingColumnMaxWidth, max(0, paneWidth))
     }
 
+    /// Leading (and trailing) inset of note text in a pane. A pane wider than the reading
+    /// column centres the column; its text still starts at the column's own padding.
+    static func documentHorizontalInset(paneWidth: CGFloat) -> CGFloat {
+        documentHorizontalPadding + (max(0, paneWidth) - readingColumnWidth(paneWidth: paneWidth)) / 2
+    }
+
     /// Preferred sidebar width, never more than 80% of the window.
     static func cappedSidebarWidth(windowWidth: CGFloat) -> CGFloat {
         min(sidebarWidth, max(0, windowWidth * sidebarMaxWindowFraction))
