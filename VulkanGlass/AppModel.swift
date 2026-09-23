@@ -449,6 +449,12 @@ final class AppModel {
                 forgetRecentFile(path: file.path)
                 return
             }
+            if let existing = tabs.first(where: {
+                $0.isStandalone && FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path == file.path
+            }) {
+                await openTab(path: existing.path)
+                return
+            }
             await openStandalone(url: URL(fileURLWithPath: file.path))
         }
     }
@@ -1167,9 +1173,16 @@ final class AppModel {
 
     func openStandalone(url: URL) async {
         do {
-            let text = try FileService.read(url)
+            // Validate the target before saving or changing the current workspace.
+            _ = try FileService.read(url)
             guard await commitTitleEditing() else { return }
             guard await flushDirtyTabs() else { return }
+            // A dirty tab can be this same file, so read again after its save.
+            let text = try FileService.read(url)
+            saveTasks.values.forEach { $0.cancel() }
+            saveTasks = [:]
+            syncTask?.cancel()
+            syncTask = nil
             let inheritedEditorMode = editorMode
             let tab = NoteTab(
                 path: url.path,

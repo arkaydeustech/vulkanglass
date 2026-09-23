@@ -122,6 +122,17 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(DevelopmentAuthentication.isDisabled(environment: ["XCTestBundlePath": "/tmp/x.xctest"], arguments: []))
     }
 
+    func testXCTestSettingsDirectoryIsPerProcessTemporaryStorage() {
+        XCTAssertTrue(DevelopmentAuthentication.isRunningTests())
+        let expected = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VulkanGlassTests-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("VulkanGlass", isDirectory: true)
+
+        XCTAssertEqual(SettingsStore.directory, expected)
+        XCTAssertNotEqual(SettingsStore.directory, applicationSupport)
+    }
+
     func testDisabledAuthenticationDoesNotTouchCredentialSources() async {
         final class Calls {
             var cli = 0
@@ -2122,6 +2133,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.tabs.map(\.title), ["Existing", "Inside", "Outside"])
         XCTAssertEqual(model.tabs.map(\.isStandalone), [false, false, true])
         XCTAssertEqual(model.activeTab?.title, "Outside")
+        XCTAssertEqual(model.settings.recentFiles.map(\.path), [FileService.canonicalURL(outside).path])
         XCTAssertTrue(model.tabs[0].dirty)
         XCTAssertEqual(try String(contentsOf: existing, encoding: .utf8), "original")
 
@@ -2130,6 +2142,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(reversed.vault?.path, vaultRoot.path)
         XCTAssertEqual(reversed.tabs.map(\.title), ["Outside", "Inside"])
         XCTAssertEqual(reversed.tabs.map(\.isStandalone), [true, false])
+        XCTAssertEqual(reversed.settings.recentFiles.map(\.path), [FileService.canonicalURL(outside).path])
     }
 
     func testFinderOutsideBatchSwitchesOnceAndKeepsEverySelectedTab() async throws {
@@ -2297,6 +2310,43 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.settings.recentFiles.map(\.name), ["First", "Second"])
     }
 
+    func testFocusingOpenStandaloneTabMovesItsRecentEntryToTheTop() async throws {
+        let root = try temporaryDirectory()
+        let first = root.appendingPathComponent("First.md")
+        let second = root.appendingPathComponent("Second.md")
+        try "one".write(to: first, atomically: true, encoding: .utf8)
+        try "two".write(to: second, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+
+        await model.openTab(path: first.path, standalone: true)
+        await model.openTab(path: second.path, standalone: true)
+        await model.openTab(path: first.path, standalone: true)
+
+        XCTAssertEqual(model.tabs.count, 2)
+        XCTAssertEqual(model.activeTabID, first.path)
+        XCTAssertEqual(model.settings.recentFiles.map(\.path), [
+            FileService.canonicalURL(first).path,
+            FileService.canonicalURL(second).path
+        ])
+    }
+
+    func testRecentFilesEvictTheOldestAfterTwelveEntries() async throws {
+        let root = try temporaryDirectory()
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let files = (0..<13).map { root.appendingPathComponent("Note-\($0).md") }
+
+        for file in files {
+            try "body".write(to: file, atomically: true, encoding: .utf8)
+            await model.openTab(path: file.path, standalone: true)
+        }
+
+        XCTAssertEqual(model.settings.recentFiles.count, 12)
+        XCTAssertEqual(
+            model.settings.recentFiles.map(\.path),
+            files.dropFirst().reversed().map { FileService.canonicalURL($0).path }
+        )
+    }
+
     func testOpeningVaultNoteDoesNotAddItToRecentFiles() async throws {
         let root = try temporaryDirectory()
         let file = root.appendingPathComponent("Idea.md")
@@ -2340,6 +2390,81 @@ final class AppModelTests: XCTestCase {
         XCTAssertGreaterThan(model.settings.recentFiles.first?.lastOpened ?? 0, 0)
     }
 
+    func testOpenRecentOfActiveDirtyFilePreservesEditAndPendingAutosave() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Recent.md")
+        try "old".write(to: file, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        await model.openStandalone(url: file)
+        let recent = try XCTUnwrap(model.settings.recentFiles.first)
+        model.updateContent(file.path, "new unsaved text")
+
+        await model.openRecent(.file(recent))
+        await model.awaitPendingSaves()
+
+        XCTAssertEqual(model.activeTab?.content, "new unsaved text")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "new unsaved text")
+        XCTAssertEqual(model.tabs.count, 1)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testStandaloneReplacementOfSameDirtyFileReadsSavedContent() async throws {
+        let root = try temporaryDirectory()
+        let file = root.appendingPathComponent("Draft.md")
+        try "old".write(to: file, atomically: true, encoding: .utf8)
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        await model.openStandalone(url: file)
+        model.updateContent(file.path, "new unsaved text")
+
+        await model.openStandalone(url: file)
+        await model.awaitPendingSaves()
+
+        XCTAssertEqual(model.activeTab?.content, "new unsaved text")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "new unsaved text")
+    }
+
+    func testOpenRecentFileFlushesVaultTabsBeforeSwitchingWorkspaces() async throws {
+        let vaultRoot = try temporaryDirectory()
+        let note = vaultRoot.appendingPathComponent("Vault.md")
+        let file = try temporaryDirectory().appendingPathComponent("Recent.md")
+        try "vault".write(to: note, atomically: true, encoding: .utf8)
+        try "recent".write(to: file, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: vaultRoot)
+        await model.openTab(path: note.path)
+        model.updateContent(note.path, "edited vault")
+        let recent = RecentFile(name: "Recent", path: file.path, lastOpened: 0)
+
+        await model.openRecent(.file(recent))
+        await model.awaitPendingSaves()
+
+        XCTAssertNil(model.vault)
+        XCTAssertEqual(model.tabs.map(\.path), [file.path])
+        XCTAssertEqual(try String(contentsOf: note, encoding: .utf8), "edited vault")
+        XCTAssertEqual(model.activeTab?.content, "recent")
+    }
+
+    func testOpenRecentFileReplacesMultipleStandaloneTabsAfterSaving() async throws {
+        let root = try temporaryDirectory()
+        let first = root.appendingPathComponent("First.md")
+        let second = root.appendingPathComponent("Second.md")
+        let recentFile = root.appendingPathComponent("Recent.md")
+        for file in [first, second, recentFile] {
+            try "old".write(to: file, atomically: true, encoding: .utf8)
+        }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        await model.openTab(path: first.path, standalone: true)
+        await model.openTab(path: second.path, standalone: true)
+        model.updateContent(first.path, "edited first")
+        model.updateContent(second.path, "edited second")
+
+        await model.openRecent(.file(RecentFile(name: "Recent", path: recentFile.path, lastOpened: 0)))
+        await model.awaitPendingSaves()
+
+        XCTAssertEqual(model.tabs.map(\.path), [recentFile.path])
+        XCTAssertEqual(try String(contentsOf: first, encoding: .utf8), "edited first")
+        XCTAssertEqual(try String(contentsOf: second, encoding: .utf8), "edited second")
+    }
+
     func testOpenRecentVaultOpensTheVault() async throws {
         let root = try temporaryDirectory()
         try "# Welcome".write(to: root.appendingPathComponent("Welcome.md"), atomically: true, encoding: .utf8)
@@ -2364,6 +2489,22 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(model.inWorkspace)
         XCTAssertEqual(model.errorMessage, FileServiceError.missingFile("Gone").localizedDescription)
         XCTAssertEqual(model.settings.recentFiles, [kept])
+    }
+
+    func testRecentFileThatBecameDirectoryIsReportedAndForgotten() async throws {
+        let root = try temporaryDirectory()
+        let directory = root.appendingPathComponent("Former.md")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let recent = RecentFile(name: "Former", path: directory.path, lastOpened: 1)
+        var settings = AppSettings.default()
+        settings.recentFiles = [recent]
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+
+        await model.openRecent(.file(recent))
+
+        XCTAssertFalse(model.inWorkspace)
+        XCTAssertEqual(model.errorMessage, FileServiceError.missingFile("Former").localizedDescription)
+        XCTAssertTrue(model.settings.recentFiles.isEmpty)
     }
 
     func testRenamingStandaloneFileRetargetsItsRecentEntry() async throws {
@@ -2414,6 +2555,73 @@ final class AppModelTests: XCTestCase {
             settings.recentItems.map(\.name),
             ["Newest vault", "Middle file", "Old vault", "Oldest file"]
         )
+    }
+
+    func testRecentRowsUseDistinctIconsAndDisplayPaths() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let vault = RecentItem.vault(RecentVault(
+            name: "Vault", path: "/tmp/Vault", remote: nil, lastOpened: 1
+        ))
+        let file = RecentItem.file(RecentFile(
+            name: "Note", path: "\(home)/Note.md", lastOpened: 2
+        ))
+
+        XCTAssertEqual(vault.symbolName, "folder")
+        XCTAssertEqual(file.symbolName, "doc.text")
+        XCTAssertEqual(vault.detail, "/tmp/Vault")
+        XCTAssertEqual(file.detail, "~/Note.md")
+        XCTAssertEqual(file.id, "file:\(home)/Note.md")
+    }
+
+    func testWelcomeViewRendersRecentFilesWhenSettingsChange() async throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let frame = NSRect(x: 0, y: 0, width: 1000, height: 680)
+        let host = NSHostingView(rootView: WelcomeView().environment(model).frame(width: 1000, height: 680))
+        host.frame = frame
+        let window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        for _ in 0..<3 { await drainMainQueue() }
+        host.layoutSubtreeIfNeeded()
+        let empty = try renderedPNG(of: host)
+
+        model.settings.recentFiles = [
+            RecentFile(name: "Visible note", path: "/tmp/Visible.md", lastOpened: 1)
+        ]
+        for _ in 0..<3 { await drainMainQueue() }
+        host.layoutSubtreeIfNeeded()
+        let withRecent = try renderedPNG(of: host)
+
+        XCTAssertNotEqual(empty, withRecent)
+    }
+
+    func testOpenRecentMenuObservesCombinedItemsAndClearState() {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        var invalidations = 0
+        withObservationTracking {
+            _ = model.settings.recentItems
+        } onChange: {
+            invalidations += 1
+        }
+
+        model.settings.recentFiles = [
+            RecentFile(name: "Note", path: "/tmp/Note.md", lastOpened: 2)
+        ]
+        model.settings.recentVaults = [
+            RecentVault(name: "Vault", path: "/tmp/Vault", remote: nil, lastOpened: 1)
+        ]
+
+        XCTAssertEqual(invalidations, 1)
+        XCTAssertEqual(model.settings.recentItems.map(\.name), ["Note", "Vault"])
+        model.clearRecents()
+        XCTAssertTrue(model.settings.recentItems.isEmpty)
+    }
+
+    private func renderedPNG(of view: NSView) throws -> Data {
+        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
     }
 
     private func temporaryDirectory() throws -> URL {
