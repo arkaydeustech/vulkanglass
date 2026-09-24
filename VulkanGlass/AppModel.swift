@@ -1013,6 +1013,50 @@ final class AppModel {
         }
     }
 
+    /// Renames a vault folder on disk and retargets every open tab for a note inside it.
+    @discardableResult
+    func renameFolder(path: String, newName: String) async -> Bool {
+        guard let vault else { return false }
+        let source = FileService.canonicalURL(URL(fileURLWithPath: path))
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != source.lastPathComponent else { return true }
+        guard await commitTitleEditing() else { return false }
+        guard self.vault?.path == vault.path else { return false }
+
+        let prefix = source.path + "/"
+        let canonicalTabPaths = tabs.map { ($0.path, FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path) }
+        let inside = canonicalTabPaths.filter { $0.1.hasPrefix(prefix) }
+        // Pending edits must land in the folder before it moves, or a late autosave would
+        // recreate the old path.
+        for (tabPath, _) in inside {
+            if let tab = tabs.first(where: { $0.path == tabPath }), tab.dirty, tab.savesAutomatically {
+                guard await save(id: tab.id, sync: false) else { return false }
+            }
+        }
+        guard self.vault?.path == vault.path else { return false }
+
+        do {
+            let dest = try FileService.renameFolder(
+                source,
+                to: newName,
+                root: URL(fileURLWithPath: vault.path)
+            )
+            let destPath = FileService.canonicalURL(dest).path
+            for (tabPath, canonical) in inside {
+                retargetOpenItems(from: tabPath, to: destPath + "/" + canonical.dropFirst(prefix.count))
+            }
+            await refreshVault(reconcileTabs: true)
+            guard self.vault?.path == vault.path else { return true }
+            if settings.autoSync {
+                await syncNow(message: "Rename folder \(source.lastPathComponent) to \(dest.lastPathComponent)")
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     /// Renames a note on disk and retargets any open tab for that file.
     @discardableResult
     func renameNote(path: String, newName: String, sync: Bool = true) async -> Bool {
