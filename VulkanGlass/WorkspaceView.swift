@@ -158,7 +158,8 @@ struct WorkspaceView: View {
 
     private func rightColumn(width: CGFloat) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
+            HStack(spacing: 2) {
+                RightSidebarPanelPicker()
                 Spacer(minLength: 0)
                 TitleBarIcon(
                     symbol: "sidebar.right",
@@ -168,6 +169,7 @@ struct WorkspaceView: View {
                     model.rightOpen = false
                 }
             }
+            .padding(.leading, 6)
             .padding(.trailing, VGTheme.titleBarTrailingInset)
             .frame(height: VGTheme.titleBarHeight)
             .background(VGTheme.backgroundSecondary(dark: model.dark))
@@ -214,6 +216,19 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
     @ObservedObject var updater: AppUpdater
 
+    static let gitInstallInstructions = """
+        Vulkan Glass uses Git to sync vaults with GitHub. You can still open and edit notes, \
+        but syncing, cloning, and creating vaults won't work until Git is installed.
+
+        Install it either way from Terminal:
+
+        Command Line Tools (Apple): run xcode-select --install and follow the installer.
+
+        Homebrew: run brew install git.
+
+        Vulkan Glass picks Git up as soon as it is installed.
+        """
+
     var body: some View {
         ZStack {
             if model.inWorkspace {
@@ -234,6 +249,11 @@ struct RootView: View {
         .sheet(isPresented: Bindable(model).settingsOpen) { SettingsSheet(updater: updater) }
         .sheet(isPresented: Bindable(model).cloneOpen) { CloneVaultSheet() }
         .sheet(isPresented: Bindable(model).createOpen) { CreateVaultSheet() }
+        .alert("Git is not installed", isPresented: Bindable(model).gitMissingWarningOpen) {
+            Button("OK") {}
+        } message: {
+            Text(Self.gitInstallInstructions)
+        }
         .overlay(alignment: .top) {
             if let message = model.errorMessage, !model.inWorkspace {
                 ErrorToastView(message: message) {

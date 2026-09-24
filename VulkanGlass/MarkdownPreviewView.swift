@@ -480,6 +480,13 @@ struct UnifiedReadingTextView: NSViewRepresentable {
 }
 
 final class ReadingNSTextView: NSTextView {
+    override func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+        let range = selectedRange()
+        guard range.location != NSNotFound else { return false }
+        pboard.declareTypes([.string], owner: nil)
+        return pboard.setString((string as NSString).substring(with: range), forType: .string)
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         window?.makeFirstResponder(self)
         let menu = NSMenu()
@@ -497,6 +504,65 @@ final class ReadingNSTextView: NSTextView {
         selectAllItem.isEnabled = !string.isEmpty
         menu.addItem(selectAllItem)
         return menu
+    }
+}
+
+/// Rounded box behind a fenced code block in the reading view, with the language
+/// drawn in the top-right corner like the editor's badge. The label is painted rather
+/// than stored as text so copying the block yields only the code. It is the single
+/// cell of a full-width table because a bare NSTextBlock collapses to zero width.
+final class ReadingCodeBlock: NSTextTableBlock {
+    static let labelHeight: CGFloat = 18
+
+    let label: String
+    let dark: Bool
+
+    convenience init(label: String, dark: Bool) {
+        let table = NSTextTable()
+        table.numberOfColumns = 1
+        table.layoutAlgorithm = .automatic
+        table.setValue(100, type: .percentage, for: .width)
+        self.init(label: label, dark: dark, table: table)
+    }
+
+    private init(label: String, dark: Bool, table: NSTextTable) {
+        self.label = label
+        self.dark = dark
+        super.init(table: table, startingRow: 0, rowSpan: 1, startingColumn: 0, columnSpan: 1)
+        setWidth(14, type: .absolute, for: .padding, edge: .minX)
+        setWidth(14, type: .absolute, for: .padding, edge: .maxX)
+        setWidth(label.isEmpty ? 12 : 12 + Self.labelHeight, type: .absolute, for: .padding, edge: .minY)
+        setWidth(12, type: .absolute, for: .padding, edge: .maxY)
+    }
+
+    required init?(coder: NSCoder) {
+        label = ""
+        dark = false
+        super.init(coder: coder)
+    }
+
+    override func copy(with zone: NSZone? = nil) -> Any {
+        ReadingCodeBlock(label: label, dark: dark, table: table)
+    }
+
+    override func drawBackground(
+        withFrame frameRect: NSRect,
+        in controlView: NSView?,
+        characterRange charRange: NSRange,
+        layoutManager: NSLayoutManager
+    ) {
+        CodeHighlight.blockFill(dark: dark).setFill()
+        NSBezierPath(roundedRect: frameRect, xRadius: 8, yRadius: 8).fill()
+        guard !label.isEmpty else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: CodeHighlight.labelFont,
+            .foregroundColor: CodeHighlight.labelColor(dark: dark),
+        ]
+        let size = (label as NSString).size(withAttributes: attributes)
+        (label as NSString).draw(
+            at: NSPoint(x: frameRect.maxX - 12 - size.width, y: frameRect.minY + 8),
+            withAttributes: attributes
+        )
     }
 }
 
@@ -709,15 +775,28 @@ enum ReadingAttributedDocument {
         for (blockIndex, block) in blocks.enumerated() {
             if blockIndex > 0 { appendBreak() }
             switch block {
-            case .code(_, let code):
+            case .code(let language, let code):
                 let paragraph = NSMutableParagraphStyle()
-                paragraph.paragraphSpacing = 4
-                result.append(NSAttributedString(string: code, attributes: [
-                    .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .regular),
+                paragraph.textBlocks = [ReadingCodeBlock(
+                    label: CodeHighlight.displayName(for: language),
+                    dark: dark
+                )]
+                let codeFont = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+                // The trailing newline ends the last code paragraph so the box never
+                // absorbs the separator or bottom padding that follows it.
+                let styled = NSMutableAttributedString(string: code + "\n", attributes: [
+                    .font: codeFont,
                     .foregroundColor: textColor,
-                    .backgroundColor: NSColor(VGTheme.backgroundSecondary(dark: dark)).withAlphaComponent(0.85),
                     .paragraphStyle: paragraph,
-                ]))
+                ])
+                for (span, kind) in CodeHighlight.spans(in: code, language: language) {
+                    styled.addAttribute(
+                        .foregroundColor,
+                        value: CodeHighlight.color(for: kind, dark: dark),
+                        range: span
+                    )
+                }
+                result.append(styled)
             case .heading(let level, let source):
                 let start = result.length
                 appendInline(source, font: headingFont(level))
@@ -753,8 +832,23 @@ enum ReadingAttributedDocument {
             case .lines(let lines):
                 for (index, line) in lines.enumerated() {
                     if index > 0 { result.append(NSAttributedString(string: "\n")) }
-                    let displayLine = normalizedLine(line)
-                    appendInline(displayLine)
+                    guard let item = listItem(line) else {
+                        appendInline(line)
+                        continue
+                    }
+                    let start = result.length
+                    appendInline(item.marker + item.body)
+                    // Wrapped lines hang under the item's text, not under its marker.
+                    let paragraph = VGTheme.documentParagraphStyle.mutableCopy() as! NSMutableParagraphStyle
+                    paragraph.firstLineHeadIndent = item.indent
+                    paragraph.headIndent = item.indent + ceil(
+                        (item.marker as NSString).size(withAttributes: [.font: bodyFont]).width
+                    )
+                    result.addAttribute(
+                        .paragraphStyle,
+                        value: paragraph,
+                        range: NSRange(location: start, length: result.length - start)
+                    )
                 }
             case .table(let rows, let alignments, let hasHeader):
                 let cells = rows.enumerated().flatMap { row, values in
@@ -1044,15 +1138,35 @@ enum ReadingAttributedDocument {
         }
     }
 
-    private static func normalizedLine(_ line: String) -> String {
-        if line.hasPrefix("- [ ] ") { return "☐ \(line.dropFirst(6))" }
-        if line.hasPrefix("- [x] ") || line.hasPrefix("- [X] ") {
-            return "☑ \(line.dropFirst(6))"
+    private static let listItemPattern = try! NSRegularExpression(
+        pattern: #"^([ \t]*)(?:[-*+][ \t]+(?:\[([ xX])\][ \t]+)?|(\d{1,9}[.)])[ \t]+)"#
+    )
+
+    /// Points of indent per leading column of a nested list item (a tab is four columns).
+    static let listIndentPerColumn: CGFloat = 10
+
+    /// Splits a bullet, task, or numbered list line into its display marker, its text, and
+    /// the indent that nesting under a parent item gives it.
+    static func listItem(_ line: String) -> (indent: CGFloat, marker: String, body: String)? {
+        let ns = line as NSString
+        guard let match = listItemPattern.firstMatch(
+            in: line,
+            range: NSRange(location: 0, length: ns.length)
+        ) else { return nil }
+        let columns = ns.substring(with: match.range(at: 1)).reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+        let marker: String
+        if match.range(at: 3).location != NSNotFound {
+            marker = ns.substring(with: match.range(at: 3)) + " "
+        } else if match.range(at: 2).location != NSNotFound {
+            marker = ns.substring(with: match.range(at: 2)) == " " ? "☐ " : "☑ "
+        } else {
+            marker = "• "
         }
-        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-            return "• \(line.dropFirst(2))"
-        }
-        return line
+        return (
+            CGFloat(columns) * listIndentPerColumn,
+            marker,
+            ns.substring(from: NSMaxRange(match.range))
+        )
     }
 
     private static func headingFont(_ level: Int) -> NSFont {
@@ -1094,19 +1208,26 @@ enum MarkdownBlockSyntax {
         let marker: Character
         let length: Int
         let info: String
+        let indent: Int
     }
 
     static func fenceOpening(_ line: String) -> Fence? {
-        let content = line.drop(while: { $0 == " " || $0 == "\t" })
+        let indent = line.prefix(while: { $0 == " " }).count
+        guard indent <= 3 else { return nil }
+        let content = line.dropFirst(indent)
         guard let marker = content.first, marker == "`" || marker == "~" else { return nil }
         let length = content.prefix(while: { $0 == marker }).count
         guard length >= 3 else { return nil }
+        if marker == "`", content.dropFirst(length).contains("`") { return nil }
         return Fence(marker: marker, length: length,
-                     info: String(content.dropFirst(length)).trimmingCharacters(in: .whitespaces))
+                     info: String(content.dropFirst(length)).trimmingCharacters(in: .whitespaces),
+                     indent: indent)
     }
 
     static func isFenceClosing(_ line: String, opening: Fence) -> Bool {
-        let content = line.drop(while: { $0 == " " || $0 == "\t" })
+        let indent = line.prefix(while: { $0 == " " }).count
+        guard indent <= opening.indent + 3 else { return false }
+        let content = line.dropFirst(indent)
         let length = content.prefix(while: { $0 == opening.marker }).count
         return length >= opening.length && content.dropFirst(length).allSatisfy(\.isWhitespace)
     }
@@ -1154,9 +1275,11 @@ enum MDBlock: Equatable, Sendable {
                     }
                     i += 1
                 }
-                let language = openingFence.info
+                let language = openingFence.info.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
                 let content = closed ? buffer.dropFirst().dropLast() : buffer.dropFirst()[...]
-                let code = content.joined(separator: "\n")
+                let code = content
+                    .map { dropIndent(upTo: openingFence.indent, from: $0) }
+                    .joined(separator: "\n")
                 result.append(.code(language: language, code: code))
                 continue
             }
@@ -1380,6 +1503,11 @@ enum MDBlock: Equatable, Sendable {
             }
         }
         return false
+    }
+
+    private static func dropIndent(upTo count: Int, from line: String) -> String {
+        let leading = line.prefix { $0 == " " || $0 == "\t" }.count
+        return String(line.dropFirst(min(count, leading)))
     }
 
     private static func semanticContainerTag(_ line: String) -> String? {

@@ -1,39 +1,40 @@
 import SwiftUI
 
+/// Panel switcher shown in the right column's title bar, beside the sidebar toggle.
+struct RightSidebarPanelPicker: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 2) {
+            TitleBarIcon(
+                symbol: "point.3.connected.trianglepath.dotted",
+                help: "Local graph",
+                active: model.rightPanel == .graph
+            ) {
+                model.rightPanel = .graph
+            }
+            TitleBarIcon(symbol: "link", help: "Backlinks", active: model.rightPanel == .backlinks) {
+                model.rightPanel = .backlinks
+            }
+            TitleBarIcon(
+                symbol: "list.bullet.indent",
+                help: "Outline",
+                active: model.rightPanel == .outline
+            ) {
+                model.rightPanel = .outline
+            }
+            TitleBarIcon(symbol: "number", help: "Tags", active: model.rightPanel == .tags) {
+                model.rightPanel = .tags
+            }
+        }
+    }
+}
+
 struct RightSidebarView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 2) {
-                TitleBarIcon(
-                    symbol: "point.3.connected.trianglepath.dotted",
-                    help: "Local graph",
-                    active: model.rightPanel == .graph
-                ) {
-                    model.rightPanel = .graph
-                }
-                TitleBarIcon(symbol: "link", help: "Backlinks", active: model.rightPanel == .backlinks) {
-                    model.rightPanel = .backlinks
-                }
-                TitleBarIcon(
-                    symbol: "list.bullet.indent",
-                    help: "Outline",
-                    active: model.rightPanel == .outline
-                ) {
-                    model.rightPanel = .outline
-                }
-                TitleBarIcon(symbol: "number", help: "Tags", active: model.rightPanel == .tags) {
-                    model.rightPanel = .tags
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 6)
-            .frame(height: VGTheme.titleBarHeight)
-            .overlay(alignment: .bottom) {
-                VGTheme.divider(dark: model.dark).frame(height: 1)
-            }
-
             if model.rightPanel == .graph {
                 GraphView(localOnly: true, showCaption: true)
                     .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)

@@ -16,10 +16,15 @@ struct TitleBarIcon: View {
         self.run = run
     }
 
+    /// Vertical nudges so symbols with extra ink below their box (the pencil's square ends 1pt
+    /// lower than sidebar.right's) share a baseline with their title bar neighbours.
+    static let opticalOffsets: [String: CGFloat] = ["square.and.pencil": -1]
+
     var body: some View {
         Button(action: run) {
             Image(systemName: symbol)
                 .font(.system(size: VGTheme.titleBarIconFont))
+                .offset(y: Self.opticalOffsets[symbol] ?? 0)
                 .foregroundStyle(active ? VGTheme.textAccent : VGTheme.textMuted(dark: model.dark))
                 .frame(width: VGTheme.titleBarIconSize, height: VGTheme.titleBarIconSize)
                 .background(
