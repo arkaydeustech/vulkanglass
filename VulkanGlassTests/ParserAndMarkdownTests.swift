@@ -1959,6 +1959,86 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(constrained.tables.first).columnWidths.reduce(0, +), 180, accuracy: 0.01)
     }
 
+    func testRawModeShowsEveryDelimiterAndKeepsHighlighting() throws {
+        let text = """
+        # Heading
+        Some **bold**, *italic*, ~~gone~~, `code`, [link](https://example.com), [[Note|alias]] \\* and :smile: #tag
+        > quote
+        > [!NOTE]
+        > alert body
+
+        - [ ] task
+        1. ordered
+
+        | A | B |
+        | --- | --- |
+        | 1 | 2 |
+
+        ![alt](image.png)
+        <!-- comment -->
+        ---
+        ```swift
+        let x = 1
+        ```
+        Tail
+        """
+        let ns = text as NSString
+        let end = ns.length
+        let storage = NSTextStorage(string: text)
+        let decorations = LivePreview.apply(
+            to: storage,
+            caret: end,
+            selection: NSRange(location: end, length: 0),
+            dark: true,
+            raw: true
+        )
+
+        for location in 0..<end where ns.character(at: location) != 10 {
+            let character = ns.substring(with: NSRange(location: location, length: 1))
+            XCTAssertFalse(isHidden(storage, at: location), "\(character) at \(location) is shrunk")
+            let color = storage.attribute(.foregroundColor, at: location, effectiveRange: nil) as? NSColor
+            XCTAssertNotEqual(color?.alphaComponent, 0, "\(character) at \(location) is transparent")
+            let kern = storage.attribute(.kern, at: location, effectiveRange: nil) as? NSNumber
+            XCTAssertEqual(kern?.doubleValue ?? 0, 0, "\(character) at \(location) is kerned")
+            if let style = storage.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle,
+               style.maximumLineHeight > 0 {
+                XCTAssertGreaterThan(style.maximumLineHeight, 1, "\(character) at \(location) is on a collapsed line")
+            }
+        }
+
+        XCTAssertTrue(decorations.tables.isEmpty)
+        XCTAssertTrue(decorations.images.isEmpty)
+        XCTAssertTrue(decorations.emojis.isEmpty)
+        XCTAssertTrue(decorations.bars.isEmpty)
+        XCTAssertEqual(decorations.codeBlocks.count, 1)
+        XCTAssertFalse(decorations.codeBlocks[0].showBadge)
+
+        let headingFont = try XCTUnwrap(
+            storage.attribute(.font, at: ns.range(of: "Heading").location, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertEqual(headingFont.pointSize, 34)
+        let boldFont = try XCTUnwrap(
+            storage.attribute(.font, at: ns.range(of: "bold").location, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertTrue(boldFont.fontDescriptor.symbolicTraits.contains(.bold))
+        let boldMarker = storage.attribute(.foregroundColor, at: ns.range(of: "**").location, effectiveRange: nil) as? NSColor
+        let boldText = storage.attribute(.foregroundColor, at: ns.range(of: "bold").location, effectiveRange: nil) as? NSColor
+        XCTAssertNotEqual(boldMarker, boldText, "Markup is shown in the faint delimiter colour")
+        XCTAssertEqual(
+            storage.attribute(.underlineStyle, at: ns.range(of: "link").location, effectiveRange: nil) as? Int,
+            NSUnderlineStyle.single.rawValue
+        )
+        let five = ns.range(of: "1\n```").location
+        XCTAssertEqual(
+            storage.attribute(.foregroundColor, at: five, effectiveRange: nil) as? NSColor,
+            CodeHighlight.color(for: .number, dark: true)
+        )
+
+        let live = NSTextStorage(string: text)
+        LivePreview.apply(to: live, caret: end, selection: NSRange(location: end, length: 0), dark: true)
+        XCTAssertTrue(isHidden(live, at: ns.range(of: "**").location), "Live preview hides the same markup")
+    }
+
     private func isHidden(_ storage: NSTextStorage, at location: Int) -> Bool {
         let font = storage.attribute(.font, at: location, effectiveRange: nil) as? NSFont
         return (font?.pointSize ?? 16) < 1
@@ -2767,6 +2847,85 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertFalse(textView.liveDecorations.codeBlocks.isEmpty)
         XCTAssertFalse(textView.liveDecorations.tables.isEmpty)
         XCTAssertFalse(textView.liveDecorations.bars.isEmpty)
+    }
+
+    func testActiveCodeBlockFillCoversNewEmptyLineBeforeAnythingIsTyped() throws {
+        let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+        func blockRect(for text: String) throws -> (block: NSRect, caretLine: NSRect) {
+            textView.string = text
+            let end = (text as NSString).length
+            textView.liveDecorations = LivePreview.apply(
+                to: textView.textStorage!,
+                caret: end,
+                selection: NSRange(location: end, length: 0),
+                dark: true
+            )
+            // Mirror the editor's restyle: the empty last line is laid out with the typing attributes.
+            textView.typingAttributes = LivePreview.typingAttributes(at: end, in: text, dark: true)
+            let layout = try XCTUnwrap(textView.layoutManager)
+            layout.ensureLayout(for: try XCTUnwrap(textView.textContainer))
+            let decoration = try XCTUnwrap(textView.liveDecorations.codeBlocks.first)
+            XCTAssertEqual(NSMaxRange(decoration.range), end)
+            let block = try XCTUnwrap(textView.codeBlockRect(for: decoration.range))
+            var caretLine = layout.extraLineFragmentRect
+            if caretLine.isEmpty {
+                let glyph = layout.glyphIndexForCharacter(at: end - 1)
+                caretLine = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            }
+            caretLine.origin.y += textView.textContainerOrigin.y
+            return (block, caretLine)
+        }
+
+        // Return pressed at the end of an unclosed fence: the caret sits on an empty last line.
+        let empty = try blockRect(for: "```sql\nfdus\n")
+        XCTAssertGreaterThanOrEqual(empty.block.maxY, empty.caretLine.maxY)
+
+        // The block must already be as tall as it is once the first character is typed.
+        let typed = try blockRect(for: "```sql\nfdus\nx")
+        XCTAssertEqual(empty.block.height, typed.block.height, accuracy: 0.5)
+    }
+
+    func testCodeBlockFillDoesNotExtendPastItsLastLine() throws {
+        let fixtures: [(name: String, text: String, caret: Int, hasEmptyLastLine: Bool)] = [
+            ("closed fence at EOF", "```sql\nfdus\n```\n", 8, true),
+            ("no trailing newline", "```sql\nfdus", 11, false),
+            ("content after closed fence", "```sql\nfdus\n```\nprose\n", 8, true),
+        ]
+
+        for fixture in fixtures {
+            let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+            textView.string = fixture.text
+            let end = (fixture.text as NSString).length
+            textView.liveDecorations = LivePreview.apply(
+                to: try XCTUnwrap(textView.textStorage),
+                caret: fixture.caret,
+                selection: NSRange(location: fixture.caret, length: 0),
+                dark: true
+            )
+            textView.typingAttributes = LivePreview.typingAttributes(at: end, in: fixture.text, dark: true)
+            let layout = try XCTUnwrap(textView.layoutManager)
+            layout.ensureLayout(for: try XCTUnwrap(textView.textContainer))
+            let range = try XCTUnwrap(textView.liveDecorations.codeBlocks.first?.range)
+            let block = try XCTUnwrap(textView.codeBlockRect(for: range))
+            let lastGlyph = layout.glyphIndexForCharacter(at: NSMaxRange(range) - 1)
+            let lastLine = layout.lineFragmentRect(forGlyphAt: lastGlyph, effectiveRange: nil)
+
+            XCTAssertEqual(
+                block.maxY,
+                lastLine.maxY + textView.textContainerOrigin.y + 6,
+                accuracy: 0.5,
+                fixture.name
+            )
+            if fixture.hasEmptyLastLine {
+                XCTAssertLessThan(NSMaxRange(range), end, fixture.name)
+                let extra = layout.extraLineFragmentRect
+                XCTAssertFalse(extra.isEmpty, fixture.name)
+                XCTAssertLessThan(block.maxY, extra.maxY + textView.textContainerOrigin.y, fixture.name)
+            } else {
+                XCTAssertEqual(NSMaxRange(range), end, fixture.name)
+                XCTAssertNotEqual((fixture.text as NSString).character(at: end - 1), 10)
+            }
+        }
     }
 
     func testLiveCodeBadgeResolvesNameAndClipsInsideBlock() throws {
@@ -4195,6 +4354,105 @@ final class EditorLifecycleTests: XCTestCase {
         withExtendedLifetime(hostingView) {}
     }
 
+    func testRawModeEditsTheSameSourceViewWithEveryDelimiterShown() async throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-raw-mode-test.md"
+        let content = "Intro\n\nSome **bold** text"
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Raw",
+                content: content,
+                originalContent: content,
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = .source
+
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView().environment(model)
+                .frame(width: 600, height: 400, alignment: .topLeading)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let sourceView = try XCTUnwrap(firstSubview(of: SourceTextView.self, in: hostingView))
+        let marker = (content as NSString).range(of: "**").location
+        func markerPointSize() -> CGFloat {
+            (sourceView.textStorage?.attribute(.font, at: marker, effectiveRange: nil) as? NSFont)?.pointSize ?? 0
+        }
+        XCTAssertLessThan(markerPointSize(), 1, "Live preview hides markup away from the caret")
+
+        model.editorMode = .raw
+        hostingView.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+
+        let rawView = try XCTUnwrap(firstSubview(of: SourceTextView.self, in: hostingView))
+        XCTAssertTrue(rawView === sourceView)
+        XCTAssertTrue(rawView.isEditable)
+        XCTAssertTrue(allSubviews(of: ReadingNSTextView.self, in: hostingView).isEmpty)
+        XCTAssertGreaterThanOrEqual(markerPointSize(), 16, "Raw mode shows every delimiter")
+
+        model.editorMode = .source
+        hostingView.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertLessThan(markerPointSize(), 1, "Leaving raw mode hides markup again")
+        withExtendedLifetime(hostingView) {}
+    }
+
+    func testRawModeEditUpdatesTabAndSavedMarkdown() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("Raw.md")
+        let original = "Intro\n\nSome **bold** text"
+        let insertion = " and *raw*"
+        let expected = original + insertion
+        try original.write(to: file, atomically: true, encoding: .utf8)
+
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = [
+            NoteTab(
+                path: file.path,
+                title: "Raw",
+                content: original,
+                originalContent: original,
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = file.path
+        model.editorMode = .raw
+
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView().environment(model)
+                .frame(width: 600, height: 400, alignment: .topLeading)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let editor = try XCTUnwrap(firstSubview(of: SourceTextView.self, in: hostingView))
+        XCTAssertTrue(editor.isEditable)
+        editor.setSelectedRange(NSRange(location: (original as NSString).length, length: 0))
+        editor.insertText(insertion, replacementRange: editor.selectedRange())
+        XCTAssertEqual(editor.string, expected)
+
+        for _ in 0..<100 where model.activeTab?.content != expected {
+            hostingView.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.activeTab?.content, expected)
+        XCTAssertTrue(model.activeTab?.dirty == true)
+        XCTAssertEqual(try FileService.read(file), original)
+
+        await model.saveActive(sync: false)
+        XCTAssertEqual(try FileService.read(file), expected)
+        XCTAssertEqual(model.activeTab?.originalContent, expected)
+        XCTAssertFalse(model.activeTab?.dirty ?? true)
+        withExtendedLifetime(hostingView) {}
+    }
+
     func testSourceModeDoesNotInstallReadingSelectionOrMakeTheTitleSelectable() {
         let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
         let path = "/tmp/VulkanGlass-source-selection-test.md"
@@ -4406,9 +4664,9 @@ final class EditorLifecycleTests: XCTestCase {
         withExtendedLifetime(hostingView) {}
     }
 
-    func testNoteEditorFillsItsPaneInReadingAndSourceModes() async throws {
+    func testNoteEditorFillsItsPaneInEveryMode() async throws {
         let paneSize = CGSize(width: 1_000, height: 600)
-        for mode in [EditorMode.preview, .source] {
+        for mode in [EditorMode.preview, .source, .raw] {
             let size = try await noteEditorSize(mode: mode, paneSize: paneSize)
             XCTAssertEqual(size.width, paneSize.width, accuracy: 1, "Mode: \(mode)")
             XCTAssertEqual(size.height, paneSize.height, accuracy: 1, "Mode: \(mode)")

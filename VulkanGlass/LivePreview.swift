@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 /// Obsidian-style live preview: render markup, reveal delimiters only while the caret is inside.
+/// In raw mode every delimiter stays visible, and only the highlighting is applied.
 enum LivePreview {
     struct Token: Equatable {
         var fullRange: NSRange
@@ -176,7 +177,8 @@ enum LivePreview {
         selection: NSRange,
         dark: Bool,
         maximumTableWidth: CGFloat? = nil,
-        tokens suppliedTokens: [Token]? = nil
+        tokens suppliedTokens: [Token]? = nil,
+        raw: Bool = false
     ) -> Decorations {
         let text = storage.string
         let all = NSRange(location: 0, length: storage.length)
@@ -226,6 +228,12 @@ enum LivePreview {
                     )
                 }
             }
+        }
+
+        if raw {
+            styleRawDelimiters(of: found, in: storage, dark: dark)
+            storage.endEditing()
+            return rawDecorations(for: found, dark: dark)
         }
 
         var decorations = Decorations()
@@ -358,6 +366,37 @@ enum LivePreview {
         applyListHangingIndents(for: found, in: storage)
         styleTables(decorations.tables, in: storage)
         storage.endEditing()
+        return decorations
+    }
+
+    /// Raw mode: every delimiter is shown in the faint markup colour, sized like its content,
+    /// so no Markdown source is hidden, collapsed, or replaced by rendered chrome.
+    private static func styleRawDelimiters(of tokens: [Token], in storage: NSTextStorage, dark: Bool) {
+        for token in tokens {
+            let font = contentFont(for: token.kind)
+            let ranges: [NSRange]
+            switch token.kind {
+            case .tableSeparator, .horizontalRule, .emoji:
+                ranges = [token.fullRange]
+            default:
+                ranges = token.delimiterRanges
+            }
+            for range in ranges where range.length > 0 && NSMaxRange(range) <= storage.length {
+                storage.addAttributes(delimiterAttributes(visible: true, font: font, dark: dark), range: range)
+            }
+        }
+        applyListHangingIndents(for: tokens, in: storage)
+    }
+
+    /// Raw mode keeps only the code-block fill, which highlights text rather than replacing it.
+    private static func rawDecorations(for tokens: [Token], dark: Bool) -> Decorations {
+        var decorations = Decorations()
+        for token in tokens {
+            guard case .codeBlock(let language, _) = token.kind, token.fullRange.length > 0 else { continue }
+            decorations.codeBlocks.append(
+                CodeBlockDecoration(range: token.fullRange, language: language, showBadge: false, dark: dark)
+            )
+        }
         return decorations
     }
 

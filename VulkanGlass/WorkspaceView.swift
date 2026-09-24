@@ -127,8 +127,9 @@ struct WorkspaceView: View {
             .padding(.trailing, VGTheme.paneDividerInset)
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: VGTheme.titleBarHeight)
-            .background(VGTheme.backgroundSecondary(dark: model.dark))
+            // Above the fill, so empty space hit-tests to the region (see `TitleBarDoubleClick`).
             .background(WindowDragRegion())
+            .background(VGTheme.backgroundSecondary(dark: model.dark))
             .overlay(alignment: .bottom) {
                 VGTheme.divider(dark: model.dark).frame(height: 1)
             }
@@ -172,8 +173,9 @@ struct WorkspaceView: View {
             .padding(.leading, 6)
             .padding(.trailing, VGTheme.titleBarTrailingInset)
             .frame(height: VGTheme.titleBarHeight)
-            .background(VGTheme.backgroundSecondary(dark: model.dark))
+            // Above the fill, so empty space hit-tests to the region (see `TitleBarDoubleClick`).
             .background(WindowDragRegion())
+            .background(VGTheme.backgroundSecondary(dark: model.dark))
             .overlay(alignment: .bottom) {
                 VGTheme.divider(dark: model.dark).frame(height: 1)
             }
@@ -204,8 +206,9 @@ struct WorkspaceView: View {
         Color.clear
             .frame(height: VGTheme.titleBarHeight)
             .frame(maxWidth: .infinity)
-            .background(VGTheme.backgroundSecondary(dark: model.dark))
+            // Above the fill, so empty space hit-tests to the region (see `TitleBarDoubleClick`).
             .background(WindowDragRegion())
+            .background(VGTheme.backgroundSecondary(dark: model.dark))
             .overlay(alignment: .bottom) {
                 VGTheme.divider(dark: model.dark).frame(height: 1)
             }

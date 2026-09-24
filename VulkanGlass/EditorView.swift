@@ -6,6 +6,8 @@ struct SourceEditor: NSViewRepresentable {
     @Binding var text: String
     var notes: [NoteMeta]
     var dark: Bool
+    /// Shows every Markdown delimiter instead of revealing them only around the caret.
+    var raw = false
     var baseURL: URL?
     var loadRemoteImages = false
     var focusRequestID: UUID?
@@ -56,6 +58,7 @@ struct SourceEditor: NSViewRepresentable {
         context.coordinator.textView = textView
         context.coordinator.notes = notes
         context.coordinator.dark = dark
+        context.coordinator.raw = raw
         context.coordinator.baseURL = baseURL
         context.coordinator.loadRemoteImages = loadRemoteImages
         textView.onGeometryChange = { [weak coordinator = context.coordinator] in
@@ -73,8 +76,9 @@ struct SourceEditor: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.onChange = { text = $0 }
         context.coordinator.notes = notes
-        let darkChanged = context.coordinator.dark != dark
+        let styleChanged = context.coordinator.dark != dark || context.coordinator.raw != raw
         context.coordinator.dark = dark
+        context.coordinator.raw = raw
         context.coordinator.baseURL = baseURL
         context.coordinator.loadRemoteImages = loadRemoteImages
         context.coordinator.onFocusRequestFulfilled = onFocusRequestFulfilled
@@ -83,7 +87,7 @@ struct SourceEditor: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
             context.coordinator.restyle()
-        } else if darkChanged {
+        } else if styleChanged {
             context.coordinator.restyle()
         }
         applyChrome(textView)
@@ -117,6 +121,7 @@ struct SourceEditor: NSViewRepresentable {
         weak var textView: SourceTextView?
         var notes: [NoteMeta] = []
         var dark = true
+        var raw = false
         var baseURL: URL?
         var loadRemoteImages = false
         var onFocusRequestFulfilled: (UUID) -> Void = { _ in }
@@ -283,7 +288,8 @@ struct SourceEditor: NSViewRepresentable {
                 selection: selection,
                 dark: dark,
                 maximumTableWidth: textView.maximumTableWidth,
-                tokens: cachedTokens
+                tokens: cachedTokens,
+                raw: raw
             )
             textView.configureImages(baseURL: baseURL, loadRemoteImages: loadRemoteImages)
             textView.preloadImages()
@@ -1156,7 +1162,7 @@ final class SourceTextView: NSTextView {
     private func drawLiveChrome(in dirtyRect: NSRect) {
         guard let layoutManager, let textContainer else { return }
         for decoration in liveDecorations.codeBlocks {
-            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+            guard let rect = codeBlockRect(for: decoration.range),
                   rect.intersects(dirtyRect) else { continue }
             CodeHighlight.blockFill(dark: decoration.dark).setFill()
             NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
@@ -1258,7 +1264,7 @@ final class SourceTextView: NSTextView {
     private func drawLiveOverlays(in dirtyRect: NSRect) {
         guard let layoutManager, let textContainer else { return }
         for decoration in liveDecorations.codeBlocks where decoration.showBadge {
-            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+            guard let rect = codeBlockRect(for: decoration.range),
                   rect.intersects(dirtyRect) else { continue }
             guard let badge = Self.codeBadge(language: decoration.language, in: rect) else { continue }
             let attrs: [NSAttributedString.Key: Any] = [
@@ -1582,12 +1588,25 @@ final class SourceTextView: NSTextView {
         }
     }
 
+    /// The filled rectangle behind a live code block, in view coordinates.
+    func codeBlockRect(for range: NSRange) -> NSRect? {
+        guard let layoutManager, let textContainer else { return nil }
+        return blockRect(
+            for: range,
+            layoutManager: layoutManager,
+            textContainer: textContainer,
+            includingTrailingEmptyLine: true
+        )
+    }
+
     private func blockRect(
         for range: NSRange,
         layoutManager: NSLayoutManager,
-        textContainer: NSTextContainer
+        textContainer: NSTextContainer,
+        includingTrailingEmptyLine: Bool = false
     ) -> NSRect? {
-        let length = (string as NSString).length
+        let source = string as NSString
+        let length = source.length
         guard length > 0 else { return nil }
         let clamped = NSRange(
             location: min(range.location, length - 1),
@@ -1598,6 +1617,16 @@ final class SourceTextView: NSTextView {
         if glyphs.length > 0 {
             layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, _, _ in
                 union = union.union(rect)
+            }
+        }
+        // A block running to the end of a document that ends in a newline (an unclosed
+        // fence after pressing Return) owns the empty last line. That line has no glyphs;
+        // it is the layout manager's extra line fragment, so cover it explicitly.
+        if includingTrailingEmptyLine, !union.isNull, NSMaxRange(range) >= length {
+            let last = source.character(at: length - 1)
+            let extra = layoutManager.extraLineFragmentRect
+            if (last == 10 || last == 13), !extra.isEmpty {
+                union = union.union(extra)
             }
         }
         guard !union.isNull else { return nil }
@@ -1924,6 +1953,7 @@ struct NoteEditorView: View {
                         text: Bindable(model).tabs[index].content,
                         notes: model.notes,
                         dark: model.dark,
+                        raw: tab.editorMode == .raw,
                         baseURL: URL(fileURLWithPath: tab.path).deletingLastPathComponent(),
                         loadRemoteImages: model.settings.loadRemoteImages,
                         focusRequestID: model.editorFocusRequest?.tabID == tab.id
