@@ -181,6 +181,7 @@ final class AppModel {
     var titleEditingTabID: String?
     private(set) var titleEditingDraft = ""
     private(set) var editorFocusRequest: EditorFocusRequest?
+    private(set) var headingScrollRequest: HeadingScrollRequest?
     var leftOpen = true
     var rightOpen = true
     var leftPanel: LeftPanel = .files
@@ -1261,6 +1262,25 @@ final class AppModel {
     func fulfillEditorFocusRequest(_ id: UUID) {
         guard editorFocusRequest?.id == id else { return }
         editorFocusRequest = nil
+    }
+
+    /// Scrolls the active note to the heading at `index` in its outline.
+    func revealHeading(at index: Int) {
+        guard let tab = activeTab else { return }
+        let headings = Markdown.headings(in: tab.content)
+        guard headings.indices.contains(index) else { return }
+        let heading = headings[index]
+        let key = ReadingHeadingTarget.key(level: heading.level, text: heading.text)
+        let occurrence = headings[..<index].filter {
+            ReadingHeadingTarget.key(level: $0.level, text: $0.text) == key
+        }.count
+        centerView = .editor
+        headingScrollRequest = HeadingScrollRequest(tabID: tab.id, heading: heading, occurrence: occurrence)
+    }
+
+    func fulfillHeadingScrollRequest(_ id: UUID) {
+        guard headingScrollRequest?.id == id else { return }
+        headingScrollRequest = nil
     }
 
     /// Shows a toast and returns to the welcome screen when a vault folder is gone.

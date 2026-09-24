@@ -343,6 +343,26 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    func testRevealHeadingCountsEarlierHeadingsWithTheSameText() throws {
+        let model = AppModel(settings: AppSettings.default(), bootstrapOnLaunch: false)
+        let content = "# Doc\n## Notes\ntext\n### Notes\n## Notes"
+        model.tabs = [NoteTab(path: "/tmp/Doc.md", title: "Doc", content: content, originalContent: content, isStandalone: true)]
+        model.activeTabID = "/tmp/Doc.md"
+        model.centerView = .graph
+
+        model.revealHeading(at: 3)
+
+        let request = try XCTUnwrap(model.headingScrollRequest)
+        XCTAssertEqual(request.tabID, "/tmp/Doc.md")
+        XCTAssertEqual(request.heading.line, 5)
+        XCTAssertEqual(request.occurrence, 1)
+        XCTAssertEqual(model.centerView, .editor)
+        model.fulfillHeadingScrollRequest(UUID())
+        XCTAssertNotNil(model.headingScrollRequest)
+        model.fulfillHeadingScrollRequest(request.id)
+        XCTAssertNil(model.headingScrollRequest)
+    }
+
     func testAutosavePersistsTheEditedTabAfterSwitching() async throws {
         let root = try temporaryDirectory()
         let a = root.appendingPathComponent("A.md")

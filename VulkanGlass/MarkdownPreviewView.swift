@@ -30,9 +30,13 @@ struct MarkdownPreviewView: View {
     var loadRemoteImages = false
     var hidesLeadingTitle = true
     var layoutCoordinateSpace: String? = nil
+    var headingTarget: ReadingHeadingTarget? = nil
+    var onHeadingTargetFulfilled: (UUID) -> Void = { _ in }
     var onLayout: ((MarkdownPreviewLayoutMetrics) -> Void)? = nil
     var onWiki: (String) -> Void
     let displayBlocks: [MDBlock]
+    /// The leading title heading that the note's title row replaces, if hidden.
+    private let hiddenTitleKey: String?
 
     init(
         text: String,
@@ -44,6 +48,8 @@ struct MarkdownPreviewView: View {
         hidesLeadingTitle: Bool = true,
         parsedBlocks: [MDBlock]? = nil,
         layoutCoordinateSpace: String? = nil,
+        headingTarget: ReadingHeadingTarget? = nil,
+        onHeadingTargetFulfilled: @escaping (UUID) -> Void = { _ in },
         onLayout: ((MarkdownPreviewLayoutMetrics) -> Void)? = nil,
         onWiki: @escaping (String) -> Void
     ) {
@@ -55,14 +61,31 @@ struct MarkdownPreviewView: View {
         self.loadRemoteImages = loadRemoteImages
         self.hidesLeadingTitle = hidesLeadingTitle
         self.layoutCoordinateSpace = layoutCoordinateSpace
+        self.headingTarget = headingTarget
+        self.onHeadingTargetFulfilled = onHeadingTargetFulfilled
         self.onLayout = onLayout
         self.onWiki = onWiki
 
         var blocks = parsedBlocks ?? MDBlock.parse(text)
-        if hidesLeadingTitle, case .heading(1, _) = blocks.first {
+        if hidesLeadingTitle, case .heading(1, let title) = blocks.first {
             blocks.removeFirst()
+            hiddenTitleKey = ReadingHeadingTarget.key(level: 1, text: title)
+        } else {
+            hiddenTitleKey = nil
         }
         displayBlocks = blocks
+    }
+
+    /// The target within the displayed blocks. The hidden title resolves to no heading,
+    /// which scrolls to the top where the title row stands in for it.
+    private var displayedHeadingTarget: ReadingHeadingTarget? {
+        guard let headingTarget, headingTarget.key == hiddenTitleKey else { return headingTarget }
+        return ReadingHeadingTarget(
+            id: headingTarget.id,
+            level: headingTarget.level,
+            text: headingTarget.text,
+            occurrence: headingTarget.occurrence - 1
+        )
     }
 
     var body: some View {
@@ -79,6 +102,8 @@ struct MarkdownPreviewView: View {
                 dark: dark,
                 loadLocalImages: loadLocalImages,
                 loadRemoteImages: loadRemoteImages,
+                headingTarget: displayedHeadingTarget,
+                onHeadingTargetFulfilled: onHeadingTargetFulfilled,
                 onWiki: onWiki
             )
             // The scroll view spans the pane so its scroller sits at the trailing edge;
@@ -131,6 +156,22 @@ final class DocumentScrollView: NSScrollView {
     }
 }
 
+/// A heading the reading view should scroll to the top.
+struct ReadingHeadingTarget: Equatable {
+    let id: UUID
+    let level: Int
+    let text: String
+    /// How many earlier headings with the same level and text to skip.
+    let occurrence: Int
+
+    /// Identifies a heading by level and trimmed source text.
+    static func key(level: Int, text: String) -> String {
+        "\(level):\(text.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    var key: String { Self.key(level: level, text: text) }
+}
+
 /// One native text system owns a prose document's selection. That lets a drag cross
 /// paragraphs and inline styles, and keeps contextual actions scoped to this note.
 struct ReadingRenderConfiguration: Equatable {
@@ -149,6 +190,8 @@ struct UnifiedReadingTextView: NSViewRepresentable {
     let dark: Bool
     let loadLocalImages: Bool
     let loadRemoteImages: Bool
+    var headingTarget: ReadingHeadingTarget? = nil
+    var onHeadingTargetFulfilled: (UUID) -> Void = { _ in }
     let onWiki: (String) -> Void
 
     private var configuration: ReadingRenderConfiguration {
@@ -215,6 +258,8 @@ struct UnifiedReadingTextView: NSViewRepresentable {
 
     private func update(_ textView: ReadingNSTextView, coordinator: Coordinator) {
         coordinator.render(configuration, in: textView)
+        coordinator.onHeadingTargetFulfilled = onHeadingTargetFulfilled
+        coordinator.reveal(headingTarget, in: textView)
     }
 
     @MainActor
@@ -222,8 +267,10 @@ struct UnifiedReadingTextView: NSViewRepresentable {
         typealias ImageLoader = @Sendable (URL) async -> ReadingDecodedImage?
 
         var onWiki: (String) -> Void
+        var onHeadingTargetFulfilled: (UUID) -> Void = { _ in }
         weak var textView: ReadingNSTextView?
         private(set) var documentSetCount = 0
+        private var revealedHeadingID: UUID?
         private var lastConfiguration: ReadingRenderConfiguration?
         private var detailsStates: [String: Bool] = [:]
         private var generation = 0
@@ -274,6 +321,38 @@ struct UnifiedReadingTextView: NSViewRepresentable {
             let boundedLength = min(selection.length, attributedText.length - boundedLocation)
             textView.setSelectedRange(NSRange(location: boundedLocation, length: boundedLength))
             scheduleImageLoads(in: attributedText, generation: currentGeneration)
+        }
+
+        /// Scrolls a heading to the top once per target, after the pending render lays out.
+        func reveal(_ target: ReadingHeadingTarget?, in textView: ReadingNSTextView) {
+            guard let target, revealedHeadingID != target.id else { return }
+            revealedHeadingID = target.id
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView, self.textView === textView else { return }
+                let location = Self.location(of: target, in: textView.attributedString()) ?? 0
+                textView.scrollLineToTop(containingCharacterAt: location)
+                self.onHeadingTargetFulfilled(target.id)
+            }
+        }
+
+        /// Where the target heading starts in a rendered document, if it is present.
+        nonisolated static func location(of target: ReadingHeadingTarget, in text: NSAttributedString) -> Int? {
+            guard target.occurrence >= 0 else { return nil }
+            var remaining = target.occurrence
+            var found: Int?
+            text.enumerateAttribute(
+                .readingHeading,
+                in: NSRange(location: 0, length: text.length)
+            ) { value, range, stop in
+                guard value as? String == target.key else { return }
+                if remaining == 0 {
+                    found = range.location
+                    stop.pointee = true
+                } else {
+                    remaining -= 1
+                }
+            }
+            return found
         }
 
         func stop() {
@@ -406,6 +485,29 @@ extension NSAttributedString.Key {
     static let readingDetailsInitiallyOpen = NSAttributedString.Key(
         "VulkanGlassReadingDetailsInitiallyOpen"
     )
+    /// A heading's `ReadingHeadingTarget.key`, so the outline can find it.
+    static let readingHeading = NSAttributedString.Key("VulkanGlassReadingHeading")
+}
+
+extension NSTextView {
+    /// Scrolls the enclosing scroll view so the line holding `location` sits at the top.
+    func scrollLineToTop(containingCharacterAt location: Int, margin: CGFloat = 8) {
+        let length = (string as NSString).length
+        guard length > 0, let layoutManager, let textContainer else { return }
+        let character = min(max(0, location), length - 1)
+        layoutManager.ensureLayout(forCharacterRange: NSRange(location: 0, length: character + 1))
+        let glyph = layoutManager.glyphIndexForCharacter(at: character)
+        let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        // A viewport-tall rect starting at the line can only be made visible by putting
+        // the line at the top, unless the document ends first.
+        let visible = visibleRect
+        scrollToVisible(NSRect(
+            x: visible.minX,
+            y: max(0, line.minY + textContainerOrigin.y - margin),
+            width: visible.width,
+            height: visible.height
+        ))
+    }
 }
 
 struct ReadingDecodedImage: @unchecked Sendable {
@@ -597,7 +699,13 @@ enum ReadingAttributedDocument {
                     .paragraphStyle: paragraph,
                 ]))
             case .heading(let level, let source):
+                let start = result.length
                 appendInline(source, font: headingFont(level))
+                result.addAttribute(
+                    .readingHeading,
+                    value: ReadingHeadingTarget.key(level: level, text: source),
+                    range: NSRange(location: start, length: result.length - start)
+                )
             case .alert(let kind, let lines):
                 let color = alertColor(kind)
                 result.append(NSAttributedString(string: "\(kind.title)\n", attributes: [

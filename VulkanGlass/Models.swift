@@ -243,6 +243,23 @@ struct EditorFocusRequest: Equatable, Sendable {
     }
 }
 
+/// Asks the editor showing a tab to scroll one of its headings into view.
+struct HeadingScrollRequest: Equatable, Sendable {
+    let id: UUID
+    let tabID: String
+    let heading: NoteHeading
+    /// How many earlier headings share this heading's level and text, so repeated
+    /// headings resolve to the right one in the rendered reading view.
+    let occurrence: Int
+
+    init(id: UUID = UUID(), tabID: String, heading: NoteHeading, occurrence: Int) {
+        self.id = id
+        self.tabID = tabID
+        self.heading = heading
+        self.occurrence = occurrence
+    }
+}
+
 struct GitHubUser: Sendable {
     var login: String
     var name: String?

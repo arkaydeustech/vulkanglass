@@ -30,9 +30,23 @@ enum Markdown {
         }.uniqued()
     }
 
-    /// Extracts ATX headings.
+    /// Extracts ATX headings, ignoring code fences.
     static func headings(in content: String) -> [NoteHeading] {
-        content.components(separatedBy: "\n").enumerated().compactMap { index, line in
+        var openFence: Substring?
+        return content.components(separatedBy: "\n").enumerated().compactMap { index, line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let fence = trimmed.prefix { $0 == "`" || $0 == "~" }
+            if let open = openFence {
+                if fence.count == trimmed.count, fence.count >= open.count,
+                   fence.allSatisfy({ $0 == open.first }) {
+                    openFence = nil
+                }
+                return nil
+            }
+            if fence.count >= 3, fence.allSatisfy({ $0 == fence.first }) {
+                openFence = fence
+                return nil
+            }
             let m = headingRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line))
             guard let m, let hashes = rangeString(m, 1, in: line), let text = rangeString(m, 2, in: line) else {
                 return nil

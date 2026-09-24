@@ -88,11 +88,14 @@ struct RightSidebarView: View {
                 if headings.isEmpty {
                     Text("No headings in this note.").font(.caption).foregroundStyle(VGTheme.textFaint(dark: model.dark))
                 } else {
-                    ForEach(Array(headings.enumerated()), id: \.offset) { _, heading in
-                        Text(heading.text)
-                            .padding(.leading, CGFloat(heading.level - 1) * 12)
-                            .foregroundStyle(VGTheme.textMuted(dark: model.dark))
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(headings.enumerated()), id: \.offset) { index, heading in
+                            OutlineRow(heading: heading, dark: model.dark) {
+                                model.revealHeading(at: index)
+                            }
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -118,5 +121,26 @@ struct RightSidebarView: View {
                 }
             }
         }
+    }
+}
+
+/// An outline heading that scrolls the note to it when clicked.
+private struct OutlineRow: View {
+    let heading: NoteHeading
+    let dark: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(heading.text)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, CGFloat(heading.level - 1) * 12)
+        .foregroundStyle(hovering ? (dark ? Color.white : Color.black) : VGTheme.textMuted(dark: dark))
+        .onHover { hovering = $0 }
     }
 }

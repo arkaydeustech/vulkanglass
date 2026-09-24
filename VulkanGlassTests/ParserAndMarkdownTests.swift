@@ -1048,6 +1048,45 @@ final class MarkdownTests: XCTestCase {
         XCTAssertEqual(Markdown.headings(in: content).map(\.level), [1, 6])
     }
 
+    func testHeadingsSkipFencedCodeAndKeepSourceLines() {
+        let content = [
+            "# Title", "```bash", "# not a heading", "```", "## Setup",
+            "~~~~", "## also code", "~~~", "~~~~", "### After"
+        ].joined(separator: "\n")
+        let headings = Markdown.headings(in: content)
+        XCTAssertEqual(headings.map(\.text), ["Title", "Setup", "After"])
+        XCTAssertEqual(headings.map(\.line), [1, 5, 10])
+    }
+
+    func testReadingHeadingLocationResolvesRepeatedHeadings() {
+        let text = ReadingAttributedDocument.make(
+            blocks: [.heading(2, "Notes"), .lines(["Body"]), .heading(2, "Notes"), .heading(3, "Notes")],
+            noteTitles: [],
+            baseURL: nil,
+            dark: true
+        )
+        func location(_ level: Int, _ occurrence: Int) -> Int? {
+            UnifiedReadingTextView.Coordinator.location(
+                of: ReadingHeadingTarget(id: UUID(), level: level, text: "Notes", occurrence: occurrence),
+                in: text
+            )
+        }
+        let ns = text.string as NSString
+        let second = ns.range(of: "Notes", range: NSRange(location: 1, length: ns.length - 1)).location
+        XCTAssertEqual(location(2, 0), 0)
+        XCTAssertEqual(location(2, 1), second)
+        XCTAssertEqual(location(3, 0), ns.range(of: "Notes", options: .backwards).location)
+        XCTAssertNil(location(2, 2))
+        XCTAssertNil(location(2, -1))
+    }
+
+    func testSourceEditorLineLocation() {
+        let text = "# One\nbody\n## Two"
+        XCTAssertEqual(SourceEditor.Coordinator.location(ofLine: 1, in: text), 0)
+        XCTAssertEqual(SourceEditor.Coordinator.location(ofLine: 3, in: text), 11)
+        XCTAssertEqual(SourceEditor.Coordinator.location(ofLine: 9, in: text), (text as NSString).length)
+    }
+
     func testRewriteWikiLinkUsesTargetAndAlias() {
         let rewritten = Markdown.rewriteWikiLinks("[[My Note#Details|Read this]]")
         XCTAssertTrue(rewritten.contains("[Read this](wiki://My%20Note)"))
