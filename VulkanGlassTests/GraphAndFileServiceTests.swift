@@ -162,6 +162,64 @@ final class FileServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: linkDirectory.appendingPathComponent("Renamed.md").path))
     }
 
+    func testRenameFolderMovesContentsAndRejectsCollisionAndTraversal() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Projects", isDirectory: true)
+        let nested = folder.appendingPathComponent("Nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Taken", isDirectory: true),
+            withIntermediateDirectories: false
+        )
+        try "child".write(to: nested.appendingPathComponent("Child.md"), atomically: true, encoding: .utf8)
+
+        let renamed = try FileService.renameFolder(nested, to: "  Deep  ", root: root)
+        XCTAssertEqual(renamed.lastPathComponent, "Deep")
+        XCTAssertEqual(
+            FileService.canonicalURL(renamed.deletingLastPathComponent()).path,
+            FileService.canonicalURL(folder).path
+        )
+        XCTAssertEqual(try FileService.read(renamed.appendingPathComponent("Child.md")), "child")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: nested.path))
+
+        XCTAssertThrowsError(try FileService.renameFolder(folder, to: "Taken", root: root)) { error in
+            XCTAssertEqual(error as? FileServiceError, .nameTaken("Taken"))
+        }
+        XCTAssertThrowsError(try FileService.renameFolder(folder, to: "   ", root: root)) { error in
+            XCTAssertEqual(error as? FileServiceError, .emptyName)
+        }
+        for invalid in ["../Escape", "a/b", "..", ".hidden", "a:b"] {
+            XCTAssertThrowsError(try FileService.renameFolder(folder, to: invalid, root: root)) { error in
+                XCTAssertEqual(error as? FileServiceError, .invalidRelativePath(invalid))
+            }
+        }
+        XCTAssertThrowsError(try FileService.renameFolder(root, to: "Vault", root: root)) { error in
+            XCTAssertEqual(
+                error as? FileServiceError,
+                .outsideRoot(FileService.canonicalURL(root).path)
+            )
+        }
+        XCTAssertTrue(FileService.directoryExists(at: folder.path))
+    }
+
+    func testRenameFolderCanChangeOnlyCaseAndRejectsFiles() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("projects", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let note = root.appendingPathComponent("Note.md")
+        try "note".write(to: note, atomically: true, encoding: .utf8)
+
+        let renamed = try FileService.renameFolder(folder, to: "Projects", root: root)
+
+        XCTAssertEqual(renamed.lastPathComponent, "Projects")
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.path).sorted(),
+            ["Note.md", "Projects"]
+        )
+        XCTAssertThrowsError(try FileService.renameFolder(note, to: "Folder", root: root))
+        XCTAssertEqual(try FileService.read(note), "note")
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

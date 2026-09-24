@@ -22,11 +22,41 @@ final class FolderCreationDraft {
     }
 }
 
+/// The name typed into the "Rename folder" alert and the folder it applies to.
+@MainActor
+@Observable
+final class FolderRenameDraft {
+    var name = ""
+    private(set) var path: String?
+
+    /// Starts renaming `folder`, pre-filling its current name.
+    func begin(_ folder: FileNode) {
+        path = folder.path
+        name = folder.name
+    }
+
+    func cancel() {
+        path = nil
+        name = ""
+    }
+
+    @discardableResult
+    func submit(into model: AppModel) -> Task<Void, Never>? {
+        let submittedName = name
+        let submittedPath = path
+        cancel()
+        guard let submittedPath else { return nil }
+        return Task { await model.renameFolder(path: submittedPath, newName: submittedName) }
+    }
+}
+
 struct FileExplorerView: View {
     @Environment(AppModel.self) private var model
     @State private var filter = ""
     @State private var folderDraft = FolderCreationDraft()
     @State private var askingFolder = false
+    @State private var renameDraft = FolderRenameDraft()
+    @State private var renamingFolder = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -67,7 +97,7 @@ struct FileExplorerView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(filtered(model.fileTree)) { node in
-                            TreeRow(node: node, depth: 0)
+                            TreeRow(node: node, depth: 0, onRenameFolder: beginRenaming)
                         }
                     }
                     .padding(.bottom, 12)
@@ -83,6 +113,22 @@ struct FileExplorerView: View {
                 folderDraft.cancel()
             }
         }
+        .alert("Rename folder", isPresented: $renamingFolder) {
+            TextField("Name", text: $renameDraft.name)
+            Button("Rename") {
+                renameDraft.submit(into: model)
+            }
+            Button("Cancel", role: .cancel) {
+                renameDraft.cancel()
+            }
+        } message: {
+            Text("Enter a new name for this folder.")
+        }
+    }
+
+    private func beginRenaming(_ folder: FileNode) {
+        renameDraft.begin(folder)
+        renamingFolder = true
     }
 
     private func filtered(_ nodes: [FileNode]) -> [FileNode] {
@@ -108,6 +154,7 @@ private struct TreeRow: View {
     @Environment(AppModel.self) private var model
     let node: FileNode
     let depth: Int
+    let onRenameFolder: (FileNode) -> Void
     @State private var open = true
     @State private var confirmingDelete = false
     @State private var renaming = false
@@ -130,9 +177,12 @@ private struct TreeRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .contextMenu {
+                Button("Rename") { onRenameFolder(node) }
+            }
             if open {
                 ForEach(node.children ?? []) { child in
-                    TreeRow(node: child, depth: depth + 1)
+                    TreeRow(node: child, depth: depth + 1, onRenameFolder: onRenameFolder)
                 }
             }
         } else {

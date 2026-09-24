@@ -153,6 +153,62 @@ enum FileService {
         return destination
     }
 
+    /// Renames a folder inside the vault in place, keeping it under the same parent.
+    static func renameFolder(_ url: URL, to newName: String, root: URL) throws -> URL {
+        let name = try folderName(from: newName)
+        let original = url.standardizedFileURL
+        if try original.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
+            throw FileServiceError.invalidRelativePath(original.path)
+        }
+        let source = try validateExisting(original, inside: root)
+        guard directoryExists(at: source.path) else {
+            throw FileServiceError.invalidRelativePath(url.path)
+        }
+
+        let parent = source.deletingLastPathComponent()
+        let destination = parent.appendingPathComponent(name, isDirectory: true)
+        guard canonicalURL(destination).path.hasPrefix(canonicalURL(root).path + "/") else {
+            throw FileServiceError.outsideRoot(destination.path)
+        }
+        if source.lastPathComponent == name { return source }
+
+        // Changing only the case must go through a temporary name on case-insensitive volumes,
+        // where the destination otherwise "exists" as the folder itself.
+        if source.lastPathComponent.compare(name, options: .caseInsensitive) == .orderedSame {
+            let temp = parent.appendingPathComponent(".\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.moveItem(at: source, to: temp)
+            do {
+                try FileManager.default.moveItem(at: temp, to: destination)
+            } catch {
+                try? FileManager.default.moveItem(at: temp, to: source)
+                throw error
+            }
+            return destination
+        }
+
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw FileServiceError.nameTaken(name)
+        }
+        try FileManager.default.moveItem(at: source, to: destination)
+        return destination
+    }
+
+    /// Validates a user-entered folder name, rejecting path separators and hidden names.
+    static func folderName(from raw: String) throws -> String {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw FileServiceError.emptyName }
+        guard !name.hasPrefix("."),
+              name.rangeOfCharacter(from: .newlines) == nil,
+              !name.contains("/"),
+              !name.contains("\\"),
+              !name.contains(":"),
+              !name.contains("\0")
+        else {
+            throw FileServiceError.invalidRelativePath(raw)
+        }
+        return name
+    }
+
     /// Builds a `.md` filename from a user-entered title, rejecting path separators.
     static func markdownFileName(from raw: String) throws -> String {
         var stem = raw.trimmingCharacters(in: .whitespacesAndNewlines)
