@@ -2849,6 +2849,85 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertFalse(textView.liveDecorations.bars.isEmpty)
     }
 
+    func testActiveCodeBlockFillCoversNewEmptyLineBeforeAnythingIsTyped() throws {
+        let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+        func blockRect(for text: String) throws -> (block: NSRect, caretLine: NSRect) {
+            textView.string = text
+            let end = (text as NSString).length
+            textView.liveDecorations = LivePreview.apply(
+                to: textView.textStorage!,
+                caret: end,
+                selection: NSRange(location: end, length: 0),
+                dark: true
+            )
+            // Mirror the editor's restyle: the empty last line is laid out with the typing attributes.
+            textView.typingAttributes = LivePreview.typingAttributes(at: end, in: text, dark: true)
+            let layout = try XCTUnwrap(textView.layoutManager)
+            layout.ensureLayout(for: try XCTUnwrap(textView.textContainer))
+            let decoration = try XCTUnwrap(textView.liveDecorations.codeBlocks.first)
+            XCTAssertEqual(NSMaxRange(decoration.range), end)
+            let block = try XCTUnwrap(textView.codeBlockRect(for: decoration.range))
+            var caretLine = layout.extraLineFragmentRect
+            if caretLine.isEmpty {
+                let glyph = layout.glyphIndexForCharacter(at: end - 1)
+                caretLine = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            }
+            caretLine.origin.y += textView.textContainerOrigin.y
+            return (block, caretLine)
+        }
+
+        // Return pressed at the end of an unclosed fence: the caret sits on an empty last line.
+        let empty = try blockRect(for: "```sql\nfdus\n")
+        XCTAssertGreaterThanOrEqual(empty.block.maxY, empty.caretLine.maxY)
+
+        // The block must already be as tall as it is once the first character is typed.
+        let typed = try blockRect(for: "```sql\nfdus\nx")
+        XCTAssertEqual(empty.block.height, typed.block.height, accuracy: 0.5)
+    }
+
+    func testCodeBlockFillDoesNotExtendPastItsLastLine() throws {
+        let fixtures: [(name: String, text: String, caret: Int, hasEmptyLastLine: Bool)] = [
+            ("closed fence at EOF", "```sql\nfdus\n```\n", 8, true),
+            ("no trailing newline", "```sql\nfdus", 11, false),
+            ("content after closed fence", "```sql\nfdus\n```\nprose\n", 8, true),
+        ]
+
+        for fixture in fixtures {
+            let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+            textView.string = fixture.text
+            let end = (fixture.text as NSString).length
+            textView.liveDecorations = LivePreview.apply(
+                to: try XCTUnwrap(textView.textStorage),
+                caret: fixture.caret,
+                selection: NSRange(location: fixture.caret, length: 0),
+                dark: true
+            )
+            textView.typingAttributes = LivePreview.typingAttributes(at: end, in: fixture.text, dark: true)
+            let layout = try XCTUnwrap(textView.layoutManager)
+            layout.ensureLayout(for: try XCTUnwrap(textView.textContainer))
+            let range = try XCTUnwrap(textView.liveDecorations.codeBlocks.first?.range)
+            let block = try XCTUnwrap(textView.codeBlockRect(for: range))
+            let lastGlyph = layout.glyphIndexForCharacter(at: NSMaxRange(range) - 1)
+            let lastLine = layout.lineFragmentRect(forGlyphAt: lastGlyph, effectiveRange: nil)
+
+            XCTAssertEqual(
+                block.maxY,
+                lastLine.maxY + textView.textContainerOrigin.y + 6,
+                accuracy: 0.5,
+                fixture.name
+            )
+            if fixture.hasEmptyLastLine {
+                XCTAssertLessThan(NSMaxRange(range), end, fixture.name)
+                let extra = layout.extraLineFragmentRect
+                XCTAssertFalse(extra.isEmpty, fixture.name)
+                XCTAssertLessThan(block.maxY, extra.maxY + textView.textContainerOrigin.y, fixture.name)
+            } else {
+                XCTAssertEqual(NSMaxRange(range), end, fixture.name)
+                XCTAssertNotEqual((fixture.text as NSString).character(at: end - 1), 10)
+            }
+        }
+    }
+
     func testLiveCodeBadgeResolvesNameAndClipsInsideBlock() throws {
         let rect = NSRect(x: 20, y: 30, width: 120, height: 80)
         let badge = try XCTUnwrap(SourceTextView.codeBadge(language: "js", in: rect))
