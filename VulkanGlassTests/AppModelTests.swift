@@ -970,6 +970,24 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testNewNoteInFolderWorksWhenVaultIsFilesystemRoot() async throws {
+        let folder = try temporaryDirectory()
+        var dependencies = disabledAuthDependencies()
+        // A real snapshot of / would scan the entire machine; the folder action only
+        // needs the selected path to verify this containment edge case.
+        dependencies.loadVaultSnapshot = { _ in ([], []) }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "root", path: "/", remote: nil, branch: nil, isGitHub: false)
+
+        await model.newNote(inFolder: folder.path)
+
+        let created = FileService.canonicalURL(folder.appendingPathComponent("Untitled.md"))
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.activeTab?.path, created.path)
+        XCTAssertEqual(model.titleEditingTabID, created.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: created.path))
+    }
+
     func testNewNoteInFolderOutsideVaultReportsErrorWithoutCreatingNote() async throws {
         let parent = try temporaryDirectory()
         let root = parent.appendingPathComponent("vault", isDirectory: true)

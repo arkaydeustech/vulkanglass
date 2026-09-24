@@ -64,6 +64,29 @@ final class FileServiceTests: XCTestCase {
         }
     }
 
+    func testFilesystemRootContainsExistingChildFolder() throws {
+        let folder = try temporaryDirectory()
+        let filesystemRoot = URL(fileURLWithPath: "/", isDirectory: true)
+
+        XCTAssertEqual(
+            try FileService.containedFolder(folder, root: filesystemRoot).path,
+            FileService.canonicalURL(folder).path
+        )
+        XCTAssertEqual(try FileService.containedFolder(filesystemRoot, root: filesystemRoot).path, "/")
+        let directChild = "VulkanGlass-\(UUID().uuidString).md"
+        XCTAssertEqual(
+            try FileService.containedURL(root: filesystemRoot, relativePath: directChild).path,
+            "/\(directChild)"
+        )
+        XCTAssertThrowsError(try FileService.containedFolder(
+            folder.appendingPathComponent("Missing"), root: filesystemRoot
+        )) {
+            XCTAssertEqual($0 as? FileServiceError, .missingFolder("Missing"))
+        }
+        let note = try FileService.createNote(in: folder, name: "Untitled")
+        XCTAssertEqual(note.deletingLastPathComponent().path, FileService.canonicalURL(folder).path)
+    }
+
     func testSymlinkEscapeIsRejectedAndIndexerDoesNotFollowIt() throws {
         let parent = try temporaryDirectory()
         let root = parent.appendingPathComponent("vault")
