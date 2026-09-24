@@ -183,6 +183,7 @@ struct TreeRow: View {
             }
             .buttonStyle(.plain)
             .contextMenu {
+                FolderContextMenu(path: node.path, open: $open)
                 Button("Rename") { onRenameFolder(node) }
             }
             if open {
@@ -246,6 +247,19 @@ struct TreeRow: View {
             } message: {
                 Text("You can recover it from the macOS Trash.")
             }
+        }
+    }
+}
+
+struct FolderContextMenu: View {
+    @Environment(AppModel.self) private var model
+    let path: String
+    @Binding var open: Bool
+
+    var body: some View {
+        Button("New File") {
+            open = true
+            Task { await model.newNote(inFolder: path) }
         }
     }
 }
