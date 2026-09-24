@@ -291,7 +291,7 @@ struct TabGroupPane: View {
             onMouseDown: {
                 Task {
                     guard !model.commandOpen && !model.switcherOpen else { return }
-                    await model.focusGroup(groupID)
+                    await model.focusGroup(groupID, placement: .preserveSelection)
                 }
             }
         ))
@@ -622,11 +622,17 @@ struct TabStripDropDelegate: DropDelegate {
     }
 
     func dropEntered(info: DropInfo) {
-        highlighted = model.draggedTabID != nil && preferredIndex() == nil
+        updateHighlight()
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
+        updateHighlight()
+        return DropProposal(operation: .move)
+    }
+
+    func updateHighlight() {
+        let shouldHighlight = model.draggedTabID != nil && preferredIndex() == nil
+        if highlighted != shouldHighlight { highlighted = shouldHighlight }
     }
 
     func dropExited(info: DropInfo) {

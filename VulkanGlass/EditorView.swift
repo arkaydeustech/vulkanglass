@@ -180,10 +180,14 @@ struct SourceEditor: NSViewRepresentable {
                     return
                 }
                 self.pendingFocusRequestID = nil
-                let insertionPoint = self.focusPlacement == .start
-                    ? 0
-                    : (textView.string as NSString).length
-                textView.setSelectedRange(NSRange(location: insertionPoint, length: 0))
+                switch self.focusPlacement {
+                case .start:
+                    textView.setSelectedRange(NSRange(location: 0, length: 0))
+                case .end:
+                    textView.setSelectedRange(NSRange(location: (textView.string as NSString).length, length: 0))
+                case .preserveSelection:
+                    break
+                }
                 if self.focus(textView) {
                     self.fulfilledFocusRequestID = id
                     self.onFocusRequestFulfilled(id)

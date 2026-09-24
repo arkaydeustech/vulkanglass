@@ -229,6 +229,7 @@ struct EditorFocusRequest: Equatable, Sendable {
     enum Placement: Equatable, Sendable {
         case start
         case end
+        case preserveSelection
     }
 
     let id: UUID

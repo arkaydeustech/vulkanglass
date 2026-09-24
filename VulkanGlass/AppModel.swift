@@ -634,7 +634,10 @@ final class AppModel {
     }
 
     /// Focuses a tab group, making its active tab the app-wide active tab.
-    func focusGroup(_ id: UUID) async {
+    func focusGroup(
+        _ id: UUID,
+        placement: EditorFocusRequest.Placement = .end
+    ) async {
         guard id != tabGroupLayout.focusedGroupID, tabGroupLayout.group(id) != nil else { return }
         let previousGroupID = tabGroupLayout.focusedGroupID
         guard await handOffActiveTab(to: tabGroupLayout.group(id)?.activeTabID) else { return }
@@ -643,14 +646,16 @@ final class AppModel {
         updateTabGroupLayout { $0.focus(id) }
         // The graph fills the focused pane, so a newly focused pane returns to its note.
         centerView = .editor
-        requestFocusedEditorFocus()
+        requestFocusedEditorFocus(placement: placement)
     }
 
-    private func requestFocusedEditorFocus() {
+    private func requestFocusedEditorFocus(
+        placement: EditorFocusRequest.Placement = .end
+    ) {
         guard let id = activeTabID,
               tabs.first(where: { $0.id == id })?.editorMode == .source
         else { return }
-        editorFocusRequest = EditorFocusRequest(tabID: id)
+        editorFocusRequest = EditorFocusRequest(tabID: id, placement: placement)
     }
 
     /// Whether dropping a dragged tab on a zone of a tab group would do anything.
@@ -662,8 +667,15 @@ final class AppModel {
     /// the pane in half and gives the tab a new group on that side.
     func dropTab(_ id: String, on groupID: UUID, zone: PaneDropZone) {
         guard canDropTab(id, on: groupID, zone: zone) else { return }
+        let previousGroup = tabGroupLayout.focusedGroupID
+        let previousTab = activeTabID
+        let wasShowingEditor = centerView == .editor
         updateTabGroupLayout { $0.drop(id, on: groupID, zone: zone) }
         centerView = .editor
+        if tabGroupLayout.focusedGroupID != previousGroup || activeTabID != previousTab || !wasShowingEditor {
+            editorFocusRequest = nil
+            requestFocusedEditorFocus()
+        }
     }
 
     /// Whether the active tab can split off into a new group (other tabs must stay behind).
@@ -684,8 +696,15 @@ final class AppModel {
         guard tabGroupLayout.groupID(containing: id) != nil,
               tabGroupLayout.group(groupID) != nil
         else { return }
+        let previousGroup = tabGroupLayout.focusedGroupID
+        let previousTab = activeTabID
+        let wasShowingEditor = centerView == .editor
         updateTabGroupLayout { $0.move(id, to: groupID, at: index) }
         centerView = .editor
+        if tabGroupLayout.focusedGroupID != previousGroup || activeTabID != previousTab || !wasShowingEditor {
+            editorFocusRequest = nil
+            requestFocusedEditorFocus()
+        }
     }
 
     /// Moves the divider of a pane split. The fraction is the first pane's share.

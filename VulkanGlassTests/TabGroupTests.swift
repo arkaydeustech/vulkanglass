@@ -243,6 +243,29 @@ final class TabGroupLayoutTests: XCTestCase {
 
 @MainActor
 final class TabGroupModelTests: XCTestCase {
+    func testTabMovesAndKeyboardSplitRequestFocusForTheirActiveSourceTab() async throws {
+        let model = try modelWithOpenTabs(["One", "Two", "Three"])
+        for index in model.tabs.indices { model.tabs[index].editorMode = .source }
+        let original = model.tabGroupLayout.focusedGroupID
+        let first = model.tabs[0].id
+        let second = model.tabs[1].id
+        let third = model.tabs[2].id
+
+        model.dropTab(third, on: original, zone: .trailing)
+        XCTAssertEqual(model.editorFocusRequest?.tabID, third)
+        let other = model.tabGroupLayout.focusedGroupID
+
+        model.dropTab(first, on: other, zone: .center)
+        XCTAssertEqual(model.editorFocusRequest?.tabID, first)
+
+        model.moveTab(second, toGroup: other, at: 0)
+        XCTAssertEqual(model.editorFocusRequest?.tabID, second)
+
+        model.splitActiveTab(.bottom)
+        XCTAssertEqual(model.editorFocusRequest?.tabID, second)
+        XCTAssertEqual(model.activeTabID, second)
+    }
+
     func testThreeTabsSplitIntoTwoGroupsAndATabMovesAcross() async throws {
         let model = try modelWithOpenTabs(["One", "Two", "Three"])
         let paths = model.tabs.map(\.path)
@@ -613,6 +636,33 @@ final class TabGroupInteractionTests: XCTestCase {
         XCTAssertEqual(model.tabs(inGroup: group).map(\.title), ["Three", "One", "Two"])
     }
 
+    func testOuterStripHighlightTracksTabAndFreeSpaceAsPointerMoves() throws {
+        let model = try modelWithTabs()
+        let group = model.tabGroupLayout.focusedGroupID
+        model.draggedTabID = model.tabs[2].id
+        var hoveredIndex: Int?
+        var highlighted = false
+        let outer = TabStripDropDelegate(
+            model: model,
+            groupID: group,
+            index: nil,
+            highlighted: Binding(get: { highlighted }, set: { highlighted = $0 }),
+            preferredIndex: { hoveredIndex }
+        )
+
+        outer.updateHighlight()
+        XCTAssertTrue(highlighted)
+        hoveredIndex = 0
+        outer.updateHighlight()
+        XCTAssertFalse(highlighted)
+        hoveredIndex = nil
+        outer.updateHighlight()
+        XCTAssertTrue(highlighted)
+        model.draggedTabID = nil
+        outer.updateHighlight()
+        XCTAssertFalse(highlighted)
+    }
+
     func testEndingATabDragClearsItWithoutErasingANewerOne() throws {
         let model = try modelWithTabs()
         let first = model.tabs[0].id
@@ -779,6 +829,181 @@ final class TabGroupInteractionTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertTrue(window.firstResponder === first)
+    }
+
+    func testMouseFocusPreservesTheClickedEditorsSelection() async throws {
+        let model = try modelWithTabs()
+        model.tabs[0].editorMode = .source
+        model.tabs[1].editorMode = .source
+        let firstGroup = model.tabGroupLayout.focusedGroupID
+        model.dropTab(model.tabs[1].id, on: firstGroup, zone: .trailing)
+        let secondGroup = model.tabGroupLayout.focusedGroupID
+        await model.focusGroup(firstGroup)
+        let host = NSHostingView(rootView: TabGroupsView().environment(model).frame(width: 900, height: 500))
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: 500)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+
+        var editor: SourceTextView?
+        for _ in 0..<50 where editor == nil {
+            host.layoutSubtreeIfNeeded()
+            editor = descendants(of: host).compactMap { $0 as? SourceTextView }.first { $0.string == "Two" }
+            await Task.yield()
+        }
+        let destination = try XCTUnwrap(editor)
+        let clickPoint = destination.convert(NSPoint(x: 10, y: 10), to: nil)
+        let paneMonitor = try XCTUnwrap(
+            descendants(of: host).compactMap { $0 as? PaneMouseDownMonitor.MonitorView }
+                .first { $0.bounds.contains($0.convert(clickPoint, from: nil)) }
+        )
+        XCTAssertTrue(window.makeFirstResponder(destination))
+        let clickedRange = NSRange(location: 1, length: 1)
+        destination.setSelectedRange(clickedRange)
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: clickPoint,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+        paneMonitor.handle(event)
+        for _ in 0..<50 where model.tabGroupLayout.focusedGroupID != secondGroup || model.editorFocusRequest != nil {
+            host.layoutSubtreeIfNeeded()
+            await Task.yield()
+        }
+        XCTAssertEqual(model.tabGroupLayout.focusedGroupID, secondGroup)
+        XCTAssertTrue(window.firstResponder === destination)
+        XCTAssertEqual(destination.selectedRange(), clickedRange)
+    }
+
+    func testTabDropMoveAndSplitTransferFirstResponder() async throws {
+        let model = try modelWithTabs()
+        for index in model.tabs.indices { model.tabs[index].editorMode = .source }
+        let original = model.tabGroupLayout.focusedGroupID
+        let firstID = model.tabs[0].id
+        let secondID = model.tabs[1].id
+        let thirdID = model.tabs[2].id
+        model.dropTab(thirdID, on: original, zone: .trailing)
+        let other = model.tabGroupLayout.focusedGroupID
+        await model.focusGroup(original)
+        let host = NSHostingView(rootView: TabGroupsView().environment(model).frame(width: 900, height: 500))
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: 500)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+
+        func focusedEditor(containing text: String) async -> SourceTextView? {
+            for _ in 0..<80 {
+                host.layoutSubtreeIfNeeded()
+                if let editor = window.firstResponder as? SourceTextView, editor.string == text {
+                    return editor
+                }
+                await Task.yield()
+            }
+            return nil
+        }
+
+        _ = await focusedEditor(containing: "One")
+        model.dropTab(secondID, on: other, zone: .center)
+        let afterDrop = await focusedEditor(containing: "Two")
+        XCTAssertNotNil(afterDrop, "centre drop should focus the moved tab")
+
+        model.moveTab(firstID, toGroup: other, at: 0)
+        let afterMove = await focusedEditor(containing: "One")
+        XCTAssertNotNil(afterMove, "strip move should focus the moved tab")
+
+        model.splitActiveTab(.bottom)
+        let afterSplit = await focusedEditor(containing: "One")
+        XCTAssertNotNil(afterSplit, "keyboard split should focus the rebuilt pane")
+    }
+
+    func testNativeTabDragReachesPaneAndStripWithoutMovingTheWindow() async throws {
+        for target in ["pane", "strip"] {
+            let model = try modelWithTabs()
+            for index in model.tabs.indices { model.tabs[index].editorMode = .source }
+            let original = model.tabGroupLayout.focusedGroupID
+            let movedID = model.tabs[0].id
+            let destinationID = model.tabs[2].id
+            model.dropTab(destinationID, on: original, zone: .trailing)
+            let destinationGroup = model.tabGroupLayout.focusedGroupID
+            let host = NSHostingView(rootView: TabGroupsView().environment(model).frame(width: 900, height: 500))
+            host.frame = NSRect(x: 0, y: 0, width: 900, height: 500)
+            let window = NSWindow(
+                contentRect: host.frame,
+                styleMask: [.titled, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            defer { window.orderOut(nil) }
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            for _ in 0..<30 {
+                host.layoutSubtreeIfNeeded()
+                await Task.yield()
+            }
+            let sources = descendants(of: host).compactMap { $0 as? TabDragSourceView }
+            let source = try XCTUnwrap(sources.first { $0.tabID == movedID })
+            let destination: NSView
+            if target == "pane" {
+                destination = try XCTUnwrap(
+                    descendants(of: host).compactMap { $0 as? SourceTextView }
+                        .first { $0.string == "Three" }
+                )
+            } else {
+                destination = try XCTUnwrap(sources.first { $0.tabID == destinationID })
+            }
+            let start = source.convert(NSPoint(x: source.bounds.midX, y: source.bounds.midY), to: nil)
+            let end = destination.convert(
+                NSPoint(x: destination.bounds.midX, y: destination.bounds.midY), to: nil
+            )
+            let originalFrame = window.frame
+
+            func event(_ type: NSEvent.EventType, at point: NSPoint, timestamp: TimeInterval) throws -> NSEvent {
+                try XCTUnwrap(NSEvent.mouseEvent(
+                    with: type,
+                    location: point,
+                    modifierFlags: [],
+                    timestamp: timestamp,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: Int(timestamp * 100),
+                    clickCount: 1,
+                    pressure: 1
+                ))
+            }
+            let down = try event(.leftMouseDown, at: start, timestamp: 1)
+            let begin = try event(.leftMouseDragged, at: NSPoint(x: start.x + 10, y: start.y), timestamp: 1.1)
+            let travel = try event(.leftMouseDragged, at: end, timestamp: 1.2)
+            let up = try event(.leftMouseUp, at: end, timestamp: 1.3)
+            source.mouseDown(with: down)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { NSApp.postEvent(travel, atStart: false) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { NSApp.postEvent(up, atStart: false) }
+            source.mouseDragged(with: begin)
+            let deadline = ContinuousClock().now.advanced(by: .seconds(2))
+            while ContinuousClock().now < deadline,
+                  model.tabGroupLayout.groupID(containing: movedID) != destinationGroup
+            {
+                host.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(model.tabGroupLayout.groupID(containing: movedID), destinationGroup, target)
+            XCTAssertEqual(
+                model.tabs(inGroup: destinationGroup).map(\.title),
+                target == "pane" ? ["Three", "One"] : ["One", "Three"],
+                target
+            )
+            XCTAssertEqual(window.frame, originalFrame, target)
+            try await Task.sleep(for: .milliseconds(300))
+        }
     }
 
     private func descendants(of view: NSView) -> [NSView] {

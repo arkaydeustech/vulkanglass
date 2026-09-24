@@ -1775,6 +1775,24 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: 0))
     }
 
+    func testSourceEditorMouseFocusRequestPreservesMidDocumentSelection() async {
+        let requestID = UUID()
+        var fulfilled: [UUID] = []
+        let coordinator = SourceEditor.Coordinator(onChange: { _ in }, focus: { _ in true })
+        let editor = SourceTextView()
+        editor.string = "Existing body"
+        let selection = NSRange(location: 4, length: 3)
+        editor.setSelectedRange(selection)
+        coordinator.textView = editor
+        coordinator.onFocusRequestFulfilled = { fulfilled.append($0) }
+
+        coordinator.updateFocusRequest(requestID, placement: .preserveSelection)
+        await drainMainQueue()
+
+        XCTAssertEqual(fulfilled, [requestID])
+        XCTAssertEqual(editor.selectedRange(), selection)
+    }
+
     func testSourceEditorFocusRequestIsSingleFlightAndPlacesCaretAtEnd() async {
         let requestID = UUID()
         var focusAttempts = 0
