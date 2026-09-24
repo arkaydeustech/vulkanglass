@@ -308,6 +308,28 @@ enum CenterView: String, Sendable {
 }
 
 enum EditorMode: String, Sendable {
+    /// Live preview: markup renders and its delimiters appear only around the caret.
     case source
+    /// Reading view: rendered Markdown, not editable.
     case preview
+    /// Raw Markdown: every delimiter stays visible, with the live-preview highlighting.
+    case raw
+
+    /// Whether the note's text can be typed into in this mode.
+    var isEditable: Bool { self != .preview }
+
+    /// The status bar's name for the mode.
+    var label: String {
+        switch self {
+        case .source: "Source"
+        case .preview: "Reading"
+        case .raw: "Raw"
+        }
+    }
+
+    /// ⌘E: leaves reading view for live preview, and any editing mode for reading view.
+    var togglingReadingView: EditorMode { self == .preview ? .source : .preview }
+
+    /// ⇧⌘E: switches between raw Markdown and live preview.
+    var togglingRawMarkdown: EditorMode { self == .raw ? .source : .raw }
 }

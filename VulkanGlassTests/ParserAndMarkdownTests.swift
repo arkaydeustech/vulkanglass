@@ -1959,6 +1959,86 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(constrained.tables.first).columnWidths.reduce(0, +), 180, accuracy: 0.01)
     }
 
+    func testRawModeShowsEveryDelimiterAndKeepsHighlighting() throws {
+        let text = """
+        # Heading
+        Some **bold**, *italic*, ~~gone~~, `code`, [link](https://example.com), [[Note|alias]] \\* and :smile: #tag
+        > quote
+        > [!NOTE]
+        > alert body
+
+        - [ ] task
+        1. ordered
+
+        | A | B |
+        | --- | --- |
+        | 1 | 2 |
+
+        ![alt](image.png)
+        <!-- comment -->
+        ---
+        ```swift
+        let x = 1
+        ```
+        Tail
+        """
+        let ns = text as NSString
+        let end = ns.length
+        let storage = NSTextStorage(string: text)
+        let decorations = LivePreview.apply(
+            to: storage,
+            caret: end,
+            selection: NSRange(location: end, length: 0),
+            dark: true,
+            raw: true
+        )
+
+        for location in 0..<end where ns.character(at: location) != 10 {
+            let character = ns.substring(with: NSRange(location: location, length: 1))
+            XCTAssertFalse(isHidden(storage, at: location), "\(character) at \(location) is shrunk")
+            let color = storage.attribute(.foregroundColor, at: location, effectiveRange: nil) as? NSColor
+            XCTAssertNotEqual(color?.alphaComponent, 0, "\(character) at \(location) is transparent")
+            let kern = storage.attribute(.kern, at: location, effectiveRange: nil) as? NSNumber
+            XCTAssertEqual(kern?.doubleValue ?? 0, 0, "\(character) at \(location) is kerned")
+            if let style = storage.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle,
+               style.maximumLineHeight > 0 {
+                XCTAssertGreaterThan(style.maximumLineHeight, 1, "\(character) at \(location) is on a collapsed line")
+            }
+        }
+
+        XCTAssertTrue(decorations.tables.isEmpty)
+        XCTAssertTrue(decorations.images.isEmpty)
+        XCTAssertTrue(decorations.emojis.isEmpty)
+        XCTAssertTrue(decorations.bars.isEmpty)
+        XCTAssertEqual(decorations.codeBlocks.count, 1)
+        XCTAssertFalse(decorations.codeBlocks[0].showBadge)
+
+        let headingFont = try XCTUnwrap(
+            storage.attribute(.font, at: ns.range(of: "Heading").location, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertEqual(headingFont.pointSize, 34)
+        let boldFont = try XCTUnwrap(
+            storage.attribute(.font, at: ns.range(of: "bold").location, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertTrue(boldFont.fontDescriptor.symbolicTraits.contains(.bold))
+        let boldMarker = storage.attribute(.foregroundColor, at: ns.range(of: "**").location, effectiveRange: nil) as? NSColor
+        let boldText = storage.attribute(.foregroundColor, at: ns.range(of: "bold").location, effectiveRange: nil) as? NSColor
+        XCTAssertNotEqual(boldMarker, boldText, "Markup is shown in the faint delimiter colour")
+        XCTAssertEqual(
+            storage.attribute(.underlineStyle, at: ns.range(of: "link").location, effectiveRange: nil) as? Int,
+            NSUnderlineStyle.single.rawValue
+        )
+        let five = ns.range(of: "1\n```").location
+        XCTAssertEqual(
+            storage.attribute(.foregroundColor, at: five, effectiveRange: nil) as? NSColor,
+            CodeHighlight.color(for: .number, dark: true)
+        )
+
+        let live = NSTextStorage(string: text)
+        LivePreview.apply(to: live, caret: end, selection: NSRange(location: end, length: 0), dark: true)
+        XCTAssertTrue(isHidden(live, at: ns.range(of: "**").location), "Live preview hides the same markup")
+    }
+
     private func isHidden(_ storage: NSTextStorage, at location: Int) -> Bool {
         let font = storage.attribute(.font, at: location, effectiveRange: nil) as? NSFont
         return (font?.pointSize ?? 16) < 1
@@ -4195,6 +4275,53 @@ final class EditorLifecycleTests: XCTestCase {
         withExtendedLifetime(hostingView) {}
     }
 
+    func testRawModeEditsTheSameSourceViewWithEveryDelimiterShown() async throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let path = "/tmp/VulkanGlass-raw-mode-test.md"
+        let content = "Intro\n\nSome **bold** text"
+        model.tabs = [
+            NoteTab(
+                path: path,
+                title: "Raw",
+                content: content,
+                originalContent: content,
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = path
+        model.editorMode = .source
+
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView().environment(model)
+                .frame(width: 600, height: 400, alignment: .topLeading)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let sourceView = try XCTUnwrap(firstSubview(of: SourceTextView.self, in: hostingView))
+        let marker = (content as NSString).range(of: "**").location
+        func markerPointSize() -> CGFloat {
+            (sourceView.textStorage?.attribute(.font, at: marker, effectiveRange: nil) as? NSFont)?.pointSize ?? 0
+        }
+        XCTAssertLessThan(markerPointSize(), 1, "Live preview hides markup away from the caret")
+
+        model.editorMode = .raw
+        hostingView.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+
+        let rawView = try XCTUnwrap(firstSubview(of: SourceTextView.self, in: hostingView))
+        XCTAssertTrue(rawView === sourceView)
+        XCTAssertTrue(rawView.isEditable)
+        XCTAssertTrue(allSubviews(of: ReadingNSTextView.self, in: hostingView).isEmpty)
+        XCTAssertGreaterThanOrEqual(markerPointSize(), 16, "Raw mode shows every delimiter")
+
+        model.editorMode = .source
+        hostingView.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertLessThan(markerPointSize(), 1, "Leaving raw mode hides markup again")
+        withExtendedLifetime(hostingView) {}
+    }
+
     func testSourceModeDoesNotInstallReadingSelectionOrMakeTheTitleSelectable() {
         let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
         let path = "/tmp/VulkanGlass-source-selection-test.md"
@@ -4406,9 +4533,9 @@ final class EditorLifecycleTests: XCTestCase {
         withExtendedLifetime(hostingView) {}
     }
 
-    func testNoteEditorFillsItsPaneInReadingAndSourceModes() async throws {
+    func testNoteEditorFillsItsPaneInEveryMode() async throws {
         let paneSize = CGSize(width: 1_000, height: 600)
-        for mode in [EditorMode.preview, .source] {
+        for mode in [EditorMode.preview, .source, .raw] {
             let size = try await noteEditorSize(mode: mode, paneSize: paneSize)
             XCTAssertEqual(size.width, paneSize.width, accuracy: 1, "Mode: \(mode)")
             XCTAssertEqual(size.height, paneSize.height, accuracy: 1, "Mode: \(mode)")

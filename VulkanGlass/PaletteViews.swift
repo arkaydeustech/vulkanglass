@@ -11,7 +11,10 @@ struct CommandPaletteView: View {
             ("daily", "Open today's daily note", "⌘D", { Task { await model.dailyNote() } }),
             ("graph", "Open graph view", "⌘G", { model.centerView = .graph }),
             ("preview", "Toggle reading view", "⌘E", {
-                model.editorMode = model.editorMode == .source ? .preview : .source
+                model.editorMode = model.editorMode.togglingReadingView
+            }),
+            ("raw", "Toggle raw Markdown", "⇧⌘E", {
+                model.editorMode = model.editorMode.togglingRawMarkdown
             }),
             ("split-right", "Split right", "⌘\\", { model.splitActiveTab(.trailing) }),
             ("split-down", "Split down", "⇧⌘\\", { model.splitActiveTab(.bottom) }),
