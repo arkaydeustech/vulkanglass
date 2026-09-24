@@ -81,8 +81,13 @@ enum Shell {
         return trimmed
     }
 
-    static func git(_ arguments: [String], cwd: URL? = nil, input: Data? = nil) throws -> String {
-        guard let git = GitExecutable.path() else { throw GitServiceError.gitNotInstalled }
+    static func git(
+        _ arguments: [String],
+        cwd: URL? = nil,
+        input: Data? = nil,
+        executable: () -> String? = GitExecutable.path
+    ) throws -> String {
+        guard let git = executable() else { throw GitServiceError.gitNotInstalled }
         return try run(git, arguments, cwd: cwd, input: input)
     }
 }
@@ -93,17 +98,37 @@ enum GitExecutable {
     static let systemPath = "/usr/bin/git"
     static let homebrewPaths = ["/opt/homebrew/bin/git", "/usr/local/bin/git"]
 
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var cachedPath: String?
+    private static let cache = Cache()
+
+    final class Cache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cachedPath: String?
+
+        func path(
+            developerDirectory: () -> String? = GitExecutable.activeDeveloperDirectory,
+            isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+        ) -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            if let cachedPath {
+                if cachedPath == GitExecutable.systemPath {
+                    if let developer = developerDirectory(),
+                       isExecutable(URL(fileURLWithPath: developer).appendingPathComponent("usr/bin/git").path) {
+                        return cachedPath
+                    }
+                } else if isExecutable(cachedPath) {
+                    return cachedPath
+                }
+            }
+            cachedPath = GitExecutable.locate(developerDirectory: developerDirectory, isExecutable: isExecutable)
+            return cachedPath
+        }
+    }
 
     /// Returns the git to run, or nil when neither the developer tools nor Homebrew provide one.
     /// Only a hit is cached, so installing git while the app is open is picked up on the next call.
     static func path() -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        if let cachedPath { return cachedPath }
-        cachedPath = locate()
-        return cachedPath
+        cache.path()
     }
 
     /// Prefers the developer tools' git behind `/usr/bin/git`, then Homebrew's.
@@ -172,15 +197,19 @@ enum GitService {
         )
     }
 
-    static func status(path: String, token: String? = nil) -> GitStatus {
+    static func status(
+        path: String,
+        token: String? = nil,
+        executable: () -> String? = GitExecutable.path
+    ) -> GitStatus {
         let url = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) else {
             return GitStatus(state: .idle, message: "Not a git vault")
         }
         do {
-            let branch = try Shell.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: url)
-            let remote = try? Shell.git(["remote", "get-url", "origin"], cwd: url)
-            let porcelain = try Shell.git(["status", "--porcelain"], cwd: url)
+            let branch = try Shell.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: url, executable: executable)
+            let remote = try? Shell.git(["remote", "get-url", "origin"], cwd: url, executable: executable)
+            let porcelain = try Shell.git(["status", "--porcelain"], cwd: url, executable: executable)
             return GitStatus(
                 state: porcelain.isEmpty ? .synced : .idle,
                 branch: branch,
@@ -192,11 +221,17 @@ enum GitService {
         }
     }
 
-    static func clone(cloneURL: String, destDir: URL, credential: GitCredential?) throws -> URL {
+    static func clone(
+        cloneURL: String,
+        destDir: URL,
+        credential: GitCredential?,
+        executable: () -> String? = GitExecutable.path
+    ) throws -> URL {
         try withMutationLock {
             guard isHTTPSGitHubRemote(cloneURL) else {
                 throw GitServiceError.invalidGitHubRemote(cloneURL)
             }
+            guard executable() != nil else { throw GitServiceError.gitNotInstalled }
             try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
             let canonicalRoot = destDir.standardizedFileURL.resolvingSymlinksInPath()
             var name = URL(string: cloneURL)?.lastPathComponent ?? "vault"
@@ -217,8 +252,14 @@ enum GitService {
         }
     }
 
-    static func sync(path: String, message: String, credential: GitCredential?) throws -> GitStatus {
+    static func sync(
+        path: String,
+        message: String,
+        credential: GitCredential?,
+        executable: () -> String? = GitExecutable.path
+    ) throws -> GitStatus {
         try withMutationLock {
+            guard executable() != nil else { throw GitServiceError.gitNotInstalled }
             let url = URL(fileURLWithPath: path)
             try ensureNoRebase(at: url)
             let remote = try Shell.git(["remote", "get-url", "origin"], cwd: url)

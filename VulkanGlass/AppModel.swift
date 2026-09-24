@@ -53,6 +53,10 @@ struct AppModelDependencies {
     var gitExecutablePath: () async -> String? = {
         await Task.detached { GitExecutable.path() }.value
     }
+    var createGithubRepo: (String, Bool, String) async throws -> GitHubRepo = { name, isPrivate, token in
+        try await GitHubService.createRepo(name: name, isPrivate: isPrivate, token: token)
+    }
+    var vaultGitStatus: @Sendable (String) -> GitStatus = { GitService.status(path: $0) }
     var syncGit: (String, String, GitCredential?) async throws -> GitStatus = { path, message, credential in
         try await Task.detached {
             try GitService.sync(path: path, message: message, credential: credential)
@@ -383,12 +387,13 @@ final class AppModel {
         let authenticationDisabled = self.authenticationDisabled
         let credential = info.isGitHub ? gitCredential : nil
         let hasRemote = info.remote != nil
+        let vaultGitStatus = dependencies.vaultGitStatus
         let pulled: GitStatus = await Task.detached {
             do {
                 if hasRemote, !authenticationDisabled {
                     return try GitService.pull(path: path, credential: credential)
                 }
-                var status = GitService.status(path: path)
+                var status = vaultGitStatus(path)
                 if hasRemote, authenticationDisabled {
                     status.message = "Local only — GitHub auth disabled for development"
                 }
@@ -398,7 +403,9 @@ final class AppModel {
             }
         }.value
         gitStatus = pulled
-        if pulled.state == .error { errorMessage = pulled.message }
+        if pulled.state == .error, pulled.message != GitServiceError.gitNotInstalled.localizedDescription {
+            errorMessage = pulled.message
+        }
         await refreshVault(reconcileTabs: false)
         busyMessage = nil
         defaultEditorMode = .preview
@@ -1168,9 +1175,13 @@ final class AppModel {
             settingsOpen = true
             return
         }
+        guard await dependencies.gitExecutablePath() != nil else {
+            errorMessage = GitServiceError.gitNotInstalled.localizedDescription
+            return
+        }
         busyMessage = "Creating repository…"
         do {
-            let repo = try await GitHubService.createRepo(name: name, isPrivate: isPrivate, token: token)
+            let repo = try await dependencies.createGithubRepo(name, isPrivate, token)
             let dest = URL(fileURLWithPath: settings.vaultsRoot, isDirectory: true)
                 .appendingPathComponent(repo.name)
             try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)

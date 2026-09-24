@@ -176,12 +176,67 @@ final class AppModelTests: XCTestCase {
 
     func testInstalledGitDoesNotWarn() async {
         var dependencies = disabledAuthDependencies()
-        dependencies.gitExecutablePath = { "/usr/bin/git" }
+        var installed = false
+        dependencies.gitExecutablePath = { installed ? "/usr/bin/git" : nil }
         let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
 
         await model.checkGitInstalled()
+        XCTAssertTrue(model.gitMissingWarningOpen)
+        installed = true
+        await model.checkGitInstalled()
 
         XCTAssertFalse(model.gitMissingWarningOpen)
+    }
+
+    func testCreateGithubVaultWithMissingGitSkipsRemoteAndLocalWrites() async throws {
+        let root = try temporaryDirectory()
+        var settings = AppSettings.default()
+        settings.vaultsRoot = root.path
+        var createCalls = 0
+        var dependencies = AppModelDependencies(
+            githubCLIStatus: { _ in GitHubCLIStatus() },
+            githubUser: { _ in GitHubUser(login: "owner", name: nil, avatarURL: "") },
+            githubRepos: { _ in [] },
+            loadKeychainToken: { "test-token" },
+            saveKeychainToken: { _ in }
+        )
+        dependencies.gitExecutablePath = { nil }
+        dependencies.createGithubRepo = { _, _, _ in
+            createCalls += 1
+            throw GitHubError.api("Unexpected POST /user/repos")
+        }
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false, dependencies: dependencies)
+        await model.connectGitHub()
+        XCTAssertNotNil(model.token)
+        await model.checkGitInstalled()
+
+        await model.createGithubVault(name: "NewVault", isPrivate: true)
+
+        XCTAssertEqual(createCalls, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("NewVault").path))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        XCTAssertEqual(model.errorMessage, GitServiceError.gitNotInstalled.localizedDescription)
+        XCTAssertNil(model.busyMessage)
+    }
+
+    func testOpeningGitVaultWithMissingGitKeepsInstallAlertOnly() async throws {
+        let root = try temporaryDirectory()
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".git"), withIntermediateDirectories: false)
+        try "# Welcome".write(to: root.appendingPathComponent("Welcome.md"), atomically: true, encoding: .utf8)
+        var dependencies = disabledAuthDependencies()
+        dependencies.gitExecutablePath = { nil }
+        dependencies.vaultGitStatus = { GitService.status(path: $0, executable: { nil }) }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+
+        await model.checkGitInstalled()
+        await model.openVault(path: root.path)
+
+        XCTAssertTrue(model.gitMissingWarningOpen)
+        XCTAssertEqual(model.vault?.path, root.path)
+        XCTAssertEqual(model.gitStatus?.state, .error)
+        XCTAssertEqual(model.gitStatus?.message, GitServiceError.gitNotInstalled.localizedDescription)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.tabs.first?.title, "Welcome")
     }
 
     func testDisabledAuthenticationRefusesToWriteAPersonalAccessToken() async {

@@ -64,6 +64,91 @@ final class GitServiceTests: XCTestCase {
 
     func testGitLocatorReportsMissingGit() {
         XCTAssertNil(GitExecutable.locate(developerDirectory: { nil }, isExecutable: { _ in false }))
+        XCTAssertNil(GitExecutable.locate(developerDirectory: { nil }, isExecutable: { $0 == "/usr/bin/git" }))
+    }
+
+    func testGitPathCachesHitAndRetriesMiss() {
+        let cache = GitExecutable.Cache()
+        var available = false
+        var checks = 0
+        let executable: (String) -> Bool = { path in
+            checks += 1
+            return available && path == "/opt/homebrew/bin/git"
+        }
+
+        XCTAssertNil(cache.path(developerDirectory: { nil }, isExecutable: executable))
+        let checksAfterMiss = checks
+        available = true
+        XCTAssertEqual(cache.path(developerDirectory: { nil }, isExecutable: executable), "/opt/homebrew/bin/git")
+        XCTAssertGreaterThan(checks, checksAfterMiss)
+        let checksAfterHit = checks
+        XCTAssertEqual(cache.path(developerDirectory: { nil }, isExecutable: executable), "/opt/homebrew/bin/git")
+        XCTAssertEqual(checks, checksAfterHit + 1)
+    }
+
+    func testGitPathRechecksVanishedExecutableAndFindsReplacement() {
+        let cache = GitExecutable.Cache()
+        var executablePaths: Set<String> = ["/opt/homebrew/bin/git"]
+        let executable: (String) -> Bool = { executablePaths.contains($0) }
+        XCTAssertEqual(cache.path(developerDirectory: { nil }, isExecutable: executable), "/opt/homebrew/bin/git")
+
+        executablePaths = ["/usr/local/bin/git"]
+        XCTAssertEqual(cache.path(developerDirectory: { nil }, isExecutable: executable), "/usr/local/bin/git")
+    }
+
+    func testGitPathRechecksDeveloperToolsBehindSystemShim() {
+        let cache = GitExecutable.Cache()
+        var executablePaths: Set<String> = ["/Library/Developer/CommandLineTools/usr/bin/git"]
+        let executable: (String) -> Bool = { executablePaths.contains($0) }
+        let developer = { "/Library/Developer/CommandLineTools" }
+        XCTAssertEqual(cache.path(developerDirectory: developer, isExecutable: executable), "/usr/bin/git")
+
+        executablePaths = ["/opt/homebrew/bin/git", "/usr/bin/git"]
+        XCTAssertEqual(cache.path(developerDirectory: developer, isExecutable: executable), "/opt/homebrew/bin/git")
+    }
+
+    func testShellGitDoesNotLaunchSystemShimWhenGitIsMissing() {
+        XCTAssertThrowsError(try Shell.git(["--version"], executable: { nil })) { error in
+            XCTAssertEqual(error as? GitServiceError, .gitNotInstalled)
+        }
+    }
+
+    func testStatusReportsMissingGitForExistingRepository() throws {
+        let root = try temporaryDirectory()
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".git"), withIntermediateDirectories: false)
+
+        let status = GitService.status(path: root.path, executable: { nil })
+
+        XCTAssertEqual(status.state, .error)
+        XCTAssertEqual(status.message, GitServiceError.gitNotInstalled.localizedDescription)
+    }
+
+    func testCloneWithMissingGitDoesNotCreateDestination() throws {
+        let root = try temporaryDirectory()
+        let dest = root.appendingPathComponent("vaults")
+
+        XCTAssertThrowsError(
+            try GitService.clone(
+                cloneURL: "https://github.com/owner/repo.git",
+                destDir: dest,
+                credential: nil,
+                executable: { nil }
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitServiceError, .gitNotInstalled)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dest.path))
+    }
+
+    func testSyncWithMissingGitReportsInstallError() throws {
+        let root = try temporaryDirectory()
+
+        XCTAssertThrowsError(
+            try GitService.sync(path: root.path, message: "Save", credential: nil, executable: { nil })
+        ) { error in
+            XCTAssertEqual(error as? GitServiceError, .gitNotInstalled)
+        }
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
     }
 
     func testCredentialSecretIsSeparatedFromGitArguments() {
