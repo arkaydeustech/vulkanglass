@@ -60,6 +60,83 @@ final class FolderRenameDraft {
     }
 }
 
+/// Folder expansion and keyboard selection for the file explorer's tree.
+@MainActor
+@Observable
+final class FileTreeState {
+    /// One row of the tree as drawn: a note or folder and how deeply it is nested.
+    struct Row: Identifiable, Equatable {
+        let node: FileNode
+        let depth: Int
+        var id: String { node.path }
+    }
+
+    /// Folders the user has collapsed; every other folder shows its children.
+    private(set) var collapsedFolders: Set<String> = []
+    /// The note row that has keyboard focus, if any.
+    private(set) var focusedPath: String?
+    /// A note row the arrow keys moved to, which takes keyboard focus once it is on screen.
+    private(set) var focusRequestPath: String?
+
+    func isOpen(_ folderPath: String) -> Bool {
+        !collapsedFolders.contains(folderPath)
+    }
+
+    func setOpen(_ open: Bool, folder folderPath: String) {
+        if open {
+            collapsedFolders.remove(folderPath)
+        } else {
+            collapsedFolders.insert(folderPath)
+        }
+    }
+
+    /// The highlighted note: the one the keyboard is on, otherwise the active tab's note.
+    func selection(activeTabID: String?) -> String? {
+        focusRequestPath ?? focusedPath ?? activeTabID
+    }
+
+    /// The rows on screen, in order: collapsed folders hide their descendants.
+    static func visibleRows(_ nodes: [FileNode], collapsed: Set<String>) -> [Row] {
+        var rows: [Row] = []
+        func append(_ nodes: [FileNode], depth: Int) {
+            for node in nodes {
+                rows.append(Row(node: node, depth: depth))
+                if node.isDirectory, !collapsed.contains(node.path) {
+                    append(node.children ?? [], depth: depth + 1)
+                }
+            }
+        }
+        append(nodes, depth: 0)
+        return rows
+    }
+
+    /// The note `offset` notes above (negative) or below `path` among `rows`, skipping folders;
+    /// nil past either end of the list.
+    static func note(_ offset: Int, from path: String, in rows: [Row]) -> String? {
+        let notes = rows.filter { !$0.node.isDirectory }.map(\.node.path)
+        guard let index = notes.firstIndex(of: path), notes.indices.contains(index + offset) else { return nil }
+        return notes[index + offset]
+    }
+
+    /// Moves the keyboard selection `offset` notes from `path`; returns the newly selected note.
+    @discardableResult
+    func moveSelection(_ offset: Int, from path: String, in rows: [Row]) -> String? {
+        guard let target = Self.note(offset, from: path, in: rows) else { return nil }
+        focusRequestPath = target
+        return target
+    }
+
+    /// Records a note row gaining or losing keyboard focus.
+    func focusChanged(_ path: String, focused: Bool) {
+        if focused {
+            focusedPath = path
+            focusRequestPath = nil
+        } else if focusedPath == path {
+            focusedPath = nil
+        }
+    }
+}
+
 struct FileExplorerView: View {
     @Environment(AppModel.self) private var model
     @State private var filter = ""
@@ -67,6 +144,7 @@ struct FileExplorerView: View {
     @State private var askingFolder = false
     @State private var rootDropTargeted = false
     @State private var treeRowsHeight: CGFloat = 0
+    @State private var tree = FileTreeState()
     @State private var renameDraft: FolderRenameDraft
 
     init() {
@@ -107,63 +185,78 @@ struct FileExplorerView: View {
             .padding(.bottom, 4)
 
             if let vault = model.vault {
+                let treeRows = FileTreeState.visibleRows(filtered(model.fileTree), collapsed: tree.collapsedFolders)
                 GeometryReader { geometry in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
+                    ScrollViewReader { proxy in
+                        ScrollView {
                             VStack(alignment: .leading, spacing: 0) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "tray")
-                                    Text(vault.name)
-                                    Spacer()
-                                }
-                                .font(.caption)
-                                .foregroundStyle(VGTheme.textMuted(dark: model.dark))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(rootDropTargeted ? VGTheme.dropTarget.opacity(0.18) : Color.clear)
-                                .contentShape(Rectangle())
-                                .onDrop(
-                                    of: [.vulkanGlassNote],
-                                    delegate: FolderDropDelegate(
-                                        model: model,
-                                        folderPath: vault.path,
-                                        targeted: $rootDropTargeted
+                                VStack(alignment: .leading, spacing: 0) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "tray")
+                                        Text(vault.name)
+                                        Spacer()
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(VGTheme.textMuted(dark: model.dark))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(rootDropTargeted ? VGTheme.dropTarget.opacity(0.18) : Color.clear)
+                                    .contentShape(Rectangle())
+                                    .onDrop(
+                                        of: [.vulkanGlassNote],
+                                        delegate: FolderDropDelegate(
+                                            model: model,
+                                            folderPath: vault.path,
+                                            targeted: $rootDropTargeted
+                                        )
                                     )
-                                )
 
-                                LazyVStack(alignment: .leading, spacing: 0) {
-                                    ForEach(filtered(model.fileTree)) { node in
-                                        TreeRow(node: node, depth: 0, onRenameFolder: renameDraft.begin)
+                                    LazyVStack(alignment: .leading, spacing: 0) {
+                                        ForEach(treeRows) { row in
+                                            TreeRow(
+                                                node: row.node,
+                                                depth: row.depth,
+                                                tree: tree,
+                                                onRenameFolder: renameDraft.begin,
+                                                onMoveSelection: { offset in
+                                                    tree.moveSelection(offset, from: row.node.path, in: treeRows)
+                                                }
+                                            )
+                                        }
                                     }
                                 }
-                            }
-                            .background {
-                                GeometryReader { rows in
-                                    Color.clear.preference(key: FileTreeRowsHeightKey.self, value: rows.size.height)
+                                .background {
+                                    GeometryReader { rows in
+                                        Color.clear.preference(key: FileTreeRowsHeightKey.self, value: rows.size.height)
+                                    }
                                 }
-                            }
 
-                            // Only free space below the rows accepts a root drop. The scroll view
-                            // proposes no height, so the area is sized to fill the rest of the
-                            // viewport explicitly rather than with a `Spacer`.
-                            Color.clear
-                                .frame(maxWidth: .infinity)
-                                .frame(height: Self.rootDropAreaHeight(
-                                    viewportHeight: geometry.size.height,
-                                    rowsHeight: treeRowsHeight
-                                ))
-                                .contentShape(Rectangle())
-                                .onDrop(
-                                    of: [.vulkanGlassNote],
-                                    delegate: FolderDropDelegate(
-                                        model: model,
-                                        folderPath: vault.path,
-                                        targeted: $rootDropTargeted
+                                // Only free space below the rows accepts a root drop. The scroll view
+                                // proposes no height, so the area is sized to fill the rest of the
+                                // viewport explicitly rather than with a `Spacer`.
+                                Color.clear
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: Self.rootDropAreaHeight(
+                                        viewportHeight: geometry.size.height,
+                                        rowsHeight: treeRowsHeight
+                                    ))
+                                    .contentShape(Rectangle())
+                                    .onDrop(
+                                        of: [.vulkanGlassNote],
+                                        delegate: FolderDropDelegate(
+                                            model: model,
+                                            folderPath: vault.path,
+                                            targeted: $rootDropTargeted
+                                        )
                                     )
-                                )
+                            }
+                        }
+                        .onPreferenceChange(FileTreeRowsHeightKey.self) { treeRowsHeight = $0 }
+                        // Brings the row the arrow keys moved to on screen, so it can take focus.
+                        .onChange(of: tree.focusRequestPath) { _, path in
+                            if let path { proxy.scrollTo(path) }
                         }
                     }
-                    .onPreferenceChange(FileTreeRowsHeightKey.self) { treeRowsHeight = $0 }
                 }
             } else {
                 Text("This window is editing a standalone Markdown file. Open a GitHub vault to see a file tree.")
@@ -218,23 +311,33 @@ struct FileExplorerView: View {
     }
 }
 
+/// One row of the file tree: a folder that expands and collapses, or a note that opens.
 struct TreeRow: View {
     @Environment(AppModel.self) private var model
     let node: FileNode
     let depth: Int
+    let tree: FileTreeState
     let onRenameFolder: (FileNode) -> Void
-    @State private var open = true
+    /// Moves the keyboard selection this many notes up (negative) or down from this note.
+    var onMoveSelection: (Int) -> Void = { _ in }
     @State private var confirmingDelete = false
     @State private var renaming = false
     @State private var dropTargeted = false
 
+    private var open: Binding<Bool> {
+        Binding(
+            get: { tree.isOpen(node.path) },
+            set: { tree.setOpen($0, folder: node.path) }
+        )
+    }
+
     var body: some View {
         if node.isDirectory {
             Button {
-                open.toggle()
+                open.wrappedValue.toggle()
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                    Image(systemName: open.wrappedValue ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10))
                     Image(systemName: "folder")
                     Text(node.name)
@@ -260,20 +363,17 @@ struct TreeRow: View {
                     model: model,
                     folderPath: node.path,
                     targeted: $dropTargeted,
-                    onMove: { open = true }
+                    onMove: { open.wrappedValue = true }
                 )
             )
             .contextMenu {
-                FolderContextMenu(path: node.path, open: $open)
+                FolderContextMenu(path: node.path, open: open)
                 Button("Rename") { onRenameFolder(node) }
-            }
-            if open {
-                ForEach(node.children ?? []) { child in
-                    TreeRow(node: child, depth: depth + 1, onRenameFolder: onRenameFolder)
-                }
             }
         } else {
             let active = model.activeTabID == node.path
+            let selected = tree.selection(activeTabID: model.activeTabID) == node.path
+            let keyboardFocused = tree.focusedPath == node.path
             let displayName = node.name.replacingOccurrences(of: ".md", with: "", options: .caseInsensitive)
             Group {
                 if renaming {
@@ -312,14 +412,22 @@ struct TreeRow: View {
                                     scale: NSScreen.main?.backingScaleFactor ?? 2
                                 )
                             },
-                            onClick: { Task { await model.openTab(path: node.path) } },
+                            // A click keeps keyboard focus on the row, so the arrow keys move on
+                            // from it; Return takes the note into the editor.
+                            onClick: { Task { await model.openTab(path: node.path, focusEditor: false) } },
+                            onActivate: { Task { await model.openTab(path: node.path) } },
+                            onMoveSelection: onMoveSelection,
+                            focusRequested: tree.focusRequestPath == node.path,
+                            onFocusChange: { [tree, path = node.path] focused in
+                                tree.focusChanged(path, focused: focused)
+                            },
                             menuItems: [
                                 FileDragSourceView.MenuItem(title: "Rename") { renaming = true },
                                 FileDragSourceView.MenuItem(title: "Move to Trash…") { confirmingDelete = true },
                             ]
                         )
                     }
-                    .background(active ? VGTheme.hover(dark: model.dark) : Color.clear)
+                    .background(rowBackground(selected: selected, keyboardFocused: keyboardFocused))
                     .overlay(alignment: .leading) {
                         Rectangle()
                             .fill(active ? VGTheme.accent : Color.clear)
@@ -327,7 +435,7 @@ struct TreeRow: View {
                             .allowsHitTesting(false)
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
+                    .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
                     .accessibilityAction { Task { await model.openTab(path: node.path) } }
                     .accessibilityAction(named: "Rename") { renaming = true }
                     .accessibilityAction(named: "Move to Trash") { confirmingDelete = true }
@@ -346,6 +454,12 @@ struct TreeRow: View {
                 Text("You can recover it from the macOS Trash.")
             }
         }
+    }
+
+    /// Tints the note the keyboard is on with the accent, and shades the selected note otherwise.
+    private func rowBackground(selected: Bool, keyboardFocused: Bool) -> Color {
+        if keyboardFocused { return VGTheme.accent.opacity(model.dark ? 0.3 : 0.22) }
+        return selected ? VGTheme.hover(dark: model.dark) : Color.clear
     }
 }
 
@@ -416,6 +530,10 @@ struct FileDragSource: NSViewRepresentable {
     let model: AppModel
     var preview: (CGSize) -> NSImage?
     var onClick: () -> Void
+    var onActivate: (() -> Void)?
+    var onMoveSelection: ((Int) -> Void)?
+    var focusRequested = false
+    var onFocusChange: ((Bool) -> Void)?
     var menuItems: [FileDragSourceView.MenuItem]
 
     func makeNSView(context: Context) -> FileDragSourceView {
@@ -429,7 +547,11 @@ struct FileDragSource: NSViewRepresentable {
         nsView.model = model
         nsView.preview = preview
         nsView.onClick = onClick
+        nsView.onActivate = onActivate
+        nsView.onMoveSelection = onMoveSelection
+        nsView.onFocusChange = onFocusChange
         nsView.menuItems = menuItems
+        nsView.focusRequested = focusRequested
     }
 }
 
@@ -443,6 +565,16 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     weak var model: AppModel?
     var preview: ((CGSize) -> NSImage?)?
     var onClick: (() -> Void)?
+    /// Return: opens the note for editing. Falls back to `onClick`.
+    var onActivate: (() -> Void)?
+    /// The up and down arrow keys: moves the selection by -1 or 1 notes.
+    var onMoveSelection: ((Int) -> Void)?
+    /// Reports the row gaining (true) or losing (false) keyboard focus.
+    var onFocusChange: ((Bool) -> Void)?
+    /// Whether the row should take keyboard focus, as soon as it is in a window.
+    var focusRequested = false {
+        didSet { if focusRequested, !oldValue { takeRequestedFocus() } }
+    }
     var menuItems: [MenuItem] = []
     var presentContextMenu: (NSMenu, NSEvent, NSView) -> Void = { menu, event, view in
         NSMenu.popUpContextMenu(menu, with: event, for: view)
@@ -455,8 +587,48 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        onFocusChange?(true)
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        guard super.resignFirstResponder() else { return false }
+        onFocusChange?(false)
+        return true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        takeRequestedFocus()
+    }
+
+    /// Makes the row first responder on the next turn of the run loop, outside SwiftUI's update.
+    private func takeRequestedFocus() {
+        guard focusRequested, window != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.focusRequested, let window = self.window,
+                  window.firstResponder !== self else { return }
+            window.makeFirstResponder(self)
+        }
+    }
+
     override func keyDown(with event: NSEvent) {
-        if event.charactersIgnoringModifiers == "\r" || event.charactersIgnoringModifiers == " " {
+        let modified = !event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+        switch event.specialKey {
+        case .upArrow where !modified && onMoveSelection != nil:
+            onMoveSelection?(-1)
+            return
+        case .downArrow where !modified && onMoveSelection != nil:
+            onMoveSelection?(1)
+            return
+        default:
+            break
+        }
+        if event.charactersIgnoringModifiers == "\r" {
+            (onActivate ?? onClick)?()
+        } else if event.charactersIgnoringModifiers == " " {
             onClick?()
         } else {
             super.keyDown(with: event)
@@ -492,6 +664,7 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
             }
             return
         }
+        window?.makeFirstResponder(self)
         pressEvent = event
     }
 
