@@ -355,7 +355,10 @@ final class TabGroupModelTests: XCTestCase {
     }
 
     func testMouseDownThenTabSelectionFlushesTheOutgoingGroup() async throws {
-        let model = try modelWithOpenTabs(["One", "Two"])
+        let root = try temporaryDirectory()
+        let model = try modelWithOpenTabs(["One", "Two"], in: root)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        for index in model.tabs.indices { model.tabs[index].isStandalone = false }
         let first = model.tabs[0].path
         let second = model.tabs[1].path
         let original = model.tabGroupLayout.focusedGroupID
@@ -368,11 +371,26 @@ final class TabGroupModelTests: XCTestCase {
         await model.setActiveTab(second)
 
         XCTAssertEqual(model.activeTabID, second)
-        for _ in 0..<100 where (try? FileService.read(URL(fileURLWithPath: first))) != "changed in first pane" {
-            await Task.yield()
-        }
+        await model.awaitPendingSaves()
         XCTAssertEqual(try FileService.read(URL(fileURLWithPath: first)), "changed in first pane")
         XCTAssertFalse(model.tabs.first { $0.id == first }?.dirty ?? true)
+    }
+
+    func testFocusingAnotherGroupKeepsStandaloneEditsUnsaved() async throws {
+        let model = try modelWithOpenTabs(["One", "Two"])
+        let first = model.tabs[0].path
+        let original = model.tabGroupLayout.focusedGroupID
+        model.dropTab(model.tabs[1].path, on: original, zone: .trailing)
+        let other = model.tabGroupLayout.focusedGroupID
+        await model.focusGroup(original)
+        model.updateContent(first, "unsaved edit")
+
+        await model.focusGroup(other)
+        await model.awaitPendingSaves()
+
+        XCTAssertEqual(try FileService.read(URL(fileURLWithPath: first)), "One")
+        XCTAssertEqual(model.tabs.first { $0.id == first }?.content, "unsaved edit")
+        XCTAssertTrue(model.tabs.first { $0.id == first }?.dirty ?? false)
     }
 
     func testFocusingAnotherGroupCommitsTheOutgoingTitle() async throws {

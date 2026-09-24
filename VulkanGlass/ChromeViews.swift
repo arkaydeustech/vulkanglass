@@ -226,6 +226,10 @@ struct StatusBarView: View {
             }
             .buttonStyle(.plain)
             Spacer()
+            if let tab = model.activeTab, tab.dirty, !tab.savesAutomatically {
+                Text("Unsaved — ⌘S to save")
+                    .foregroundStyle(VGTheme.textNormal(dark: model.dark))
+            }
             if model.activeTab != nil {
                 Text("\(backlinks) backlink\(backlinks == 1 ? "" : "s")")
             }

@@ -3,6 +3,38 @@ import Foundation
 import Observation
 import UniformTypeIdentifiers
 
+@MainActor
+enum UnsavedChangesAlert {
+    static func make(titles: [String]) -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        if titles.count == 1, let title = titles.first {
+            alert.messageText = "Do you want to save the changes made to “\(title)”?"
+            alert.informativeText = "Your changes will be lost if you don’t save them."
+        } else {
+            alert.messageText = "Do you want to save the changes made to \(titles.count) files?"
+            alert.informativeText = "Unsaved: \(titles.joined(separator: ", ")). "
+                + "Your changes will be lost if you don’t save them."
+        }
+        let save = alert.addButton(withTitle: "Save")
+        save.keyEquivalent = "\r"
+        let discard = alert.addButton(withTitle: "Don’t Save")
+        discard.keyEquivalent = "d"
+        discard.keyEquivalentModifierMask = .command
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        return alert
+    }
+
+    static func decision(for response: NSApplication.ModalResponse) -> UnsavedChangesDecision {
+        switch response {
+        case .alertFirstButtonReturn: .save
+        case .alertSecondButtonReturn: .discard
+        default: .cancel
+        }
+    }
+}
+
 struct AppModelDependencies {
     var githubCLIStatus: (Bool) async -> GitHubCLIStatus
     var githubUser: (String) async throws -> GitHubUser
@@ -16,6 +48,8 @@ struct AppModelDependencies {
             (FileService.tree(at: root), FileService.index(at: root))
         }.value
     }
+    /// Asks whether to save standalone files with unsaved edits before they are closed.
+    var confirmUnsavedChanges: @MainActor ([String]) -> UnsavedChangesDecision = { _ in .cancel }
     var syncGit: (String, String, GitCredential?) async throws -> GitStatus = { path, message, credential in
         try await Task.detached {
             try GitService.sync(path: path, message: message, credential: credential)
@@ -43,6 +77,9 @@ struct AppModelDependencies {
             panel.message = "Save Markdown file"
             guard panel.runModal() == .OK else { return nil }
             return panel.url
+        },
+        confirmUnsavedChanges: { titles in
+            UnsavedChangesAlert.decision(for: UnsavedChangesAlert.make(titles: titles).runModal())
         }
     )
 }
@@ -305,7 +342,7 @@ final class AppModel {
                 busyMessage = nil
                 return
             }
-            rejectMissingVault(path: path, name: URL(fileURLWithPath: path).lastPathComponent)
+            await rejectMissingVault(path: path, name: URL(fileURLWithPath: path).lastPathComponent)
             return
         }
         let info = await Task.detached { GitService.inspect(path: path) }.value
@@ -316,7 +353,7 @@ final class AppModel {
     func openVault(_ info: VaultInfo) async {
         guard FileService.directoryExists(at: info.path) else {
             guard await commitTitleEditing() else { return }
-            rejectMissingVault(path: info.path, name: info.name)
+            await rejectMissingVault(path: info.path, name: info.name)
             return
         }
         if (!tabs.isEmpty || vault != nil), vault?.path != info.path {
@@ -374,6 +411,7 @@ final class AppModel {
     /// Closes the current vault and returns to the welcome screen.
     func closeVault() async {
         guard await commitTitleEditing() else { return }
+        guard await resolveUnsavedStandaloneChanges() else { return }
         guard await flushDirtyTabs() else { return }
         saveTasks.values.forEach { $0.cancel() }
         saveTasks = [:]
@@ -454,6 +492,46 @@ final class AppModel {
         await openVault(path: url.path)
     }
 
+    /// Reopens an entry from the recents list: a vault, or a standalone Markdown file.
+    /// A file that has since vanished toasts and drops out of the list.
+    func openRecent(_ item: RecentItem) async {
+        switch item {
+        case .vault(let vault):
+            await openVault(path: vault.path)
+        case .file(let file):
+            guard FileManager.default.fileExists(atPath: file.path),
+                  !FileService.directoryExists(at: file.path)
+            else {
+                errorMessage = FileServiceError.missingFile(file.name).localizedDescription
+                forgetRecentFile(path: file.path)
+                return
+            }
+            if let existing = tabs.first(where: {
+                $0.isStandalone && FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path == file.path
+            }) {
+                await openTab(path: existing.path)
+                return
+            }
+            await openStandalone(url: URL(fileURLWithPath: file.path))
+        }
+    }
+
+    /// Removes one entry from the recents list without touching it on disk.
+    func removeRecent(_ item: RecentItem) {
+        switch item {
+        case .vault(let vault): forgetRecent(path: vault.path)
+        case .file(let file): forgetRecentFile(path: file.path)
+        }
+    }
+
+    /// Empties both the recent vaults and the recent files lists.
+    func clearRecents() {
+        guard !settings.recentVaults.isEmpty || !settings.recentFiles.isEmpty else { return }
+        settings.recentVaults = []
+        settings.recentFiles = []
+        SettingsStore.save(settings)
+    }
+
     /// Opens or focuses a tab for a note path.
     func openTab(path: String, standalone: Bool = false, content: String? = nil) async {
         if activeTabID != path {
@@ -466,6 +544,7 @@ final class AppModel {
             activeTabID = existing.id
             centerView = .editor
             requestFocusedEditorFocus()
+            if existing.isStandalone { rememberFile(path: path) }
             return
         }
         do {
@@ -491,6 +570,7 @@ final class AppModel {
             activeTabID = tab.id
             centerView = .editor
             requestFocusedEditorFocus()
+            if standalone { rememberFile(path: path) }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -504,10 +584,12 @@ final class AppModel {
             guard await commitTitleEditing(for: target) else { return }
         }
         let resolvedTarget = wasActive ? (activeTabID ?? target) : target
-        if let tab = tabs.first(where: { $0.id == resolvedTarget }), tab.dirty,
-           !(await save(id: resolvedTarget, sync: false))
-        {
-            return
+        if let tab = tabs.first(where: { $0.id == resolvedTarget }), tab.dirty {
+            if tab.savesAutomatically {
+                guard await save(id: resolvedTarget, sync: false) else { return }
+            } else {
+                guard await resolveUnsavedStandaloneChanges(in: [resolvedTarget]) else { return }
+            }
         }
         saveTasks[resolvedTarget]?.cancel()
         saveTasks[resolvedTarget] = nil
@@ -533,7 +615,7 @@ final class AppModel {
     private func handOffActiveTab(to id: String?) async -> Bool {
         guard await commitTitleEditing() else { return false }
         if let outgoing = activeTabID, outgoing != id,
-           tabs.first(where: { $0.id == outgoing })?.dirty == true
+           let tab = tabs.first(where: { $0.id == outgoing }), tab.dirty, tab.savesAutomatically
         {
             saveTasks[outgoing]?.cancel()
             saveTasks[outgoing] = Task { [weak self] in
@@ -738,10 +820,12 @@ final class AppModel {
         }
     }
 
-    /// Updates editor text and schedules autosave plus GitHub sync.
+    /// Updates editor text and schedules autosave plus GitHub sync. Standalone files only keep
+    /// the edit in memory until the user saves them.
     func updateContent(_ id: String, _ content: String) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs[index].content = content
+        guard tabs[index].savesAutomatically else { return }
         saveTasks[id]?.cancel()
         saveTasks[id] = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
@@ -758,10 +842,16 @@ final class AppModel {
         }
     }
 
-    /// Writes the active note; optionally commit and push.
+    /// Writes the active note; optionally commit and push. Standalone files are not part of the
+    /// vault's repository, so saving one never syncs.
     func saveActive(sync: Bool) async {
-        guard let id = activeTabID else { return }
-        _ = await save(id: id, sync: sync)
+        guard let tab = activeTab else { return }
+        _ = await save(id: tab.id, sync: sync && tab.savesAutomatically)
+    }
+
+    /// The File menu's save command: standalone files only save, vault notes also sync.
+    var saveCommandTitle: String {
+        activeTab?.savesAutomatically == false ? "Save" : "Save and sync"
     }
 
     @discardableResult
@@ -773,8 +863,8 @@ final class AppModel {
                 tabs[index].originalContent = tabs[index].content
             }
             updateMetadata(for: tab.path, content: tab.content)
-            if vault != nil {
-                if sync { await syncNow(message: "Update \(tab.title)") }
+            if vault != nil, sync, tab.savesAutomatically {
+                await syncNow(message: "Update \(tab.title)")
             }
             return true
         } catch {
@@ -783,12 +873,39 @@ final class AppModel {
         }
     }
 
+    /// Writes every pending autosave. Standalone files keep their edits until the user saves them.
     @discardableResult
     func flushDirtyTabs() async -> Bool {
-        for id in tabs.filter(\.dirty).map(\.id) {
+        for id in tabs.filter({ $0.dirty && $0.savesAutomatically }).map(\.id) {
             guard await save(id: id, sync: false) else { return false }
         }
         return true
+    }
+
+    /// Asks before closing standalone files with unsaved edits (all of them, or only `ids`).
+    /// Returns false when the user cancels or a requested save fails, so the caller must stop.
+    func resolveUnsavedStandaloneChanges(in ids: [String]? = nil) async -> Bool {
+        let unsaved = tabs.filter { tab in
+            tab.dirty && !tab.savesAutomatically && (ids?.contains(tab.id) ?? true)
+        }
+        guard !unsaved.isEmpty else { return true }
+        switch dependencies.confirmUnsavedChanges(unsaved.map(\.title)) {
+        case .cancel:
+            return false
+        case .discard:
+            return true
+        case .save:
+            for tab in unsaved {
+                guard await save(id: tab.id, sync: false) else { return false }
+            }
+            return true
+        }
+    }
+
+    /// Writes pending autosaves and settles unsaved standalone files before the app quits.
+    func prepareToTerminate() async -> Bool {
+        guard await flushDirtyTabs() else { return false }
+        return await resolveUnsavedStandaloneChanges()
     }
 
     func newNote(inGroup groupID: UUID? = nil) async {
@@ -866,7 +983,8 @@ final class AppModel {
         }
         guard proposed != currentTitle else { return true }
 
-        if let tab = tabs.first(where: { $0.path == path }), tab.dirty {
+        // A standalone file moves with its unsaved edits still pending in the tab.
+        if let tab = tabs.first(where: { $0.path == path }), tab.dirty, tab.savesAutomatically {
             guard await save(id: tab.id, sync: false) else { return false }
         }
 
@@ -875,6 +993,7 @@ final class AppModel {
             let source = URL(fileURLWithPath: path)
             let dest = try await dependencies.renameFile(source, newName, root)
             retargetOpenItems(from: path, to: dest.path)
+            retargetRecentFile(from: path, to: dest.path)
             if vault != nil {
                 await refreshVault(reconcileTabs: true)
                 if let aligned = notes.first(where: {
@@ -1126,8 +1245,12 @@ final class AppModel {
     }
 
     /// Shows a toast and returns to the welcome screen when a vault folder is gone.
-    private func rejectMissingVault(path: String, name: String) {
+    private func rejectMissingVault(path: String, name: String) async {
         busyMessage = nil
+        let clearsWorkspace = vault == nil || vault?.path == path
+        if clearsWorkspace {
+            guard await resolveUnsavedStandaloneChanges() else { return }
+        }
         errorMessage = FileServiceError.missingVault(name).localizedDescription
         forgetRecent(path: path)
         if vault == nil || vault?.path == path {
@@ -1164,6 +1287,44 @@ final class AppModel {
         )
         settings.recentVaults = [entry] + settings.recentVaults.filter { $0.path != info.path }
         settings.recentVaults = Array(settings.recentVaults.prefix(12))
+        SettingsStore.save(settings)
+    }
+
+    /// Records a Markdown file opened on its own so it appears in the recents list.
+    private func rememberFile(path: String) {
+        let canonical = FileService.canonicalURL(URL(fileURLWithPath: path)).path
+        let entry = RecentFile(
+            name: Markdown.title(from: canonical),
+            path: canonical,
+            lastOpened: Date().timeIntervalSince1970
+        )
+        settings.recentFiles = [entry] + settings.recentFiles.filter { $0.path != canonical }
+        settings.recentFiles = Array(settings.recentFiles.prefix(12))
+        SettingsStore.save(settings)
+    }
+
+    /// Drops a vanished file from the recents list.
+    private func forgetRecentFile(path: String) {
+        let remaining = settings.recentFiles.filter { $0.path != path }
+        guard remaining.count != settings.recentFiles.count else { return }
+        settings.recentFiles = remaining
+        SettingsStore.save(settings)
+    }
+
+    /// Keeps a renamed standalone file's recents entry pointing at its new name.
+    private func retargetRecentFile(from oldPath: String, to newPath: String) {
+        let oldCanonical = FileService.canonicalURL(URL(fileURLWithPath: oldPath)).path
+        guard let index = settings.recentFiles.firstIndex(where: {
+            $0.path == oldPath || $0.path == oldCanonical
+        }) else { return }
+        let canonical = FileService.canonicalURL(URL(fileURLWithPath: newPath)).path
+        var entry = settings.recentFiles[index]
+        entry.name = Markdown.title(from: canonical)
+        entry.path = canonical
+        settings.recentFiles[index] = entry
+        settings.recentFiles = settings.recentFiles.enumerated()
+            .filter { $0.offset == index || $0.element.path != canonical }
+            .map(\.element)
         SettingsStore.save(settings)
     }
 
@@ -1207,9 +1368,17 @@ final class AppModel {
 
     func openStandalone(url: URL) async {
         do {
-            let text = try FileService.read(url)
+            // Reject unreadable replacements before changing or flushing the current workspace.
+            _ = try FileService.read(url)
             guard await commitTitleEditing() else { return }
+            guard await resolveUnsavedStandaloneChanges() else { return }
             guard await flushDirtyTabs() else { return }
+            // A Save decision may have changed this same file since the readability check.
+            let text = try FileService.read(url)
+            saveTasks.values.forEach { $0.cancel() }
+            saveTasks = [:]
+            syncTask?.cancel()
+            syncTask = nil
             let inheritedEditorMode = editorMode
             let tab = NoteTab(
                 path: url.path,
@@ -1229,6 +1398,7 @@ final class AppModel {
             tabs = [tab]
             activeTabID = tab.id
             centerView = .editor
+            rememberFile(path: url.path)
         } catch {
             errorMessage = error.localizedDescription
         }

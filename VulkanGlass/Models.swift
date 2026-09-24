@@ -14,8 +14,51 @@ struct RecentVault: Codable, Identifiable, Hashable, Sendable {
     var lastOpened: TimeInterval
 }
 
+/// A Markdown file that was opened on its own, outside any vault.
+struct RecentFile: Codable, Identifiable, Hashable, Sendable {
+    var id: String { path }
+    var name: String
+    var path: String
+    var lastOpened: TimeInterval
+}
+
+/// One row of the combined recents list: a vault or a standalone file.
+enum RecentItem: Identifiable, Hashable, Sendable {
+    case vault(RecentVault)
+    case file(RecentFile)
+
+    var id: String {
+        switch self {
+        case .vault(let vault): "vault:\(vault.path)"
+        case .file(let file): "file:\(file.path)"
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .vault(let vault): vault.name
+        case .file(let file): file.name
+        }
+    }
+
+    var path: String {
+        switch self {
+        case .vault(let vault): vault.path
+        case .file(let file): file.path
+        }
+    }
+
+    var lastOpened: TimeInterval {
+        switch self {
+        case .vault(let vault): vault.lastOpened
+        case .file(let file): file.lastOpened
+        }
+    }
+}
+
 struct AppSettings: Codable, Sendable {
     var recentVaults: [RecentVault]
+    var recentFiles: [RecentFile]
     var vaultsRoot: String
     var autoSync: Bool
     var appearanceMode: AppearanceMode
@@ -23,6 +66,19 @@ struct AppSettings: Codable, Sendable {
     var loadRemoteImages: Bool
     var leftSidebarWidth: CGFloat
     var rightSidebarWidth: CGFloat
+
+    /// Recent vaults and standalone files together, most recently opened first.
+    var recentItems: [RecentItem] {
+        let items = recentVaults.map(RecentItem.vault) + recentFiles.map(RecentItem.file)
+        // A stable sort keeps each list's own order among entries with equal timestamps.
+        return items.enumerated()
+            .sorted { lhs, rhs in
+                lhs.element.lastOpened != rhs.element.lastOpened
+                    ? lhs.element.lastOpened > rhs.element.lastOpened
+                    : lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
 
     static func `default`() -> AppSettings {
         let root = FileManager.default.homeDirectoryForCurrentUser
@@ -41,6 +97,7 @@ struct AppSettings: Codable, Sendable {
 
     init(
         recentVaults: [RecentVault],
+        recentFiles: [RecentFile] = [],
         vaultsRoot: String,
         autoSync: Bool,
         appearanceMode: AppearanceMode = .inherit,
@@ -50,6 +107,7 @@ struct AppSettings: Codable, Sendable {
         rightSidebarWidth: CGFloat = VGTheme.sidebarWidth
     ) {
         self.recentVaults = recentVaults
+        self.recentFiles = recentFiles
         self.vaultsRoot = vaultsRoot
         self.autoSync = autoSync
         self.appearanceMode = appearanceMode
@@ -62,6 +120,7 @@ struct AppSettings: Codable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         recentVaults = try container.decode([RecentVault].self, forKey: .recentVaults)
+        recentFiles = try container.decodeIfPresent([RecentFile].self, forKey: .recentFiles) ?? []
         vaultsRoot = try container.decode(String.self, forKey: .vaultsRoot)
         autoSync = try container.decode(Bool.self, forKey: .autoSync)
         if let savedAppearance = try container.decodeIfPresent(AppearanceMode.self, forKey: .appearanceMode) {
@@ -80,6 +139,7 @@ struct AppSettings: Codable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(recentVaults, forKey: .recentVaults)
+        try container.encode(recentFiles, forKey: .recentFiles)
         try container.encode(vaultsRoot, forKey: .vaultsRoot)
         try container.encode(autoSync, forKey: .autoSync)
         try container.encode(appearanceMode, forKey: .appearanceMode)
@@ -94,6 +154,7 @@ struct AppSettings: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case recentVaults
+        case recentFiles
         case vaultsRoot
         case autoSync
         case appearanceMode
@@ -149,6 +210,18 @@ struct NoteTab: Identifiable, Equatable, Sendable {
     var editorMode: EditorMode = .preview
 
     var dirty: Bool { content != originalContent }
+
+    /// Vault notes live in a GitHub repository, so edits are written (and synced) as the user
+    /// types. Standalone Markdown files outside any vault are only written when the user saves
+    /// them with ⌘S or File ▸ Save.
+    var savesAutomatically: Bool { !isStandalone }
+}
+
+/// The answer to "save changes before closing?" for files that are only saved on request.
+enum UnsavedChangesDecision: Sendable {
+    case save
+    case discard
+    case cancel
 }
 
 struct EditorFocusRequest: Equatable, Sendable {

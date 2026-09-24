@@ -13,6 +13,9 @@ final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
     /// The most recent external open; each one waits for the previous so files open in order.
     private(set) var externalOpenTask: Task<Void, Never>?
     private var pendingFileURLs: [URL] = []
+    var replyToTermination: (NSApplication, Bool) -> Void = { application, ready in
+        application.reply(toApplicationShouldTerminate: ready)
+    }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         pendingFileURLs.append(contentsOf: urls)
@@ -34,8 +37,8 @@ final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model, model.tabs.contains(where: { $0.dirty }) else { return .terminateNow }
         Task { @MainActor in
-            let saved = await model.flushDirtyTabs()
-            sender.reply(toApplicationShouldTerminate: saved)
+            let ready = await model.prepareToTerminate()
+            replyToTermination(sender, ready)
         }
         return .terminateLater
     }
@@ -71,9 +74,18 @@ struct VulkanGlassApp: App {
                 Button("Open GitHub vault…") { Task { await model.openLocalVault() } }
                     .keyboardShortcut("v", modifiers: [.command, .shift])
                 Button("Clone GitHub vault…") { model.cloneOpen = true }
+                Menu("Open Recent") {
+                    ForEach(model.settings.recentItems) { item in
+                        Button(item.name) { Task { await model.openRecent(item) } }
+                    }
+                    Divider()
+                    Button("Clear Menu") { model.clearRecents() }
+                        .disabled(model.settings.recentItems.isEmpty)
+                }
                 Divider()
-                Button("Save and sync") { Task { await model.saveActive(sync: true) } }
+                Button(model.saveCommandTitle) { Task { await model.saveActive(sync: true) } }
                     .keyboardShortcut("s", modifiers: .command)
+                    .disabled(model.activeTab == nil)
             }
             CommandMenu("View") {
                 Button("Command palette") { model.commandOpen = true }

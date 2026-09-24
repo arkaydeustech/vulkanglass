@@ -117,6 +117,17 @@ final class GitHubCLIServiceTests: XCTestCase {
         XCTAssertEqual(settings.appearanceMode, .dark)
         XCTAssertEqual(settings.vaultsRoot, "/tmp/vaults")
         XCTAssertEqual(settings.rightSidebarWidth, VGTheme.sidebarWidth)
+        XCTAssertTrue(settings.recentFiles.isEmpty)
+    }
+
+    func testSettingsRoundTripPreservesRecentFiles() throws {
+        var settings = AppSettings.default()
+        settings.recentFiles = [RecentFile(name: "Loose", path: "/tmp/Loose.md", lastOpened: 7)]
+
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
+
+        XCTAssertEqual(decoded.recentFiles, settings.recentFiles)
     }
 
     func testSettingsRoundTripPreservesGitHubCLIFlag() throws {
