@@ -130,6 +130,12 @@ private struct TreeRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .contextMenu {
+                Button("New File") {
+                    open = true
+                    Task { await model.newNote(inFolder: node.path) }
+                }
+            }
             if open {
                 ForEach(node.children ?? []) { child in
                     TreeRow(node: child, depth: depth + 1)

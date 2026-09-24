@@ -945,11 +945,17 @@ final class AppModel {
         return await resolveUnsavedStandaloneChanges()
     }
 
-    func newNote(inGroup groupID: UUID? = nil) async {
+    /// Creates an "Untitled" note and opens it with its title ready to rename. In a vault the note
+    /// goes in `folderPath` when given (it must be the vault or a folder inside it), else the root.
+    func newNote(inFolder folderPath: String? = nil, inGroup groupID: UUID? = nil) async {
         guard await commitTitleEditing() else { return }
         if let vault {
             do {
-                let url = try FileService.createNote(in: URL(fileURLWithPath: vault.path), name: "Untitled")
+                let root = URL(fileURLWithPath: vault.path)
+                let directory = try folderPath.map {
+                    try FileService.containedFolder(URL(fileURLWithPath: $0), root: root)
+                } ?? root
+                let url = try FileService.createNote(in: directory, name: "Untitled")
                 await refreshVault()
                 await openTab(path: url.path)
                 if let groupID, tabGroupLayout.group(groupID) != nil {

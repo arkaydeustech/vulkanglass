@@ -36,6 +36,34 @@ final class FileServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("outside.md").path))
     }
 
+    func testContainedFolderAcceptsVaultFoldersAndRejectsEscapesAndMissingFolders() throws {
+        let parent = try temporaryDirectory()
+        let root = parent.appendingPathComponent("vault")
+        let folder = root.appendingPathComponent("Projects")
+        let outside = parent.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("Linked"),
+            withDestinationURL: outside
+        )
+
+        XCTAssertEqual(
+            try FileService.containedFolder(folder, root: root).path,
+            FileService.canonicalURL(folder).path
+        )
+        XCTAssertEqual(
+            try FileService.containedFolder(root, root: root).path,
+            FileService.canonicalURL(root).path
+        )
+        XCTAssertThrowsError(try FileService.containedFolder(outside, root: root))
+        XCTAssertThrowsError(try FileService.containedFolder(root.appendingPathComponent("Linked"), root: root))
+        XCTAssertThrowsError(try FileService.containedFolder(root.appendingPathComponent("../outside"), root: root))
+        XCTAssertThrowsError(try FileService.containedFolder(root.appendingPathComponent("Missing"), root: root)) {
+            XCTAssertEqual($0 as? FileServiceError, .missingFolder("Missing"))
+        }
+    }
+
     func testSymlinkEscapeIsRejectedAndIndexerDoesNotFollowIt() throws {
         let parent = try temporaryDirectory()
         let root = parent.appendingPathComponent("vault")

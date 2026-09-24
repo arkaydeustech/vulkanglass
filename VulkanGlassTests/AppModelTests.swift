@@ -935,6 +935,71 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Nested").path))
     }
 
+    func testNewNoteInFolderCreatesAndOpensUntitledNoteInsideThatFolder() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Projects/Active", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "taken".write(to: folder.appendingPathComponent("Untitled.md"), atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        model.editorMode = .preview
+
+        await model.newNote(inFolder: folder.path)
+
+        let created = FileService.canonicalURL(folder.appendingPathComponent("Untitled 1.md"))
+        let tab = try XCTUnwrap(model.activeTab)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(FileService.canonicalURL(URL(fileURLWithPath: tab.path)).path, created.path)
+        XCTAssertEqual(try FileService.read(created), "")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Untitled.md").path))
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+        XCTAssertEqual(model.titleEditingDraft, "Untitled 1")
+        XCTAssertEqual(model.editorMode, .source)
+        XCTAssertEqual(model.centerView, .editor)
+        let projects = try XCTUnwrap(model.fileTree.first { $0.name == "Projects" })
+        let active = try XCTUnwrap(projects.children?.first { $0.name == "Active" })
+        XCTAssertEqual(Set(active.children?.map(\.name) ?? []), ["Untitled 1.md", "Untitled.md"])
+
+        await model.submitTitleEditing(for: tab.id, draft: "Roadmap")
+
+        let renamed = FileService.canonicalURL(folder.appendingPathComponent("Roadmap.md"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamed.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: created.path))
+        XCTAssertEqual(
+            model.activeTab.map { FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path },
+            renamed.path
+        )
+    }
+
+    func testNewNoteInFolderOutsideVaultReportsErrorWithoutCreatingNote() async throws {
+        let parent = try temporaryDirectory()
+        let root = parent.appendingPathComponent("vault", isDirectory: true)
+        let outside = parent.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let model = modelWithVault(at: root)
+
+        await model.newNote(inFolder: outside.path)
+
+        XCTAssertEqual(
+            model.errorMessage,
+            FileServiceError.outsideRoot(FileService.canonicalURL(outside).path).localizedDescription
+        )
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+
+    func testNewNoteInDeletedFolderReportsMissingFolder() async throws {
+        let root = try temporaryDirectory()
+        let model = modelWithVault(at: root)
+
+        await model.newNote(inFolder: root.appendingPathComponent("Gone").path)
+
+        XCTAssertEqual(model.errorMessage, FileServiceError.missingFolder("Gone").localizedDescription)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Gone").path))
+    }
+
     func testBackToBackNewNotesKeepFocusTargetAndEditorModesScopedPerTab() async throws {
         let root = try temporaryDirectory()
         let existing = root.appendingPathComponent("Existing.md")

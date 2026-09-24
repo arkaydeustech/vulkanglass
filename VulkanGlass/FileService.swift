@@ -7,6 +7,7 @@ enum FileServiceError: LocalizedError, Equatable {
     case outsideRoot(String)
     case missingVault(String)
     case missingFile(String)
+    case missingFolder(String)
     case nameTaken(String)
     case symbolicLinkRenameUnsupported(String)
 
@@ -22,6 +23,8 @@ enum FileServiceError: LocalizedError, Equatable {
             return "The vault “\(name)” doesn’t exist."
         case .missingFile(let name):
             return "The file “\(name)” doesn’t exist."
+        case .missingFolder(let name):
+            return "The folder “\(name)” doesn’t exist."
         case .nameTaken(let name):
             return "A file named \(name) already exists."
         case .symbolicLinkRenameUnsupported(let path):
@@ -82,6 +85,19 @@ enum FileService {
         }
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
         return url
+    }
+
+    /// Resolves a folder that must be the vault root or an existing directory inside it.
+    static func containedFolder(_ url: URL, root: URL) throws -> URL {
+        let canonicalRoot = canonicalURL(root)
+        let canonical = canonicalURL(url)
+        guard canonical.path == canonicalRoot.path || canonical.path.hasPrefix(canonicalRoot.path + "/") else {
+            throw FileServiceError.outsideRoot(canonical.path)
+        }
+        guard directoryExists(at: canonical.path) else {
+            throw FileServiceError.missingFolder(url.lastPathComponent)
+        }
+        return canonical
     }
 
     static func moveToTrash(_ url: URL, root: URL) throws {
