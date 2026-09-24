@@ -118,19 +118,36 @@ final class FileTreeState {
         return notes[index + offset]
     }
 
-    /// Moves the keyboard selection `offset` notes from `path`; returns the newly selected note.
+    /// Moves from the pending selection when focus has not caught up with the arrow keys.
     @discardableResult
     func moveSelection(_ offset: Int, from path: String, in rows: [Row]) -> String? {
-        guard let target = Self.note(offset, from: path, in: rows) else { return nil }
+        guard let target = Self.note(offset, from: focusRequestPath ?? path, in: rows) else { return nil }
         focusRequestPath = target
         return target
+    }
+
+    /// Drops paths that have disappeared from the visible tree and restores keyboard focus to
+    /// a surviving note when the focused row was removed by a tree change.
+    func reconcileVisibleRows(_ rows: [Row], activeTabID: String?) {
+        let notes = rows.filter { !$0.node.isDirectory }.map(\.node.path)
+        let lostFocusedRow = focusedPath.map { !notes.contains($0) } ?? false
+        let lostRequestedRow = focusRequestPath.map { !notes.contains($0) } ?? false
+        if lostFocusedRow { focusedPath = nil }
+        if lostRequestedRow { focusRequestPath = nil }
+        if (lostFocusedRow || lostRequestedRow && focusedPath == nil), focusRequestPath == nil {
+            focusRequestPath = activeTabID.flatMap { notes.contains($0) ? $0 : nil } ?? notes.first
+        }
+    }
+
+    func cancelFocusRequest() {
+        focusRequestPath = nil
     }
 
     /// Records a note row gaining or losing keyboard focus.
     func focusChanged(_ path: String, focused: Bool) {
         if focused {
             focusedPath = path
-            focusRequestPath = nil
+            if focusRequestPath == path { focusRequestPath = nil }
         } else if focusedPath == path {
             focusedPath = nil
         }
@@ -153,6 +170,11 @@ struct FileExplorerView: View {
 
     init(renameDraft: FolderRenameDraft) {
         _renameDraft = State(initialValue: renameDraft)
+    }
+
+    init(tree: FileTreeState) {
+        _tree = State(initialValue: tree)
+        _renameDraft = State(initialValue: FolderRenameDraft())
     }
 
     var body: some View {
@@ -255,6 +277,9 @@ struct FileExplorerView: View {
                         // Brings the row the arrow keys moved to on screen, so it can take focus.
                         .onChange(of: tree.focusRequestPath) { _, path in
                             if let path { proxy.scrollTo(path) }
+                        }
+                        .onChange(of: treeRows.map(\.id)) { _, _ in
+                            tree.reconcileVisibleRows(treeRows, activeTabID: model.activeTabID)
                         }
                     }
                 }
@@ -415,9 +440,18 @@ struct TreeRow: View {
                             // A click keeps keyboard focus on the row, so the arrow keys move on
                             // from it; Return takes the note into the editor.
                             onClick: { Task { await model.openTab(path: node.path, focusEditor: false) } },
-                            onActivate: { Task { await model.openTab(path: node.path) } },
+                            onActivate: {
+                                let selectedPath = tree.focusRequestPath ?? node.path
+                                Task { await model.openTab(path: selectedPath) }
+                            },
+                            onSpace: {
+                                let selectedPath = tree.focusRequestPath ?? node.path
+                                Task { await model.openTab(path: selectedPath, focusEditor: false) }
+                            },
                             onMoveSelection: onMoveSelection,
                             focusRequested: tree.focusRequestPath == node.path,
+                            isFocusStillRequested: { tree.focusRequestPath == node.path },
+                            onPointerFocus: { tree.cancelFocusRequest() },
                             onFocusChange: { [tree, path = node.path] focused in
                                 tree.focusChanged(path, focused: focused)
                             },
@@ -531,8 +565,11 @@ struct FileDragSource: NSViewRepresentable {
     var preview: (CGSize) -> NSImage?
     var onClick: () -> Void
     var onActivate: (() -> Void)?
+    var onSpace: (() -> Void)?
     var onMoveSelection: ((Int) -> Void)?
     var focusRequested = false
+    var isFocusStillRequested: (() -> Bool)?
+    var onPointerFocus: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
     var menuItems: [FileDragSourceView.MenuItem]
 
@@ -548,7 +585,10 @@ struct FileDragSource: NSViewRepresentable {
         nsView.preview = preview
         nsView.onClick = onClick
         nsView.onActivate = onActivate
+        nsView.onSpace = onSpace
         nsView.onMoveSelection = onMoveSelection
+        nsView.isFocusStillRequested = isFocusStillRequested
+        nsView.onPointerFocus = onPointerFocus
         nsView.onFocusChange = onFocusChange
         nsView.menuItems = menuItems
         nsView.focusRequested = focusRequested
@@ -567,8 +607,12 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     var onClick: (() -> Void)?
     /// Return: opens the note for editing. Falls back to `onClick`.
     var onActivate: (() -> Void)?
+    /// Space: opens the selected note without moving focus to the editor.
+    var onSpace: (() -> Void)?
     /// The up and down arrow keys: moves the selection by -1 or 1 notes.
     var onMoveSelection: ((Int) -> Void)?
+    var isFocusStillRequested: (() -> Bool)?
+    var onPointerFocus: (() -> Void)?
     /// Reports the row gaining (true) or losing (false) keyboard focus.
     var onFocusChange: ((Bool) -> Void)?
     /// Whether the row should take keyboard focus, as soon as it is in a window.
@@ -604,11 +648,20 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
         takeRequestedFocus()
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil, window?.firstResponder === self {
+            let onFocusChange = onFocusChange
+            DispatchQueue.main.async { onFocusChange?(false) }
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     /// Makes the row first responder on the next turn of the run loop, outside SwiftUI's update.
     private func takeRequestedFocus() {
         guard focusRequested, window != nil else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.focusRequested, let window = self.window,
+            guard let self, self.focusRequested, self.isFocusStillRequested?() ?? true,
+                  let window = self.window,
                   window.firstResponder !== self else { return }
             window.makeFirstResponder(self)
         }
@@ -629,7 +682,7 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
         if event.charactersIgnoringModifiers == "\r" {
             (onActivate ?? onClick)?()
         } else if event.charactersIgnoringModifiers == " " {
-            onClick?()
+            (onSpace ?? onClick)?()
         } else {
             super.keyDown(with: event)
         }
@@ -664,6 +717,7 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
             }
             return
         }
+        onPointerFocus?()
         window?.makeFirstResponder(self)
         pressEvent = event
     }
