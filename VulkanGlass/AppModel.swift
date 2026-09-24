@@ -170,9 +170,20 @@ struct SystemAppearanceProvider {
 @MainActor
 @Observable
 final class AppModel {
-    var settings: AppSettings
-    var githubUser: GitHubUser?
-    var githubRepos: [GitHubRepo] = []
+    /// State shared with every other window: settings, the GitHub connection, and the window list.
+    let session: AppSession
+    var settings: AppSettings {
+        get { session.settings }
+        set { session.settings = newValue }
+    }
+    var githubUser: GitHubUser? {
+        get { session.githubUser }
+        set { session.githubUser = newValue }
+    }
+    var githubRepos: [GitHubRepo] {
+        get { session.githubRepos }
+        set { session.githubRepos = newValue }
+    }
     var vault: VaultInfo?
     var fileTree: [FileNode] = []
     var notes: [NoteMeta] = []
@@ -232,8 +243,14 @@ final class AppModel {
     var gitMissingWarningOpen = false
     var errorMessage: String?
     var busyMessage: String?
-    var githubCLIStatus = GitHubCLIStatus()
-    var githubAuthSource: GitHubAuthSource?
+    var githubCLIStatus: GitHubCLIStatus {
+        get { session.githubCLIStatus }
+        set { session.githubCLIStatus = newValue }
+    }
+    var githubAuthSource: GitHubAuthSource? {
+        get { session.githubAuthSource }
+        set { session.githubAuthSource = newValue }
+    }
     private(set) var systemDarkMode: Bool
 
     /// True when this launch runs local-only: no Keychain, no `gh`, no GitHub network calls.
@@ -259,10 +276,16 @@ final class AppModel {
         }
     }
 
-    private var activeToken: String?
+    private var activeToken: String? {
+        get { session.activeToken }
+        set { session.activeToken = newValue }
+    }
     private let dependencies: AppModelDependencies
     private var defaultEditorMode: EditorMode = .preview
-    private var githubConnectionGeneration = 0
+    private var githubConnectionGeneration: Int {
+        get { session.githubConnectionGeneration }
+        set { session.githubConnectionGeneration = newValue }
+    }
     @ObservationIgnored private var systemAppearanceObservation: NSKeyValueObservation?
 
     var activeTab: NoteTab? { tabs.first { $0.id == activeTabID } }
@@ -279,15 +302,17 @@ final class AppModel {
     @ObservationIgnored private var titleSubmissions: [UUID: String] = [:]
     @ObservationIgnored private var latestTitleSubmissionID: UUID?
 
+    /// Without a `session` the model gets one of its own, as a lone window (or a test) would.
     init(
         settings: AppSettings? = nil,
+        session: AppSession? = nil,
         systemDarkMode: Bool? = nil,
         bootstrapOnLaunch: Bool = true,
         dependencies: AppModelDependencies = .live,
         systemAppearanceProvider: SystemAppearanceProvider? = nil
     ) {
         let appearanceProvider = systemAppearanceProvider ?? .live
-        self.settings = settings ?? SettingsStore.load()
+        self.session = session ?? AppSession(settings: settings)
         self.systemDarkMode = systemDarkMode ?? appearanceProvider.currentDarkMode()
         self.dependencies = dependencies
         if systemDarkMode == nil {
@@ -305,7 +330,10 @@ final class AppModel {
     }
 
     /// Checks for git, loads GitHub identity from GitHub CLI or a saved PAT, then opens `--vault`.
+    /// Only the first window of a session does this; later windows share its results.
     func bootstrap() async {
+        guard !session.hasBootstrapped else { return }
+        session.hasBootstrapped = true
         await checkGitInstalled()
         await connectGitHub()
         let args = ProcessInfo.processInfo.arguments
@@ -365,6 +393,7 @@ final class AppModel {
 
     /// Inspects and opens a vault folder. Missing paths toast and return to welcome.
     func openVault(path: String) async {
+        guard !focusWindowShowingVault(path: path) else { return }
         busyMessage = "Inspecting vault…"
         guard FileService.directoryExists(at: path) else {
             guard await commitTitleEditing() else {
@@ -380,6 +409,10 @@ final class AppModel {
 
     /// Opens a GitHub-backed vault folder.
     func openVault(_ info: VaultInfo) async {
+        guard !focusWindowShowingVault(path: info.path) else {
+            busyMessage = nil
+            return
+        }
         guard FileService.directoryExists(at: info.path) else {
             guard await commitTitleEditing() else { return }
             await rejectMissingVault(path: info.path, name: info.name)
@@ -441,6 +474,17 @@ final class AppModel {
         } else if let welcome = notes.first(where: { $0.title.lowercased() == "welcome" }) ?? notes.first {
             await openTab(path: welcome.path)
         }
+    }
+
+    /// A vault open in two windows would have two sets of tabs autosaving the same files, so
+    /// opening one that another window already shows brings that window forward instead.
+    private func focusWindowShowingVault(path: String) -> Bool {
+        guard vault.map({ FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path })
+            != FileService.canonicalURL(URL(fileURLWithPath: path)).path,
+            let other = session.model(showingVault: path, excluding: self)
+        else { return false }
+        session.focus(other)
+        return true
     }
 
     /// Closes the current vault and returns to the welcome screen.
@@ -973,6 +1017,20 @@ final class AppModel {
     func prepareToTerminate() async -> Bool {
         guard await flushDirtyTabs() else { return false }
         return await resolveUnsavedStandaloneChanges()
+    }
+
+    /// Whether closing this window has to wait: a title rename, a note move, or unsaved edits.
+    var needsPreparationBeforeClosing: Bool {
+        titleEditingTabID != nil || titleCommitTask != nil || !movingNotePaths.isEmpty
+            || tabs.contains { $0.dirty }
+    }
+
+    /// Finishes a title rename and note moves, writes pending autosaves, and asks about unsaved
+    /// standalone files before a window closes. False means the user cancelled or a save failed.
+    func prepareToCloseWindow() async -> Bool {
+        guard await commitTitleEditing() else { return false }
+        await awaitPendingMoves()
+        return await prepareToTerminate()
     }
 
     /// Creates an "Untitled" note and opens it with its title ready to rename. In a vault the note

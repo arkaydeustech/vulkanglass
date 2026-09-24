@@ -2,6 +2,10 @@
 
 Native macOS SwiftUI app for Markdown notes. Vaults are GitHub repositories; saving a note commits and pushes. Individual `.md` files can be opened outside a vault; those are not autosaved — save them with ⌘S or File ▸ Save, and closing or quitting asks before discarding unsaved edits.
 
+Each window works on its own: File → New Window (`⌘N`) opens another window, which can open a
+different vault or Markdown file from the ones already open. Opening a vault that another window
+already shows brings that window to the front. File → New note is `⌘T`.
+
 Accent color is teal. Layout follows Obsidian (ribbon, file tree, editor, backlinks, graph).
 
 Tabs can be arranged in tab groups. Drag a tab to the left, right, top, or bottom of a note pane

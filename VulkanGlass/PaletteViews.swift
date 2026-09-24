@@ -3,11 +3,13 @@ import SwiftUI
 
 struct CommandPaletteView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     @State private var query = ""
 
     private var commands: [(id: String, label: String, hint: String, run: () -> Void)] {
         [
-            ("new", "Create new note", "⌘N", { Task { await model.newNote() } }),
+            ("new", "Create new note", "⌘T", { Task { await model.newNote() } }),
+            ("window", "Open new window", "⌘N", { openWindow(id: AppWindow.sceneID) }),
             ("daily", "Open today's daily note", "⌘D", { Task { await model.dailyNote() } }),
             ("graph", "Open graph view", "⌘G", { model.centerView = .graph }),
             ("preview", "Toggle reading view", "⌘E", {
