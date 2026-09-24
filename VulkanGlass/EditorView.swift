@@ -1857,7 +1857,7 @@ struct NoteEditorView: View {
                             }
                         }
                     ) { target in
-                        Task { await model.followWikiLink(target) }
+                        Task { await model.followWikiLink(target, inGroup: groupID) }
                     }
                 } else {
                     SourceEditor(

@@ -1,3 +1,5 @@
+import AppKit
+import SwiftUI
 import XCTest
 @testable import VulkanGlass
 
@@ -78,6 +80,20 @@ final class TabGroupLayoutTests: XCTestCase {
         XCTAssertEqual(layout.group(second)?.tabIDs, ["c", "a"])
         XCTAssertEqual(layout.focusedGroupID, second)
         XCTAssertEqual(layout.activeTabID, "a")
+    }
+
+    func testEdgeDropOnAnotherGroupCollapsesAnEmptySource() throws {
+        var layout = TabGroupLayout()
+        layout.reconcile(with: ["a", "b"])
+        let first = layout.focusedGroupID
+        let second = try XCTUnwrap(layout.drop("b", on: first, zone: .trailing))
+
+        let third = try XCTUnwrap(layout.drop("b", on: first, zone: .top))
+
+        XCTAssertNil(layout.group(second))
+        XCTAssertEqual(layout.orderedGroups.map(\.tabIDs), [["b"], ["a"]])
+        XCTAssertEqual(layout.root.groupIDs, [third, first])
+        XCTAssertEqual(layout.activeTabID, "b")
     }
 
     func testMovingTheLastTabOutOfAGroupCollapsesTheSplit() throws {
@@ -215,6 +231,12 @@ final class TabGroupLayoutTests: XCTestCase {
         XCTAssertEqual(PaneSplitView.clampedFraction(0.01, total: 1000), 0.16, accuracy: 0.0001)
         XCTAssertEqual(PaneSplitView.clampedFraction(0.99, total: 1000), 0.84, accuracy: 0.0001)
         XCTAssertEqual(PaneSplitView.clampedFraction(0.9, total: 200), 0.5)
+        XCTAssertEqual(PaneSplitView.clampedFraction(0.2, total: 1000), 0.2)
+        XCTAssertEqual(PaneSplitView.clampedFraction(0.8, total: 1000), 0.8)
+        XCTAssertEqual(PaneSplitView.resizedFraction(origin: 500, translation: 100, total: 1000), 0.6)
+        XCTAssertEqual(PaneSplitView.resizedFraction(origin: 500, translation: -500, total: 1000), 0.16)
+        XCTAssertEqual(SplitHandle.translation(CGSize(width: 90, height: 15), for: .horizontal), 90)
+        XCTAssertEqual(SplitHandle.translation(CGSize(width: 90, height: 15), for: .vertical), 15)
     }
 }
 
@@ -247,7 +269,7 @@ final class TabGroupModelTests: XCTestCase {
         let model = try modelWithOpenTabs(["One", "Two"], in: root)
         let original = model.tabGroupLayout.focusedGroupID
         model.dropTab(model.tabs[1].path, on: original, zone: .bottom)
-        model.focusGroup(original)
+        await model.focusGroup(original)
 
         let third = root.appendingPathComponent("Three.md")
         try "three".write(to: third, atomically: true, encoding: .utf8)
@@ -256,6 +278,119 @@ final class TabGroupModelTests: XCTestCase {
         XCTAssertEqual(model.tabs(inGroup: original).map(\.title), ["One", "Three"])
         XCTAssertEqual(model.tabGroupLayout.focusedGroupID, original)
         XCTAssertEqual(model.activeTabID, third.path)
+    }
+
+    func testNewNoteUsesItsClickedGroupEvenIfFocusChangesBeforeItOpens() async throws {
+        let root = try temporaryDirectory()
+        let destination = root.appendingPathComponent("Created.md")
+        var model: AppModel!
+        var dependencies = AppModelDependencies.live
+        dependencies.chooseNewStandaloneNoteURL = {
+            model.activeTabID = model.tabs[1].id
+            return destination
+        }
+        model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.tabs = try ["One", "Two"].map { title in
+            let url = root.appendingPathComponent("\(title).md")
+            try title.write(to: url, atomically: true, encoding: .utf8)
+            return NoteTab(path: url.path, title: title, content: title, originalContent: title, isStandalone: true)
+        }
+        let clickedGroup = model.tabGroupLayout.focusedGroupID
+        model.dropTab(model.tabs[1].id, on: clickedGroup, zone: .trailing)
+        await model.focusGroup(clickedGroup)
+
+        await model.newNote(inGroup: clickedGroup)
+
+        XCTAssertEqual(model.tabGroupLayout.groupID(containing: destination.path), clickedGroup)
+        XCTAssertEqual(model.activeTabID, destination.path)
+        XCTAssertEqual(model.editorFocusRequest?.tabID, destination.path)
+    }
+
+    func testVaultNoteKeepsItsClickedGroupAcrossIndexingAwait() async throws {
+        let root = try temporaryDirectory()
+        let enteredIndexing = expectation(description: "Vault indexing started")
+        let gate = TabGroupSnapshotGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.loadVaultSnapshot = { root in
+            enteredIndexing.fulfill()
+            await gate.wait()
+            return (FileService.tree(at: root), FileService.index(at: root))
+        }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        model.tabs = try ["One", "Two"].map { title in
+            let url = root.appendingPathComponent("\(title).md")
+            try title.write(to: url, atomically: true, encoding: .utf8)
+            return NoteTab(path: url.path, title: title, content: title, originalContent: title, isStandalone: false)
+        }
+        let clickedGroup = model.tabGroupLayout.focusedGroupID
+        model.dropTab(model.tabs[1].id, on: clickedGroup, zone: .trailing)
+        let other = model.tabGroupLayout.focusedGroupID
+        await model.focusGroup(clickedGroup)
+
+        let creation = Task { await model.newNote(inGroup: clickedGroup) }
+        await fulfillment(of: [enteredIndexing], timeout: 2)
+        await model.focusGroup(other)
+        await gate.release()
+        await creation.value
+
+        let created = try XCTUnwrap(model.tabs.first { $0.title == "Untitled" })
+        XCTAssertEqual(model.tabGroupLayout.groupID(containing: created.id), clickedGroup)
+        XCTAssertEqual(model.activeTabID, created.id)
+    }
+
+    func testWikiLinkFromAnotherPaneOpensInItsSourceGroup() async throws {
+        let root = try temporaryDirectory()
+        let model = try modelWithOpenTabs(["One", "Two"], in: root)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        let source = model.tabGroupLayout.focusedGroupID
+        model.dropTab(model.tabs[1].id, on: source, zone: .trailing)
+        XCTAssertNotEqual(model.tabGroupLayout.focusedGroupID, source)
+
+        await model.followWikiLink("Linked", inGroup: source)
+
+        let linked = try XCTUnwrap(model.tabs.first { $0.title == "Linked" })
+        XCTAssertEqual(model.tabGroupLayout.groupID(containing: linked.id), source)
+        XCTAssertEqual(model.activeTabID, linked.id)
+    }
+
+    func testMouseDownThenTabSelectionFlushesTheOutgoingGroup() async throws {
+        let model = try modelWithOpenTabs(["One", "Two"])
+        let first = model.tabs[0].path
+        let second = model.tabs[1].path
+        let original = model.tabGroupLayout.focusedGroupID
+        model.dropTab(second, on: original, zone: .trailing)
+        let other = model.tabGroupLayout.focusedGroupID
+        await model.focusGroup(original)
+        model.updateContent(first, "changed in first pane")
+
+        await model.focusGroup(other)
+        await model.setActiveTab(second)
+
+        XCTAssertEqual(model.activeTabID, second)
+        for _ in 0..<100 where (try? FileService.read(URL(fileURLWithPath: first))) != "changed in first pane" {
+            await Task.yield()
+        }
+        XCTAssertEqual(try FileService.read(URL(fileURLWithPath: first)), "changed in first pane")
+        XCTAssertFalse(model.tabs.first { $0.id == first }?.dirty ?? true)
+    }
+
+    func testFocusingAnotherGroupCommitsTheOutgoingTitle() async throws {
+        let model = try modelWithOpenTabs(["One", "Two"])
+        let first = model.tabs[0].path
+        let original = model.tabGroupLayout.focusedGroupID
+        model.dropTab(model.tabs[1].path, on: original, zone: .trailing)
+        let other = model.tabGroupLayout.focusedGroupID
+        await model.focusGroup(original)
+        model.beginEditingTitle(for: first)
+        model.updateTitleDraft(for: first, draft: "Renamed")
+
+        await model.focusGroup(other)
+
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(model.tabGroupLayout.focusedGroupID, other)
+        XCTAssertEqual(model.tabs(inGroup: original).map(\.title), ["Renamed"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: first).deletingLastPathComponent().appendingPathComponent("Renamed.md").path))
     }
 
     func testSelectingATabInAnotherGroupFocusesThatGroup() async throws {
@@ -287,25 +422,25 @@ final class TabGroupModelTests: XCTestCase {
         XCTAssertTrue(model.paneSplitFractions.isEmpty)
     }
 
-    func testFocusingAnotherGroupLeavesTheGraphView() throws {
+    func testFocusingAnotherGroupLeavesTheGraphView() async throws {
         let model = try modelWithOpenTabs(["One", "Two"])
         let original = model.tabGroupLayout.focusedGroupID
         model.dropTab(model.tabs[1].path, on: original, zone: .trailing)
         model.centerView = .graph
 
-        model.focusGroup(original)
+        await model.focusGroup(original)
 
         XCTAssertEqual(model.centerView, .editor)
         XCTAssertEqual(model.activeTab?.title, "One")
     }
 
-    func testReadingModeStaysWithEachGroupsActiveTab() throws {
+    func testReadingModeStaysWithEachGroupsActiveTab() async throws {
         let model = try modelWithOpenTabs(["One", "Two"])
         let original = model.tabGroupLayout.focusedGroupID
         model.dropTab(model.tabs[1].path, on: original, zone: .trailing)
         model.editorMode = .source
 
-        model.focusGroup(original)
+        await model.focusGroup(original)
 
         XCTAssertEqual(model.editorMode, .preview)
         XCTAssertEqual(model.tabs.first { $0.title == "Two" }?.editorMode, .source)
@@ -357,9 +492,22 @@ final class TabGroupModelTests: XCTestCase {
     }
 }
 
+private actor TabGroupSnapshotGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 @MainActor
 final class TabGroupCommandTests: XCTestCase {
-    func testSplitCommandsMoveTheActiveTabBesideOrBelow() throws {
+    func testSplitCommandsMoveTheActiveTabBesideOrBelow() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("VulkanGlassTabGroupCommands-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -376,7 +524,7 @@ final class TabGroupCommandTests: XCTestCase {
         XCTAssertEqual(model.tabGroupLayout.orderedGroups.map(\.tabIDs.count), [2, 1])
         XCTAssertFalse(model.canSplitActiveTab, "a lone tab has nothing to split from")
 
-        model.focusGroup(model.tabGroupLayout.orderedGroups[0].id)
+        await model.focusGroup(model.tabGroupLayout.orderedGroups[0].id)
         model.splitActiveTab(.bottom)
         let groups = model.tabGroupLayout.orderedGroups
         XCTAssertEqual(groups.map { model.tabs(inGroup: $0.id).map(\.title) }, [["One"], ["Two"], ["Three"]])
@@ -385,5 +533,185 @@ final class TabGroupCommandTests: XCTestCase {
         else { return XCTFail("Expected nested splits") }
         XCTAssertEqual(outer.axis, .horizontal)
         XCTAssertEqual(inner.axis, .vertical)
+    }
+}
+
+@MainActor
+final class TabGroupInteractionTests: XCTestCase {
+    func testPaneDropUsesItsMeasuredSizeAndRejectsAnInvalidZone() throws {
+        let model = try modelWithTabs()
+        let first = model.tabGroupLayout.focusedGroupID
+        model.draggedTabID = model.tabs[1].id
+        var highlight: PaneDropZone?
+        let delegate = PaneDropDelegate(
+            model: model,
+            groupID: first,
+            paneSize: CGSize(width: 400, height: 200),
+            zone: Binding(get: { highlight }, set: { highlight = $0 })
+        )
+
+        XCTAssertNil(delegate.acceptedZone(at: CGPoint(x: 200, y: 100)))
+        XCTAssertEqual(delegate.acceptedZone(at: CGPoint(x: 390, y: 100)), .trailing)
+        XCTAssertTrue(delegate.performDrop(at: CGPoint(x: 390, y: 100)))
+        XCTAssertNil(highlight)
+        XCTAssertNil(model.draggedTabID)
+        XCTAssertEqual(model.tabGroupLayout.orderedGroups.map(\.tabIDs.count), [2, 1])
+        XCTAssertFalse(delegate.performDrop(at: CGPoint(x: 390, y: 100)))
+    }
+
+    func testStripDropInsertsAtItsTargetAndClearsDragState() throws {
+        let model = try modelWithTabs()
+        let group = model.tabGroupLayout.focusedGroupID
+        model.draggedTabID = model.tabs[2].id
+        var highlighted = true
+        let delegate = TabStripDropDelegate(
+            model: model,
+            groupID: group,
+            index: 0,
+            highlighted: Binding(get: { highlighted }, set: { highlighted = $0 })
+        )
+
+        XCTAssertTrue(delegate.performDrop())
+        XCTAssertEqual(model.tabs(inGroup: group).map(\.title), ["Three", "One", "Two"])
+        XCTAssertFalse(highlighted)
+        XCTAssertNil(model.draggedTabID)
+    }
+
+    func testOuterStripDropUsesHoveredTabWhenBothDropTargetsOverlap() throws {
+        let model = try modelWithTabs()
+        let group = model.tabGroupLayout.focusedGroupID
+        model.draggedTabID = model.tabs[2].id
+        var highlighted = false
+        let outer = TabStripDropDelegate(
+            model: model,
+            groupID: group,
+            index: nil,
+            highlighted: Binding(get: { highlighted }, set: { highlighted = $0 }),
+            preferredIndex: { 0 }
+        )
+
+        XCTAssertTrue(outer.performDrop())
+        XCTAssertEqual(model.tabs(inGroup: group).map(\.title), ["Three", "One", "Two"])
+    }
+
+    func testReleasedDragProviderClearsCancelledDragWithoutErasingANewerOne() async throws {
+        let model = try modelWithTabs()
+        let first = model.tabs[0].id
+        let second = model.tabs[1].id
+        model.draggedTabID = first
+        var cancelled: TabDragItemProvider? = TabDragItemProvider(tabID: first, title: "One", model: model)
+        XCTAssertNotNil(cancelled)
+        cancelled = nil
+        for _ in 0..<20 where model.draggedTabID != nil { await Task.yield() }
+        XCTAssertNil(model.draggedTabID)
+
+        model.draggedTabID = first
+        var old: TabDragItemProvider? = TabDragItemProvider(tabID: first, title: "One", model: model)
+        model.draggedTabID = second
+        old = nil
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(old)
+        XCTAssertEqual(model.draggedTabID, second)
+    }
+
+    func testPaneMouseMonitorSkipsPaletteAndSwitcherClicks() throws {
+        let model = try modelWithTabs()
+        let view = PaneMouseDownMonitor.MonitorView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = view
+        var clicks = 0
+        view.canFocus = { !model.commandOpen && !model.switcherOpen }
+        view.onMouseDown = { clicks += 1 }
+
+        func mouseDown(at point: NSPoint) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: point,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: 1
+            ))
+        }
+
+        view.handle(try mouseDown(at: NSPoint(x: 100, y: 100)))
+        XCTAssertEqual(clicks, 1)
+        model.commandOpen = true
+        view.handle(try mouseDown(at: NSPoint(x: 100, y: 100)))
+        XCTAssertEqual(clicks, 1)
+        model.commandOpen = false
+        model.switcherOpen = true
+        view.handle(try mouseDown(at: NSPoint(x: 100, y: 100)))
+        XCTAssertEqual(clicks, 1)
+        model.switcherOpen = false
+        view.handle(try mouseDown(at: NSPoint(x: 500, y: 100)))
+        XCTAssertEqual(clicks, 1)
+    }
+
+    func testFocusingAnotherPaneMovesFirstResponderToItsSourceEditor() async throws {
+        let model = try modelWithTabs()
+        model.tabs[0].editorMode = .source
+        model.tabs[1].editorMode = .source
+        let firstGroup = model.tabGroupLayout.focusedGroupID
+        model.dropTab(model.tabs[1].id, on: firstGroup, zone: .trailing)
+        let secondGroup = model.tabGroupLayout.focusedGroupID
+        await model.setActiveTab(model.tabs[0].id)
+        let host = NSHostingView(rootView: TabGroupsView().environment(model).frame(width: 900, height: 500))
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: 500)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        var editors: [SourceTextView] = []
+        for _ in 0..<50 where editors.count < 2 {
+            host.layoutSubtreeIfNeeded()
+            editors = descendants(of: host).compactMap { $0 as? SourceTextView }
+            await Task.yield()
+        }
+        let first = try XCTUnwrap(editors.first { $0.string == "One" }, "editors: \(editors.map(\.string))")
+        let second = try XCTUnwrap(editors.first { $0.string == "Two" })
+        XCTAssertTrue(window.makeFirstResponder(first))
+
+        await model.focusGroup(secondGroup)
+        for _ in 0..<50 where window.firstResponder !== second {
+            host.layoutSubtreeIfNeeded()
+            await Task.yield()
+        }
+
+        XCTAssertTrue(window.firstResponder === second)
+        XCTAssertNil(model.editorFocusRequest)
+        second.setSelectedRange(NSRange(location: 0, length: 3))
+        XCTAssertTrue(NSApp.sendAction(#selector(SourceTextView.toggleBold(_:)), to: window.firstResponder, from: nil))
+        XCTAssertEqual(second.string, "**Two**")
+        XCTAssertEqual(first.string, "One")
+
+        await model.openTab(path: model.tabs[0].path)
+        for _ in 0..<50 where window.firstResponder !== first {
+            host.layoutSubtreeIfNeeded()
+            await Task.yield()
+        }
+        XCTAssertTrue(window.firstResponder === first)
+    }
+
+    private func descendants(of view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { descendants(of: $0) }
+    }
+
+    private func modelWithTabs() throws -> AppModel {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VulkanGlassTabGroupInteraction-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = try ["One", "Two", "Three"].map { title in
+            let url = root.appendingPathComponent("\(title).md")
+            try title.write(to: url, atomically: true, encoding: .utf8)
+            return NoteTab(path: url.path, title: title, content: title, originalContent: title, isStandalone: true)
+        }
+        return model
     }
 }

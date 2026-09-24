@@ -11,6 +11,11 @@ struct AppModelDependencies {
     var saveKeychainToken: (String) throws -> Void
     var authenticationDisabled: () -> Bool = { false }
     var chooseNewStandaloneNoteURL: @MainActor () -> URL? = { nil }
+    var loadVaultSnapshot: (URL) async -> ([FileNode], [NoteMeta]) = { root in
+        await Task.detached {
+            (FileService.tree(at: root), FileService.index(at: root))
+        }.value
+    }
     var syncGit: (String, String, GitCredential?) async throws -> GitStatus = { path, message, credential in
         try await Task.detached {
             try GitService.sync(path: path, message: message, credential: credential)
@@ -389,9 +394,7 @@ final class AppModel {
     func refreshVault(reconcileTabs: Bool = false) async {
         guard let vault else { return }
         let root = URL(fileURLWithPath: vault.path)
-        let snapshot = await Task.detached {
-            (FileService.tree(at: root), FileService.index(at: root))
-        }.value
+        let snapshot = await dependencies.loadVaultSnapshot(root)
         guard self.vault?.path == vault.path else { return }
         fileTree = snapshot.0
         notes = snapshot.1
@@ -462,6 +465,7 @@ final class AppModel {
             titleEditingDraft = ""
             activeTabID = existing.id
             centerView = .editor
+            requestFocusedEditorFocus()
             return
         }
         do {
@@ -486,6 +490,7 @@ final class AppModel {
             titleEditingDraft = ""
             activeTabID = tab.id
             centerView = .editor
+            requestFocusedEditorFocus()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -518,23 +523,26 @@ final class AppModel {
 
     func setActiveTab(_ id: String) async {
         guard id != activeTabID else { return }
-        guard await commitTitleEditing() else { return }
+        guard await handOffActiveTab(to: id) else { return }
+        activeTabID = id
+        centerView = .editor
+        requestFocusedEditorFocus()
+    }
+
+    /// Completes the outgoing editor session before a tab or pane changes focus.
+    private func handOffActiveTab(to id: String?) async -> Bool {
+        guard await commitTitleEditing() else { return false }
         if let outgoing = activeTabID, outgoing != id,
            tabs.first(where: { $0.id == outgoing })?.dirty == true
         {
-            // Track the flush in `saveTasks` so it is cancellable and awaitable like any other
-            // autosave; it supersedes the pending debounce for the same tab.
             saveTasks[outgoing]?.cancel()
             saveTasks[outgoing] = Task { [weak self] in
                 _ = await self?.save(id: outgoing, sync: false)
             }
         }
-        if titleEditingTabID != id {
-            titleEditingTabID = nil
-        }
+        if titleEditingTabID != id { titleEditingTabID = nil }
         editorFocusRequest = nil
-        activeTabID = id
-        centerView = .editor
+        return true
     }
 
     /// Tabs of one tab group, in the group's order.
@@ -544,11 +552,23 @@ final class AppModel {
     }
 
     /// Focuses a tab group, making its active tab the app-wide active tab.
-    func focusGroup(_ id: UUID) {
+    func focusGroup(_ id: UUID) async {
         guard id != tabGroupLayout.focusedGroupID, tabGroupLayout.group(id) != nil else { return }
+        let previousGroupID = tabGroupLayout.focusedGroupID
+        guard await handOffActiveTab(to: tabGroupLayout.group(id)?.activeTabID) else { return }
+        guard tabGroupLayout.focusedGroupID == previousGroupID,
+              tabGroupLayout.group(id) != nil else { return }
         updateTabGroupLayout { $0.focus(id) }
         // The graph fills the focused pane, so a newly focused pane returns to its note.
         centerView = .editor
+        requestFocusedEditorFocus()
+    }
+
+    private func requestFocusedEditorFocus() {
+        guard let id = activeTabID,
+              tabs.first(where: { $0.id == id })?.editorMode == .source
+        else { return }
+        editorFocusRequest = EditorFocusRequest(tabID: id)
     }
 
     /// Whether dropping a dragged tab on a zone of a tab group would do anything.
@@ -771,13 +791,16 @@ final class AppModel {
         return true
     }
 
-    func newNote() async {
+    func newNote(inGroup groupID: UUID? = nil) async {
         guard await commitTitleEditing() else { return }
         if let vault {
             do {
                 let url = try FileService.createNote(in: URL(fileURLWithPath: vault.path), name: "Untitled")
                 await refreshVault()
                 await openTab(path: url.path)
+                if let groupID, tabGroupLayout.group(groupID) != nil {
+                    moveTab(url.path, toGroup: groupID)
+                }
                 prepareNewNoteForEditing(at: url.path, editingTitle: true)
             } catch {
                 errorMessage = error.localizedDescription
@@ -788,6 +811,9 @@ final class AppModel {
         do {
             try FileService.write(url, content: "")
             await openTab(path: url.path, standalone: true, content: "")
+            if let groupID, tabGroupLayout.group(groupID) != nil {
+                moveTab(url.path, toGroup: groupID)
+            }
             prepareNewNoteForEditing(at: url.path)
         } catch {
             errorMessage = error.localizedDescription
@@ -892,7 +918,7 @@ final class AppModel {
         }
     }
 
-    func followWikiLink(_ target: String) async {
+    func followWikiLink(_ target: String, inGroup groupID: UUID? = nil) async {
         guard let vault else { return }
         guard await commitTitleEditing() else { return }
         do {
@@ -901,7 +927,11 @@ final class AppModel {
                 try FileService.createFromWiki(root: root, target: target)
             }.value
             await refreshVault()
+            let alreadyOpen = tabs.contains { $0.path == resolution.url.path }
             await openTab(path: resolution.url.path)
+            if !alreadyOpen, let groupID, tabGroupLayout.group(groupID) != nil {
+                moveTab(resolution.url.path, toGroup: groupID)
+            }
             if resolution.wasCreated {
                 prepareNewNoteForEditing(at: resolution.url.path)
             }

@@ -7,6 +7,32 @@ extension UTType {
     static let vulkanGlassNoteTab = UTType(exportedAs: "app.vulkanglass.note-tab")
 }
 
+/// The drag session retains its provider until it ends, including when the drop is cancelled.
+/// Clear the in-process lookup when that session releases the provider.
+final class TabDragItemProvider: NSItemProvider {
+    private let onRelease: () -> Void
+
+    init(tabID: String, title: String, model: AppModel) {
+        onRelease = { [weak model] in
+            Task { @MainActor in
+                if model?.draggedTabID == tabID { model?.draggedTabID = nil }
+            }
+        }
+        super.init()
+        let payload = Data(tabID.utf8)
+        registerDataRepresentation(
+            forTypeIdentifier: UTType.vulkanGlassNoteTab.identifier,
+            visibility: .ownProcess
+        ) { completion in
+            completion(payload, nil)
+            return nil
+        }
+        suggestedName = title
+    }
+
+    deinit { onRelease() }
+}
+
 /// Which outer edges of the main display area a pane touches. The pane along the top edge
 /// holds its tab strip in the window title bar, and the outermost ones host the sidebar toggles.
 struct PaneEdges: Equatable {
@@ -79,11 +105,17 @@ struct PaneSplitView: View {
                 onChanged: { translation in
                     guard total > 0 else { return }
                     if resizeOrigin == nil { resizeOrigin = firstLength }
-                    let proposed = ((resizeOrigin ?? firstLength) + translation) / total
                     var transaction = Transaction()
                     transaction.disablesAnimations = true
                     withTransaction(transaction) {
-                        model.resizePaneSplit(split.id, fraction: Self.clampedFraction(proposed, total: total))
+                        model.resizePaneSplit(
+                            split.id,
+                            fraction: Self.resizedFraction(
+                                origin: resizeOrigin ?? firstLength,
+                                translation: translation,
+                                total: total
+                            )
+                        )
                     }
                 },
                 onEnded: { resizeOrigin = nil }
@@ -113,6 +145,11 @@ struct PaneSplitView: View {
         guard total > 0 else { return 0.5 }
         let minimum = min(0.5, VGTheme.tabGroupMinLength / total)
         return min(max(fraction, minimum), 1 - minimum)
+    }
+
+    static func resizedFraction(origin: CGFloat, translation: CGFloat, total: CGFloat) -> CGFloat {
+        guard total > 0 else { return 0.5 }
+        return clampedFraction((origin + translation) / total, total: total)
     }
 }
 
@@ -144,7 +181,15 @@ struct TabGroupPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(VGTheme.backgroundPrimary(dark: model.dark))
-        .background(PaneMouseDownMonitor { model.focusGroup(groupID) })
+        .background(PaneMouseDownMonitor(
+            canFocus: { !model.commandOpen && !model.switcherOpen },
+            onMouseDown: {
+                Task {
+                    guard !model.commandOpen && !model.switcherOpen else { return }
+                    await model.focusGroup(groupID)
+                }
+            }
+        ))
     }
 
     @ViewBuilder
@@ -209,7 +254,13 @@ struct PaneDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        let accepted = acceptedZone(for: info)
+        guard info.hasItemsConforming(to: [.vulkanGlassNoteTab]) else { return false }
+        return performDrop(at: info.location)
+    }
+
+    /// Shared by the drop callback and interaction tests using the pane's live size.
+    func performDrop(at location: CGPoint) -> Bool {
+        let accepted = acceptedZone(at: location)
         zone = nil
         guard let accepted, let tabID = model.draggedTabID else { return false }
         model.draggedTabID = nil
@@ -218,8 +269,13 @@ struct PaneDropDelegate: DropDelegate {
     }
 
     private func acceptedZone(for info: DropInfo) -> PaneDropZone? {
+        guard info.hasItemsConforming(to: [.vulkanGlassNoteTab]) else { return nil }
+        return acceptedZone(at: info.location)
+    }
+
+    func acceptedZone(at location: CGPoint) -> PaneDropZone? {
         guard let tabID = model.draggedTabID else { return nil }
-        let candidate = PaneDropZone.zone(for: info.location, in: paneSize)
+        let candidate = PaneDropZone.zone(for: location, in: paneSize)
         return model.canDropTab(tabID, on: groupID, zone: candidate) ? candidate : nil
     }
 }
@@ -263,9 +319,12 @@ struct TabGroupHeader: View {
                 help: "Toggle reading view",
                 active: editorMode == .preview
             ) {
-                model.focusGroup(groupID)
-                model.editorMode = model.editorMode == .source ? .preview : .source
-                model.centerView = .editor
+                Task {
+                    await model.focusGroup(groupID)
+                    guard model.tabGroupLayout.focusedGroupID == groupID else { return }
+                    model.editorMode = model.editorMode == .source ? .preview : .source
+                    model.centerView = .editor
+                }
             }
             .padding(.trailing, trailingPadding)
             if showRightToggle {
@@ -336,8 +395,10 @@ struct TabGroupTabStrip: View {
             }
             .frame(minWidth: 0)
             Button {
-                model.focusGroup(groupID)
-                Task { await model.newNote() }
+                Task {
+                    await model.focusGroup(groupID)
+                    await model.newNote(inGroup: groupID)
+                }
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: VGTheme.titleBarIconFont))
@@ -360,7 +421,13 @@ struct TabGroupTabStrip: View {
         }
         .onDrop(
             of: [.vulkanGlassNoteTab],
-            delegate: TabStripDropDelegate(model: model, groupID: groupID, index: nil, highlighted: $appending)
+            delegate: TabStripDropDelegate(
+                model: model,
+                groupID: groupID,
+                index: nil,
+                highlighted: $appending,
+                preferredIndex: { insertionIndex }
+            )
         )
     }
 
@@ -420,17 +487,7 @@ struct TabGroupTabStrip: View {
         .accessibilityLabel(tab.title)
         .onDrag {
             model.draggedTabID = tab.id
-            let provider = NSItemProvider()
-            let payload = Data(tab.id.utf8)
-            provider.registerDataRepresentation(
-                forTypeIdentifier: UTType.vulkanGlassNoteTab.identifier,
-                visibility: .ownProcess
-            ) { completion in
-                completion(payload, nil)
-                return nil
-            }
-            provider.suggestedName = tab.title
-            return provider
+            return TabDragItemProvider(tabID: tab.id, title: tab.title, model: model)
         }
     }
 }
@@ -442,13 +499,14 @@ struct TabStripDropDelegate: DropDelegate {
     let groupID: UUID
     let index: Int?
     @Binding var highlighted: Bool
+    var preferredIndex: () -> Int? = { nil }
 
     func validateDrop(info: DropInfo) -> Bool {
         info.hasItemsConforming(to: [.vulkanGlassNoteTab]) && model.draggedTabID != nil
     }
 
     func dropEntered(info: DropInfo) {
-        highlighted = model.draggedTabID != nil
+        highlighted = model.draggedTabID != nil && preferredIndex() == nil
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -460,10 +518,15 @@ struct TabStripDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        guard info.hasItemsConforming(to: [.vulkanGlassNoteTab]) else { return false }
+        return performDrop()
+    }
+
+    func performDrop() -> Bool {
         highlighted = false
         guard let tabID = model.draggedTabID else { return false }
         model.draggedTabID = nil
-        model.moveTab(tabID, toGroup: groupID, at: index)
+        model.moveTab(tabID, toGroup: groupID, at: index ?? preferredIndex())
         return true
     }
 }
@@ -471,15 +534,18 @@ struct TabStripDropDelegate: DropDelegate {
 /// Reports mouse-downs anywhere inside its frame without intercepting them, so clicking into a
 /// pane's editor (an AppKit text view that swallows SwiftUI gestures) focuses that pane.
 struct PaneMouseDownMonitor: NSViewRepresentable {
+    var canFocus: () -> Bool
     var onMouseDown: () -> Void
 
     func makeNSView(context: Context) -> MonitorView {
         let view = MonitorView()
+        view.canFocus = canFocus
         view.onMouseDown = onMouseDown
         return view
     }
 
     func updateNSView(_ nsView: MonitorView, context: Context) {
+        nsView.canFocus = canFocus
         nsView.onMouseDown = onMouseDown
     }
 
@@ -488,6 +554,7 @@ struct PaneMouseDownMonitor: NSViewRepresentable {
     }
 
     final class MonitorView: NSView {
+        var canFocus: (() -> Bool)?
         var onMouseDown: (() -> Void)?
         private var monitor: Any?
 
@@ -510,8 +577,9 @@ struct PaneMouseDownMonitor: NSViewRepresentable {
             monitor = nil
         }
 
-        private func handle(_ event: NSEvent) {
-            guard let window, event.window === window, !isHiddenOrHasHiddenAncestor else { return }
+        func handle(_ event: NSEvent) {
+            guard let window, event.window === window, !isHiddenOrHasHiddenAncestor,
+                  canFocus?() == true else { return }
             let point = convert(event.locationInWindow, from: nil)
             if bounds.contains(point) { onMouseDown?() }
         }

@@ -100,7 +100,7 @@ struct SplitHandle: View {
                 guard resizable else { return }
                 dragging = true
                 updateCursor()
-                onChanged(axis == .horizontal ? value.translation.width : value.translation.height)
+                onChanged(Self.translation(value.translation, for: axis))
             }
             .onEnded { _ in
                 guard resizable else { return }
@@ -108,6 +108,10 @@ struct SplitHandle: View {
                 updateCursor()
                 onEnded()
             }
+    }
+
+    static func translation(_ size: CGSize, for axis: SplitAxis) -> CGFloat {
+        axis == .horizontal ? size.width : size.height
     }
 
     private func updateCursor() {
