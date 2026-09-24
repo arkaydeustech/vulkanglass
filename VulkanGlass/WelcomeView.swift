@@ -6,7 +6,9 @@ struct WelcomeView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: VGTheme.titleBarHeight)
+            Color.clear
+                .frame(height: VGTheme.titleBarHeight)
+                .background(WindowDragRegion())
             Spacer()
             HStack(spacing: 0) {
                 leftColumn
