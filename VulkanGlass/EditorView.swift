@@ -1156,7 +1156,7 @@ final class SourceTextView: NSTextView {
     private func drawLiveChrome(in dirtyRect: NSRect) {
         guard let layoutManager, let textContainer else { return }
         for decoration in liveDecorations.codeBlocks {
-            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+            guard let rect = codeBlockRect(for: decoration.range),
                   rect.intersects(dirtyRect) else { continue }
             CodeHighlight.blockFill(dark: decoration.dark).setFill()
             NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
@@ -1258,7 +1258,7 @@ final class SourceTextView: NSTextView {
     private func drawLiveOverlays(in dirtyRect: NSRect) {
         guard let layoutManager, let textContainer else { return }
         for decoration in liveDecorations.codeBlocks where decoration.showBadge {
-            guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
+            guard let rect = codeBlockRect(for: decoration.range),
                   rect.intersects(dirtyRect) else { continue }
             guard let badge = Self.codeBadge(language: decoration.language, in: rect) else { continue }
             let attrs: [NSAttributedString.Key: Any] = [
@@ -1582,12 +1582,25 @@ final class SourceTextView: NSTextView {
         }
     }
 
+    /// The filled rectangle behind a live code block, in view coordinates.
+    func codeBlockRect(for range: NSRange) -> NSRect? {
+        guard let layoutManager, let textContainer else { return nil }
+        return blockRect(
+            for: range,
+            layoutManager: layoutManager,
+            textContainer: textContainer,
+            includingTrailingEmptyLine: true
+        )
+    }
+
     private func blockRect(
         for range: NSRange,
         layoutManager: NSLayoutManager,
-        textContainer: NSTextContainer
+        textContainer: NSTextContainer,
+        includingTrailingEmptyLine: Bool = false
     ) -> NSRect? {
-        let length = (string as NSString).length
+        let source = string as NSString
+        let length = source.length
         guard length > 0 else { return nil }
         let clamped = NSRange(
             location: min(range.location, length - 1),
@@ -1598,6 +1611,16 @@ final class SourceTextView: NSTextView {
         if glyphs.length > 0 {
             layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, _, _ in
                 union = union.union(rect)
+            }
+        }
+        // A block running to the end of a document that ends in a newline (an unclosed
+        // fence after pressing Return) owns the empty last line. That line has no glyphs;
+        // it is the layout manager's extra line fragment, so cover it explicitly.
+        if includingTrailingEmptyLine, !union.isNull, NSMaxRange(range) >= length {
+            let last = source.character(at: length - 1)
+            let extra = layoutManager.extraLineFragmentRect
+            if (last == 10 || last == 13), !extra.isEmpty {
+                union = union.union(extra)
             }
         }
         guard !union.isNull else { return nil }
