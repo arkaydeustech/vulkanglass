@@ -5,6 +5,17 @@ pass when their owning test file is rerun in isolation. Entries remain here when
 resolved so the failure history and verification are preserved. Do not skip or
 delete a failing test to hide a flake.
 
+## TabGroupInteractionTests.testNativeTabDragReachesPaneAndStripWithoutMovingTheWindow (VulkanGlassTests/TabGroupTests.swift)
+
+- **Status:** open
+- **Date observed:** 2026-09-24
+- **Original command:** `mise run test`
+- **Worker configuration:** Xcode default `xcodebuild test`
+- **Failure:** The strip drag left `One` in its original group instead of moving it beside `Three`; two assertions failed after the 2-second wait (test durations: 2.845s and 2.840s across two aggregate runs).
+- **Suite counts:** 451 total, 450 passed, 1 failed in each aggregate run; an earlier aggregate run passed 451/451.
+- **Isolated rerun:** `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' -only-testing:VulkanGlassTests/TabGroupLayoutTests -only-testing:VulkanGlassTests/TabGroupModelTests -only-testing:VulkanGlassTests/TabGroupCommandTests -only-testing:VulkanGlassTests/TabGroupInteractionTests test` → passed, 47/47; the affected drag test passed in 0.919s.
+- **Hypothesis:** The test posts drag travel and release events after fixed 50ms and 100ms delays, then waits up to 2 seconds for the model move. The strip drag missed in the aggregate run; the exact event delivery cause is not established.
+
 ## MarkdownResourceTests.testRedirectDelegateRejectsPrivateDestination (VulkanGlassTests/ParserAndMarkdownTests.swift)
 
 - **Status:** open

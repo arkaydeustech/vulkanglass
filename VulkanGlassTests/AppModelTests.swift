@@ -363,6 +363,32 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.headingScrollRequest)
     }
 
+    func testRevealHeadingOccurrenceSkipsFencesAndDetails() throws {
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let content = "# Title\n~~~\n## Notes\n~~~\n<details open>\n<summary>More</summary>\n## Notes\n</details>\n## Notes\n## Notes"
+        model.tabs = [NoteTab(path: "/tmp/Title.md", title: "Title", content: content, originalContent: content, isStandalone: true)]
+        model.activeTabID = "/tmp/Title.md"
+
+        model.revealHeading(at: 2)
+
+        let request = try XCTUnwrap(model.headingScrollRequest)
+        XCTAssertEqual(request.heading.line, 10)
+        XCTAssertEqual(request.occurrence, 1)
+        let preview = MarkdownPreviewView(
+            text: content, noteTitles: [], headingTarget: ReadingHeadingTarget(
+                id: request.id, level: request.heading.level,
+                text: request.heading.text, occurrence: request.occurrence
+            ), onWiki: { _ in }
+        )
+        let rendered = ReadingAttributedDocument.make(
+            blocks: preview.displayBlocks, noteTitles: [], baseURL: nil, dark: true
+        )
+        let target = try XCTUnwrap(preview.displayedHeadingTarget)
+        let location = try XCTUnwrap(UnifiedReadingTextView.Coordinator.location(of: target, in: rendered))
+        XCTAssertGreaterThan(location, 0)
+        XCTAssertEqual(location, (rendered.string as NSString).range(of: "Notes", options: .backwards).location)
+    }
+
     func testAutosavePersistsTheEditedTabAfterSwitching() async throws {
         let root = try temporaryDirectory()
         let a = root.appendingPathComponent("A.md")

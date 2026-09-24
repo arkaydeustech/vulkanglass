@@ -1058,6 +1058,75 @@ final class MarkdownTests: XCTestCase {
         XCTAssertEqual(headings.map(\.line), [1, 5, 10])
     }
 
+    func testHeadingsHandleCRLFIndentedFencesAndUnterminatedFences() {
+        let crlf = "# Title\r\n```\r\n# hidden\r\n```\r\n## After\r\n"
+        XCTAssertEqual(Markdown.headings(in: crlf).map(\.text), ["Title", "After"])
+        XCTAssertEqual(Markdown.headings(in: crlf).map(\.line), [1, 5])
+
+        let indented = "  ~~~swift\n## hidden\n  ~~~\n## Visible\n  ```\n## hidden too"
+        XCTAssertEqual(Markdown.headings(in: indented).map(\.text), ["Visible"])
+        XCTAssertEqual(MDBlock.parse(indented).compactMap { block -> String? in
+            if case .heading(_, let text) = block { return text }
+            return nil
+        }, ["Visible"])
+    }
+
+    func testOutlineOccurrencesResolveAgainstVisibleReadingHeadings() throws {
+        let content = """
+        # Title
+        ~~~
+        ## Notes
+        ~~~
+        <details>
+        <summary>More</summary>
+        ## Notes
+        </details>
+        ## Notes
+        ## Notes
+        """
+        let headings = Markdown.headings(in: content)
+        XCTAssertEqual(headings.map(\.text), ["Title", "Notes", "Notes"])
+        XCTAssertEqual(headings.map(\.line), [1, 9, 10])
+        let preview = MarkdownPreviewView(text: content, noteTitles: [], onWiki: { _ in })
+        let attributed = ReadingAttributedDocument.make(
+            blocks: preview.displayBlocks, noteTitles: [], baseURL: nil, dark: true
+        )
+        let first = ReadingHeadingTarget(id: UUID(), level: 2, text: headings[1].text, occurrence: 0)
+        let second = ReadingHeadingTarget(id: UUID(), level: 2, text: headings[2].text, occurrence: 1)
+        let firstLocation = try XCTUnwrap(UnifiedReadingTextView.Coordinator.location(of: first, in: attributed))
+        let secondLocation = try XCTUnwrap(UnifiedReadingTextView.Coordinator.location(of: second, in: attributed))
+        XCTAssertGreaterThan(firstLocation, 0)
+        XCTAssertGreaterThan(secondLocation, firstLocation)
+        XCTAssertEqual(secondLocation, (attributed.string as NSString).range(of: "Notes", options: .backwards).location)
+    }
+
+    func testHiddenLeadingTitleAdjustsOnlyItsOwnOccurrences() throws {
+        let title = ReadingHeadingTarget(id: UUID(), level: 1, text: "Title", occurrence: 0)
+        let repeated = ReadingHeadingTarget(id: UUID(), level: 1, text: "Title", occurrence: 1)
+        let content = "# Title\nbody\n# Title"
+        let hidden = MarkdownPreviewView(text: content, noteTitles: [], headingTarget: title, onWiki: { _ in })
+        XCTAssertEqual(hidden.displayedHeadingTarget?.occurrence, -1)
+        let preview = MarkdownPreviewView(text: content, noteTitles: [], headingTarget: repeated, onWiki: { _ in })
+        let target = try XCTUnwrap(preview.displayedHeadingTarget)
+        XCTAssertEqual(target.occurrence, 0)
+        let text = ReadingAttributedDocument.make(
+            blocks: preview.displayBlocks, noteTitles: [], baseURL: nil, dark: true
+        )
+        XCTAssertNotNil(UnifiedReadingTextView.Coordinator.location(of: target, in: text))
+    }
+
+    func testTabSeparatedHeadingAppearsInOutlineAndReader() throws {
+        let content = "#\tNotes"
+        let heading = try XCTUnwrap(Markdown.headings(in: content).first)
+        XCTAssertEqual(heading.text, "Notes")
+        let text = ReadingAttributedDocument.make(
+            blocks: MDBlock.parse(content), noteTitles: [], baseURL: nil, dark: true
+        )
+        XCTAssertEqual(UnifiedReadingTextView.Coordinator.location(
+            of: ReadingHeadingTarget(id: UUID(), level: 1, text: "Notes", occurrence: 0), in: text
+        ), 0)
+    }
+
     func testReadingHeadingLocationResolvesRepeatedHeadings() {
         let text = ReadingAttributedDocument.make(
             blocks: [.heading(2, "Notes"), .lines(["Body"]), .heading(2, "Notes"), .heading(3, "Notes")],
@@ -3371,6 +3440,122 @@ final class EditorLifecycleTests: XCTestCase {
         )
         XCTAssertEqual(attachment.bounds.width, 40, accuracy: 0.1)
         XCTAssertEqual(attachment.bounds.height, 30, accuracy: 0.1)
+    }
+
+    func testReadingRevealRetriesWhenHeadingAppearsAndFulfillsOnce() async throws {
+        let coordinator = UnifiedReadingTextView.Coordinator { _ in }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 180))
+        let textView = ReadingNSTextView(frame: NSRect(x: 0, y: 0, width: 340, height: 180))
+        scroll.documentView = textView
+        let target = ReadingHeadingTarget(id: UUID(), level: 2, text: "Later", occurrence: 0)
+        var fulfilled: [UUID] = []
+        coordinator.onHeadingTargetFulfilled = { fulfilled.append($0) }
+        func configuration(_ blocks: [MDBlock]) -> ReadingRenderConfiguration {
+            ReadingRenderConfiguration(
+                blocks: blocks, noteTitles: [], baseURL: nil, dark: true,
+                loadLocalImages: false, loadRemoteImages: false
+            )
+        }
+
+        coordinator.render(configuration([.lines(["Body"])]), in: textView)
+        coordinator.reveal(target, in: textView)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertTrue(fulfilled.isEmpty)
+
+        coordinator.render(configuration([.heading(2, "Later")]), in: textView)
+        coordinator.reveal(target, in: textView)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(fulfilled, [target.id])
+        coordinator.reveal(target, in: textView)
+        XCTAssertEqual(fulfilled, [target.id])
+
+        let hiddenTitle = ReadingHeadingTarget(id: UUID(), level: 1, text: "Title", occurrence: -1)
+        coordinator.reveal(hiddenTitle, in: textView)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(fulfilled, [target.id, hiddenTitle.id])
+    }
+
+    func testSourceRevealScrollsRealTextViewAndFulfillsOnce() async throws {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 180))
+        let textView = SourceTextView(frame: NSRect(x: 0, y: 0, width: 340, height: 1800))
+        textView.isVerticallyResizable = true
+        scroll.documentView = textView
+        textView.string = (1...60).map { "Line \($0)" }.joined(separator: "\n")
+        let coordinator = SourceEditor.Coordinator(onChange: { _ in })
+        coordinator.textView = textView
+        var fulfilled: [UUID] = []
+        coordinator.onHeadingScrollRequestFulfilled = { fulfilled.append($0) }
+        let request = HeadingScrollRequest(
+            tabID: "/tmp/source.md", heading: NoteHeading(level: 2, text: "Line 30", line: 30), occurrence: 0
+        )
+
+        coordinator.reveal(request)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(fulfilled, [request.id])
+        XCTAssertGreaterThan(textView.visibleRect.minY, 0)
+        coordinator.reveal(request)
+        XCTAssertEqual(fulfilled, [request.id])
+    }
+
+    func testReadingRevealStaysAtHeadingAfterImageLoads() async throws {
+        let decoded = try makeTestDecodedImage(width: 300, height: 200)
+        let coordinator = UnifiedReadingTextView.Coordinator(
+            onWiki: { _ in },
+            imageLoader: { _ in
+                try? await Task.sleep(for: .milliseconds(80))
+                return decoded
+            }
+        )
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 180))
+        let textView = ReadingNSTextView(frame: NSRect(x: 0, y: 0, width: 340, height: 2500))
+        textView.isVerticallyResizable = true
+        textView.textContainer?.widthTracksTextView = true
+        scroll.documentView = textView
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 180),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.contentView = scroll
+        let target = ReadingHeadingTarget(id: UUID(), level: 2, text: "Target", occurrence: 0)
+        let fulfilled = expectation(description: "heading revealed")
+        coordinator.onHeadingTargetFulfilled = { id in
+            XCTAssertEqual(id, target.id)
+            fulfilled.fulfill()
+        }
+        coordinator.render(ReadingRenderConfiguration(
+            blocks: [
+                .lines(["![Image](https://example.com/image.png)"]),
+                .heading(2, "Target"),
+                .lines((1...70).map { "Following line \($0)" }),
+            ],
+            noteTitles: [], baseURL: nil, dark: true,
+            loadLocalImages: false, loadRemoteImages: true
+        ), in: textView)
+        coordinator.reveal(target, in: textView)
+        await fulfillment(of: [fulfilled], timeout: 1)
+
+        let imageLocation = (textView.string as NSString).range(of: "\u{fffc}").location
+        var imageHeight: CGFloat = 0
+        for _ in 0..<50 {
+            imageHeight = (textView.attributedString().attribute(
+                .attachment, at: imageLocation, effectiveRange: nil
+            ) as? NSTextAttachment)?.bounds.height ?? 0
+            if imageHeight >= 200 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(imageHeight, 200, accuracy: 0.1)
+        try await Task.sleep(for: .milliseconds(20))
+        let location = try XCTUnwrap(UnifiedReadingTextView.Coordinator.location(
+            of: target, in: textView.attributedString()
+        ))
+        let layout = try XCTUnwrap(textView.layoutManager)
+        layout.ensureLayout(forCharacterRange: NSRange(location: 0, length: location + 1))
+        let glyph = layout.glyphIndexForCharacter(at: location)
+        let line = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        let headingY = line.minY + textView.textContainerOrigin.y
+        XCTAssertEqual(textView.visibleRect.minY, headingY - 8, accuracy: 20)
+        coordinator.stop()
+        withExtendedLifetime(window) {}
     }
 
     func testReadingDetailsHonorInitialStateAndToggleFromTheSummary() throws {

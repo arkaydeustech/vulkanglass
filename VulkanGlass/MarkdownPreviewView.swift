@@ -78,7 +78,7 @@ struct MarkdownPreviewView: View {
 
     /// The target within the displayed blocks. The hidden title resolves to no heading,
     /// which scrolls to the top where the title row stands in for it.
-    private var displayedHeadingTarget: ReadingHeadingTarget? {
+    var displayedHeadingTarget: ReadingHeadingTarget? {
         guard let headingTarget, headingTarget.key == hiddenTitleKey else { return headingTarget }
         return ReadingHeadingTarget(
             id: headingTarget.id,
@@ -271,6 +271,8 @@ struct UnifiedReadingTextView: NSViewRepresentable {
         weak var textView: ReadingNSTextView?
         private(set) var documentSetCount = 0
         private var revealedHeadingID: UUID?
+        private var pendingHeadingID: UUID?
+        private var revealedHeadingTarget: ReadingHeadingTarget?
         private var lastConfiguration: ReadingRenderConfiguration?
         private var detailsStates: [String: Bool] = [:]
         private var generation = 0
@@ -301,6 +303,7 @@ struct UnifiedReadingTextView: NSViewRepresentable {
             }
             lastConfiguration = configuration
             generation += 1
+            revealedHeadingTarget = nil
             let currentGeneration = generation
             imageTasks.forEach { $0.cancel() }
             imageTasks.removeAll(keepingCapacity: true)
@@ -325,12 +328,19 @@ struct UnifiedReadingTextView: NSViewRepresentable {
 
         /// Scrolls a heading to the top once per target, after the pending render lays out.
         func reveal(_ target: ReadingHeadingTarget?, in textView: ReadingNSTextView) {
-            guard let target, revealedHeadingID != target.id else { return }
-            revealedHeadingID = target.id
+            guard let target, revealedHeadingID != target.id,
+                  pendingHeadingID != target.id else { return }
+            pendingHeadingID = target.id
             DispatchQueue.main.async { [weak self, weak textView] in
-                guard let self, let textView, self.textView === textView else { return }
-                let location = Self.location(of: target, in: textView.attributedString()) ?? 0
+                guard let self, let textView, self.textView === textView,
+                      self.pendingHeadingID == target.id else { return }
+                self.pendingHeadingID = nil
+                guard let location = target.occurrence < 0 ? 0 : Self.location(
+                    of: target, in: textView.attributedString()
+                ) else { return }
                 textView.scrollLineToTop(containingCharacterAt: location)
+                self.revealedHeadingID = target.id
+                self.revealedHeadingTarget = target
                 self.onHeadingTargetFulfilled(target.id)
             }
         }
@@ -424,6 +434,16 @@ struct UnifiedReadingTextView: NSViewRepresentable {
                 textStorage.addAttribute(.attachment, value: attachment, range: range)
             }
             textStorage.endEditing()
+            if let target = revealedHeadingTarget {
+                DispatchQueue.main.async { [weak self, weak textView] in
+                    guard let self, let textView, self.generation == expectedGeneration,
+                          self.revealedHeadingTarget?.id == target.id,
+                          let location = target.occurrence < 0 ? 0 : Self.location(
+                            of: target, in: textView.attributedString()
+                          ) else { return }
+                    textView.scrollLineToTop(containingCharacterAt: location)
+                }
+            }
         }
 
         func textView(
@@ -493,7 +513,7 @@ extension NSTextView {
     /// Scrolls the enclosing scroll view so the line holding `location` sits at the top.
     func scrollLineToTop(containingCharacterAt location: Int, margin: CGFloat = 8) {
         let length = (string as NSString).length
-        guard length > 0, let layoutManager, let textContainer else { return }
+        guard length > 0, let layoutManager, textContainer != nil else { return }
         let character = min(max(0, location), length - 1)
         layoutManager.ensureLayout(forCharacterRange: NSRange(location: 0, length: character + 1))
         let glyph = layoutManager.glyphIndexForCharacter(at: character)
@@ -797,7 +817,7 @@ enum ReadingAttributedDocument {
                         .font: bodyFont,
                         .foregroundColor: textColor,
                     ]))
-                    result.append(make(
+                    let nested = NSMutableAttributedString(attributedString: make(
                         blocks: MDBlock.parse(body),
                         noteTitles: noteTitles,
                         baseURL: baseURL,
@@ -808,6 +828,8 @@ enum ReadingAttributedDocument {
                         expandedDetails: expandedDetails,
                         pathPrefix: "\(detailsID)."
                     ))
+                    nested.removeAttribute(.readingHeading, range: NSRange(location: 0, length: nested.length))
+                    result.append(nested)
                 }
             case .definitionList(let items):
                 for (itemIndex, item) in items.enumerated() {
@@ -1066,6 +1088,39 @@ private extension NSFont {
     }
 }
 
+/// Block syntax shared by outline extraction and the reading renderer.
+enum MarkdownBlockSyntax {
+    struct Fence {
+        let marker: Character
+        let length: Int
+        let info: String
+    }
+
+    static func fenceOpening(_ line: String) -> Fence? {
+        let content = line.drop(while: { $0 == " " || $0 == "\t" })
+        guard let marker = content.first, marker == "`" || marker == "~" else { return nil }
+        let length = content.prefix(while: { $0 == marker }).count
+        guard length >= 3 else { return nil }
+        return Fence(marker: marker, length: length,
+                     info: String(content.dropFirst(length)).trimmingCharacters(in: .whitespaces))
+    }
+
+    static func isFenceClosing(_ line: String, opening: Fence) -> Bool {
+        let content = line.drop(while: { $0 == " " || $0 == "\t" })
+        let length = content.prefix(while: { $0 == opening.marker }).count
+        return length >= opening.length && content.dropFirst(length).allSatisfy(\.isWhitespace)
+    }
+
+    static func heading(_ line: String) -> (level: Int, text: String)? {
+        let level = line.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(level) else { return nil }
+        let rest = line.dropFirst(level)
+        guard let separator = rest.first, separator == " " || separator == "\t" else { return nil }
+        let text = String(rest.drop(while: { $0 == " " || $0 == "\t" }))
+        return text.isEmpty ? nil : (level, text)
+    }
+}
+
 enum MDBlock: Equatable, Sendable {
     case code(language: String, code: String)
     case heading(Int, String)
@@ -1086,13 +1141,13 @@ enum MDBlock: Equatable, Sendable {
         var i = 0
         while i < raw.count {
             let line = raw[i]
-            if let openingFence = codeFenceOpening(line) {
+            if let openingFence = MarkdownBlockSyntax.fenceOpening(line) {
                 var buffer = [line]
                 var closed = false
                 i += 1
                 while i < raw.count {
                     buffer.append(raw[i])
-                    if isCodeFenceClosing(raw[i], minimumLength: openingFence.length) {
+                    if MarkdownBlockSyntax.isFenceClosing(raw[i], opening: openingFence) {
                         closed = true
                         i += 1
                         break
@@ -1228,8 +1283,8 @@ enum MDBlock: Equatable, Sendable {
                 result.append(.table(rows, alignments, hasHeader: true))
                 continue
             }
-            if let heading = heading(line) {
-                result.append(.heading(heading.0, heading.1))
+            if let heading = MarkdownBlockSyntax.heading(line) {
+                result.append(.heading(heading.level, heading.text))
                 i += 1
                 continue
             }
@@ -1241,8 +1296,8 @@ enum MDBlock: Equatable, Sendable {
             while i < raw.count {
                 let current = raw[i]
                 if current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
-                if current.hasPrefix("```") || current.hasPrefix("> ") || GFM.isHorizontalRule(current) { break }
-                if let _ = heading(current) { break }
+                if MarkdownBlockSyntax.fenceOpening(current) != nil || current.hasPrefix("> ") || GFM.isHorizontalRule(current) { break }
+                if MarkdownBlockSyntax.heading(current) != nil { break }
                 if i + 1 < raw.count, GFM.isTable(header: current, separator: raw[i + 1]) { break }
                 if !lines.isEmpty, isSemanticHTMLBlockStart(current) { break }
                 lines.append(current)
@@ -1327,18 +1382,6 @@ enum MDBlock: Equatable, Sendable {
         return false
     }
 
-    private static func codeFenceOpening(_ line: String) -> (length: Int, info: String)? {
-        let length = line.prefix { $0 == "`" }.count
-        guard length >= 3 else { return nil }
-        return (length, String(line.dropFirst(length)).trimmingCharacters(in: .whitespaces))
-    }
-
-    private static func isCodeFenceClosing(_ line: String, minimumLength: Int) -> Bool {
-        let length = line.prefix { $0 == "`" }.count
-        guard length >= minimumLength else { return false }
-        return line.dropFirst(length).allSatisfy(\.isWhitespace)
-    }
-
     private static func semanticContainerTag(_ line: String) -> String? {
         for tag in ["blockquote", "figure", "p", "div", "ul", "ol", "pre"]
         where isHTMLElementStartLine(line, tag: tag) {
@@ -1358,16 +1401,6 @@ enum MDBlock: Equatable, Sendable {
             of: #"^<hr(?:\s[^>]*)?/?>$"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
-    }
-
-    private static func heading(_ block: String) -> (Int, String)? {
-        if block.hasPrefix("###### ") { return (6, String(block.dropFirst(7))) }
-        if block.hasPrefix("##### ") { return (5, String(block.dropFirst(6))) }
-        if block.hasPrefix("#### ") { return (4, String(block.dropFirst(5))) }
-        if block.hasPrefix("### ") { return (3, String(block.dropFirst(4))) }
-        if block.hasPrefix("## ") { return (2, String(block.dropFirst(3))) }
-        if block.hasPrefix("# ") { return (1, String(block.dropFirst(2))) }
-        return nil
     }
 }
 

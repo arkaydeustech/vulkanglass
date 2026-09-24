@@ -5,7 +5,10 @@ enum Markdown {
         pattern: #"\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]"#
     )
     private static let tagRegex = try! NSRegularExpression(pattern: #"(^|\s)#([A-Za-z][\w/-]*)"#)
-    private static let headingRegex = try! NSRegularExpression(pattern: #"^(#{1,6})\s+(.+)$"#)
+    private static let detailsTagRegex = try! NSRegularExpression(
+        pattern: #"<(/?)details(?:\s[^>]*)?>"#,
+        options: .caseInsensitive
+    )
 
     /// Returns the note title for a file path.
     static func title(from path: String) -> String {
@@ -30,28 +33,35 @@ enum Markdown {
         }.uniqued()
     }
 
-    /// Extracts ATX headings, ignoring code fences.
+    /// Extracts top-level ATX headings, ignoring code fences and details bodies.
     static func headings(in content: String) -> [NoteHeading] {
-        var openFence: Substring?
+        var openFence: MarkdownBlockSyntax.Fence?
+        var detailsDepth = 0
         return content.components(separatedBy: "\n").enumerated().compactMap { index, line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let fence = trimmed.prefix { $0 == "`" || $0 == "~" }
+            let line = line.hasSuffix("\r") ? String(line.dropLast()) : line
             if let open = openFence {
-                if fence.count == trimmed.count, fence.count >= open.count,
-                   fence.allSatisfy({ $0 == open.first }) {
+                if MarkdownBlockSyntax.isFenceClosing(line, opening: open) {
                     openFence = nil
                 }
                 return nil
             }
-            if fence.count >= 3, fence.allSatisfy({ $0 == fence.first }) {
+            if let fence = MarkdownBlockSyntax.fenceOpening(line) {
                 openFence = fence
                 return nil
             }
-            let m = headingRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line))
-            guard let m, let hashes = rangeString(m, 1, in: line), let text = rangeString(m, 2, in: line) else {
-                return nil
+            for tag in detailsTagRegex.matches(in: line, range: NSRange(line.startIndex..., in: line)) {
+                if detailsDepth == 0 {
+                    let prefix = (line as NSString).substring(to: tag.range.location)
+                    if !prefix.trimmingCharacters(in: .whitespaces).isEmpty { continue }
+                }
+                if tag.range(at: 1).length > 0 {
+                    detailsDepth = max(0, detailsDepth - 1)
+                } else {
+                    detailsDepth += 1
+                }
             }
-            return NoteHeading(level: hashes.count, text: text, line: index + 1)
+            guard detailsDepth == 0, let heading = MarkdownBlockSyntax.heading(line) else { return nil }
+            return NoteHeading(level: heading.level, text: heading.text, line: index + 1)
         }
     }
 
