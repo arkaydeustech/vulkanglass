@@ -5,6 +5,17 @@ pass when their owning test file is rerun in isolation. Entries remain here when
 resolved so the failure history and verification are preserved. Do not skip or
 delete a failing test to hide a flake.
 
+## TabGroupInteractionTests.testNativeTabDragReachesPaneAndStripWithoutMovingTheWindow (VulkanGlassTests/TabGroupTests.swift)
+
+- **Status:** open
+- **Date observed:** 2026-09-24
+- **Original command:** `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' test`
+- **Worker configuration:** Xcode default `xcodebuild test`
+- **Failure:** `XCTAssertEqual failed` at `TabGroupTests.swift:998-999`: the dragged tab stayed in its source group (`["Three"]` instead of `["One", "Three"]`/`["Three", "One"]`) for the `strip` and, in one run, the `pane` drop target.
+- **Suite counts:** 440 total, 435 passed, 5 failed (4 of them this test, 1 an unrelated assertion that was fixed); an earlier aggregate run also failed only this test. Two further aggregate runs passed 440/440.
+- **Isolated rerun:** `-only-testing:VulkanGlassTests/TabGroupInteractionTests/testNativeTabDragReachesPaneAndStripWithoutMovingTheWindow` → passed 3/3 on the reading code block branch and 3/3 on unmodified `449e1eb`. Later the same day, alternating isolated runs failed 2/3 on unmodified `449e1eb` and 1/3 on the branch, so it also fails in isolation without any branch changes.
+- **Hypothesis:** No evidence-backed root cause yet. The test drives native drag sessions against a real window, so it may depend on window-server timing, focus, or pointer activity on the host. Failing runs take about 4.8s against about 1.1s for passing ones, which suggests the drag session sometimes never delivers its drop. The failure reproduces on unmodified `449e1eb`, so it predates the Markdown rendering changes during which it was observed.
+
 ## MarkdownResourceTests.testRedirectDelegateRejectsPrivateDestination (VulkanGlassTests/ParserAndMarkdownTests.swift)
 
 - **Status:** open

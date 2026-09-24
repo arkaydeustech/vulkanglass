@@ -43,6 +43,22 @@ enum CodeHighlight {
         }
     }
 
+    /// Fill behind a fenced code block in both the editor and reading view.
+    static func blockFill(dark: Bool) -> NSColor {
+        dark
+            ? NSColor(red: 0.16, green: 0.16, blue: 0.17, alpha: 1)
+            : NSColor(red: 0.94, green: 0.94, blue: 0.95, alpha: 1)
+    }
+
+    /// Colour of the language label drawn in a code block's corner.
+    static func labelColor(dark: Bool) -> NSColor {
+        dark
+            ? NSColor(red: 0.52, green: 0.54, blue: 0.56, alpha: 1)
+            : NSColor(red: 0.48, green: 0.50, blue: 0.52, alpha: 1)
+    }
+
+    static let labelFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+
     static func color(for kind: Kind, dark: Bool) -> NSColor {
         switch kind {
         case .keyword:

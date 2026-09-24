@@ -158,7 +158,8 @@ struct WorkspaceView: View {
 
     private func rightColumn(width: CGFloat) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
+            HStack(spacing: 2) {
+                RightSidebarPanelPicker()
                 Spacer(minLength: 0)
                 TitleBarIcon(
                     symbol: "sidebar.right",
@@ -168,6 +169,7 @@ struct WorkspaceView: View {
                     model.rightOpen = false
                 }
             }
+            .padding(.leading, 6)
             .padding(.trailing, VGTheme.titleBarTrailingInset)
             .frame(height: VGTheme.titleBarHeight)
             .background(VGTheme.backgroundSecondary(dark: model.dark))

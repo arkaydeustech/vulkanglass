@@ -505,6 +505,50 @@ final class SourceTextFormattingTests: XCTestCase {
 }
 
 final class MarkdownBlockTests: XCTestCase {
+    func testIndentedBackticksInsideFenceRemainCodeContent() {
+        let source = "```markdown\n1. Step\n  ```bash\n    ```bash\n    cmd\n    ```\n\t```\n```\n\nAfter"
+        XCTAssertEqual(
+            MDBlock.parse(source),
+            [
+                .code(language: "markdown", code: "1. Step\n  ```bash\n    ```bash\n    cmd\n    ```\n\t```"),
+                .lines(["After"]),
+            ]
+        )
+        XCTAssertEqual(MDBlock.parse("    ```swift\ncode\n    ```"), [
+            .lines(["    ```swift", "code", "    ```"])
+        ])
+        XCTAssertEqual(MDBlock.parse("\t```swift\ncode\n\t```"), [
+            .lines(["\t```swift", "code", "\t```"])
+        ])
+        XCTAssertEqual(MDBlock.parse("   ```swift\nlet x = 1\n       ```\n      ```\nAfter"), [
+            .code(language: "swift", code: "let x = 1\n    ```"),
+            .lines(["After"]),
+        ])
+    }
+
+    func testFenceLanguageUsesFirstInfoStringWord() {
+        XCTAssertEqual(
+            MDBlock.parse("```js title=\"hello\" hl_lines=1\nconst x = 1\n```"),
+            [.code(language: "js", code: "const x = 1")]
+        )
+    }
+
+    func testIndentedFencesAreCodeBlocksWithTheirIndentRemoved() {
+        XCTAssertEqual(
+            MDBlock.parse("1. **Clone the repo**\n\n   ```bash\n   git clone repo\n     cd repo\n   ```\n\nAfter"),
+            [
+                .lines(["1. **Clone the repo**"]),
+                .code(language: "bash", code: "git clone repo\n  cd repo"),
+                .lines(["After"]),
+            ]
+        )
+        XCTAssertEqual(
+            MDBlock.parse("Intro\n  ```python\nprint(1)\n  ```"),
+            [.lines(["Intro"]), .code(language: "python", code: "print(1)")],
+            "An indented fence interrupts a paragraph and tolerates less-indented code"
+        )
+    }
+
     func testClosedAndUnclosedFencesPreserveExactlyTheirContent() {
         XCTAssertEqual(
             MDBlock.parse("```swift\nlet a = 1\nlet b = 2\n```"),
@@ -1197,6 +1241,92 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertEqual((text as NSString).substring(with: tokens[1].fullRange), "# Visible")
         XCTAssertFalse(tokens[0].containsCaret((text as NSString).length - 1))
         XCTAssertTrue(tokens[1].containsCaret((text as NSString).length - 1))
+    }
+
+    func testListItemsHangWrappedLinesUnderTheirText() throws {
+        let text = "- bullet item\n  1. nested numbered\n- [ ] task\nPlain"
+        let storage = NSTextStorage(string: text)
+        _ = LivePreview.apply(
+            to: storage,
+            caret: 0,
+            selection: NSRange(location: 0, length: 0),
+            dark: false
+        )
+        let ns = text as NSString
+        func check(_ line: String, prefix: String) throws {
+            let location = ns.range(of: line).location
+            let style = try XCTUnwrap(
+                storage.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle
+            )
+            let marker = storage.attributedSubstring(
+                from: NSRange(location: location, length: (prefix as NSString).length)
+            )
+            XCTAssertEqual(style.headIndent, ceil(marker.size().width), line)
+            XCTAssertGreaterThan(style.headIndent, 0, line)
+            XCTAssertEqual(style.lineSpacing, VGTheme.documentLineSpacing, line)
+        }
+        try check("- bullet item", prefix: "- ")
+        try check("  1. nested numbered", prefix: "  1. ")
+        try check("- [ ] task", prefix: "- [ ] ")
+        let plain = storage.attribute(
+            .paragraphStyle,
+            at: ns.range(of: "Plain").location,
+            effectiveRange: nil
+        ) as? NSParagraphStyle
+        XCTAssertEqual(plain?.headIndent, 0)
+    }
+
+    func testIndentedFenceUnderAListItemIsACodeBlock() {
+        let text = "1. **Clone the repo**\n\n   ```bash\n   git clone <repo-url> pgstack\n   ```\n\nAfter"
+        let tokens = LivePreview.tokens(in: text)
+        let blocks = tokens.compactMap { token -> (String, NSRange)? in
+            guard case .codeBlock(let language, let content) = token.kind else { return nil }
+            return (language, content)
+        }
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.0, "bash")
+        XCTAssertEqual(
+            blocks.first.map { (text as NSString).substring(with: $0.1) },
+            "   git clone <repo-url> pgstack\n"
+        )
+
+        let storage = NSTextStorage(string: text)
+        let outside = (text as NSString).length
+        let decorations = LivePreview.apply(
+            to: storage,
+            caret: outside,
+            selection: NSRange(location: outside, length: 0),
+            dark: false
+        )
+        XCTAssertEqual(decorations.codeBlocks.count, 1)
+        XCTAssertTrue(decorations.codeBlocks[0].showBadge)
+        let fence = (text as NSString).range(of: "   ```bash")
+        XCTAssertTrue(isHidden(storage, at: fence.location + 3), "The indented fence is hidden like any other")
+    }
+
+    func testIndentedFenceLikeContentDoesNotSplitLiveCodeBlock() {
+        let text = "```markdown\n1. Step\n  ```bash\n    ```bash\n    cmd\n    ```\n\t```\n```\n\nAfter"
+        let blocks = LivePreview.tokens(in: text).compactMap { token -> (String, String, Int)? in
+            guard case .codeBlock(let language, let content) = token.kind else { return nil }
+            return (language, (text as NSString).substring(with: content), token.delimiterRanges.count)
+        }
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.0, "markdown")
+        XCTAssertEqual(blocks.first?.1, "1. Step\n  ```bash\n    ```bash\n    cmd\n    ```\n\t```\n")
+        XCTAssertEqual(blocks.first?.2, 2)
+        XCTAssertTrue(LivePreview.tokens(in: "    ```swift\ncode\n    ```").allSatisfy {
+            if case .codeBlock = $0.kind { return false }
+            return true
+        })
+        XCTAssertTrue(LivePreview.tokens(in: "\t```swift\ncode\n\t```").allSatisfy {
+            if case .codeBlock = $0.kind { return false }
+            return true
+        })
+        let longer = LivePreview.tokens(in: "````swift\n```\nvalue\n````")
+        XCTAssertEqual(longer.filter {
+            if case .codeBlock = $0.kind { return true }
+            return false
+        }.count, 1)
     }
 
     func testCodeBlockHighlightsAndHidesFencesUntilEdited() {
@@ -2531,6 +2661,22 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertFalse(textView.liveDecorations.bars.isEmpty)
     }
 
+    func testLiveCodeBadgeResolvesNameAndClipsInsideBlock() throws {
+        let rect = NSRect(x: 20, y: 30, width: 120, height: 80)
+        let badge = try XCTUnwrap(SourceTextView.codeBadge(language: "js", in: rect))
+        XCTAssertEqual(badge.label, "JavaScript")
+        XCTAssertEqual(badge.origin.y, rect.minY + 6)
+        XCTAssertEqual(badge.clipRect, NSRect(x: 28, y: 30, width: 104, height: 80))
+        let width = (badge.label as NSString).size(withAttributes: [.font: CodeHighlight.labelFont]).width
+        XCTAssertEqual(badge.origin.x + width, badge.clipRect.maxX - 4, accuracy: 0.01)
+        XCTAssertNil(SourceTextView.codeBadge(language: "", in: rect))
+
+        let narrow = try XCTUnwrap(SourceTextView.codeBadge(language: "a-very-long-language-name", in: NSRect(x: 0, y: 0, width: 30, height: 30)))
+        XCTAssertLessThan(narrow.origin.x, narrow.clipRect.minX)
+        XCTAssertEqual(narrow.clipRect.maxX, 22)
+        XCTAssertNil(SourceTextView.codeBadge(language: "js", in: NSRect(x: 0, y: 0, width: 16, height: 30)))
+    }
+
     func testHoverColumnControlIsAccessibleAndMutatesThroughTheEditorDelegate() throws {
         let table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
         var changes: [String] = []
@@ -3070,6 +3216,138 @@ final class EditorLifecycleTests: XCTestCase {
         }
     }
 
+    func testReadingListItemsHangWrappedLinesUnderTheirText() throws {
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [.lines([
+                "- **Caddy** terminates HTTPS",
+                "  - database.example (admin UI)",
+                "12. numbered",
+                "- [x] done",
+                "Plain",
+            ])],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        let text = attributed.string as NSString
+        func style(at needle: String) throws -> NSParagraphStyle {
+            let location = text.range(of: needle).location
+            XCTAssertNotEqual(location, NSNotFound, "Missing \(needle)")
+            return try XCTUnwrap(
+                attributed.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle
+            )
+        }
+        let font = NSFont.systemFont(ofSize: 16)
+        func width(_ marker: String) -> CGFloat {
+            ceil((marker as NSString).size(withAttributes: [.font: font]).width)
+        }
+
+        let bullet = try style(at: "• Caddy")
+        XCTAssertEqual(bullet.firstLineHeadIndent, 0)
+        XCTAssertEqual(bullet.headIndent, width("• "))
+        XCTAssertEqual(bullet.lineSpacing, VGTheme.documentLineSpacing)
+
+        let nested = try style(at: "• database")
+        XCTAssertEqual(nested.firstLineHeadIndent, 2 * ReadingAttributedDocument.listIndentPerColumn)
+        XCTAssertEqual(nested.headIndent, nested.firstLineHeadIndent + width("• "))
+
+        XCTAssertEqual(try style(at: "12. numbered").headIndent, width("12. "))
+        XCTAssertEqual(try style(at: "☑ done").headIndent, width("☑ "))
+        XCTAssertEqual(try style(at: "Plain").headIndent, 0)
+    }
+
+    func testReadingCodeBlockIsBoxedHighlightedAndLabelledWithItsLanguage() throws {
+        let code = "def this_func():\n  print(\"test\")"
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [.code(language: "python", code: code), .lines(["After"])],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        let text = attributed.string as NSString
+
+        // The language label is drawn by the box, so the text holds only the code.
+        XCTAssertFalse(attributed.string.contains("Python"))
+        XCTAssertTrue(attributed.string.hasPrefix(code + "\n"))
+
+        func attributes(at needle: String) -> [NSAttributedString.Key: Any] {
+            attributed.attributes(at: text.range(of: needle).location, effectiveRange: nil)
+        }
+
+        let firstBlock = try XCTUnwrap(
+            (attributes(at: "def")[.paragraphStyle] as? NSParagraphStyle)?.textBlocks.first
+                as? ReadingCodeBlock
+        )
+        let lastBlock = try XCTUnwrap(
+            (attributes(at: "print")[.paragraphStyle] as? NSParagraphStyle)?.textBlocks.first
+                as? ReadingCodeBlock
+        )
+        XCTAssertTrue(firstBlock === lastBlock, "Every line of the block shares one box")
+        XCTAssertEqual(firstBlock.label, "Python")
+        XCTAssertGreaterThan(
+            firstBlock.width(for: .padding, edge: .minY),
+            firstBlock.width(for: .padding, edge: .maxY),
+            "The top padding leaves room for the language label"
+        )
+
+        XCTAssertEqual(
+            attributes(at: "def")[.foregroundColor] as? NSColor,
+            CodeHighlight.color(for: .keyword, dark: false)
+        )
+        XCTAssertEqual(
+            attributes(at: "print")[.foregroundColor] as? NSColor,
+            CodeHighlight.color(for: .function, dark: false)
+        )
+        XCTAssertEqual(
+            attributes(at: "\"test\"")[.foregroundColor] as? NSColor,
+            CodeHighlight.color(for: .string, dark: false)
+        )
+        XCTAssertTrue((attributes(at: "def")[.font] as? NSFont)?.isFixedPitch ?? false)
+
+        let after = attributes(at: "After")[.paragraphStyle] as? NSParagraphStyle
+        XCTAssertEqual(after?.textBlocks.isEmpty ?? true, true, "Prose after the block is outside the box")
+    }
+
+    func testReadingCodeBlockUsesLanguageWordForBadgeAndHighlighting() throws {
+        let source = "```js title=\"hello\"\nconst x = 1\n```"
+        let blocks = MDBlock.parse(source)
+        let attributed = ReadingAttributedDocument.make(
+            blocks: blocks,
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        let style = try XCTUnwrap(
+            attributed.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        XCTAssertEqual((style.textBlocks.first as? ReadingCodeBlock)?.label, "JavaScript")
+        XCTAssertEqual(
+            attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
+            CodeHighlight.color(for: .keyword, dark: false)
+        )
+        let live = try XCTUnwrap(LivePreview.tokens(in: source).first)
+        guard case .codeBlock(let language, _) = live.kind else {
+            return XCTFail("expected live code block")
+        }
+        XCTAssertEqual(language, "js")
+        XCTAssertEqual(CodeHighlight.displayName(for: language), "JavaScript")
+    }
+
+    func testReadingCodeBlockWithoutLanguageHasNoLabel() throws {
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [.code(language: "", code: "plain")],
+            noteTitles: [],
+            baseURL: nil,
+            dark: true
+        )
+        let block = try XCTUnwrap(
+            (attributed.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?
+                .textBlocks.first as? ReadingCodeBlock
+        )
+        XCTAssertEqual(block.label, "")
+        XCTAssertEqual(block.width(for: .padding, edge: .minY), block.width(for: .padding, edge: .maxY))
+    }
+
     func testReadingLineSpacingPreservesStructuredParagraphStyles() throws {
         let attributed = ReadingAttributedDocument.make(
             blocks: [
@@ -3114,7 +3392,7 @@ final class EditorLifecycleTests: XCTestCase {
 
         let code = try style(at: "let value = 1")
         XCTAssertEqual(code.lineSpacing, VGTheme.documentLineSpacing)
-        XCTAssertEqual(code.paragraphSpacing, 4)
+        XCTAssertEqual((code.textBlocks.first as? ReadingCodeBlock)?.label, "Swift")
 
         let definition = try style(at: "Definition body")
         XCTAssertEqual(definition.lineSpacing, VGTheme.documentLineSpacing)
@@ -3462,12 +3740,19 @@ final class EditorLifecycleTests: XCTestCase {
             in: NSRange(location: 0, length: attributed.length)
         ) { value, _, _ in
             guard let paragraph = value as? NSParagraphStyle else { return }
-            tableBlocks.append(contentsOf: paragraph.textBlocks.compactMap { $0 as? NSTextTableBlock })
+            tableBlocks.append(contentsOf: paragraph.textBlocks.compactMap {
+                $0 is ReadingCodeBlock ? nil : $0 as? NSTextTableBlock
+            })
             if !paragraph.textBlocks.isEmpty {
                 XCTAssertGreaterThanOrEqual(paragraph.headIndent, 20)
             }
         }
         XCTAssertEqual(tableBlocks.count, 4)
+        XCTAssertNotNil(
+            (attributed.attribute(.paragraphStyle, at: codeRange.location, effectiveRange: nil)
+                as? NSParagraphStyle)?.textBlocks.first as? ReadingCodeBlock,
+            "Nested code keeps its box"
+        )
     }
 
     func testReadingRichHTMLTablePreservesRaggedRowsAndSpans() throws {
@@ -3577,6 +3862,30 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertTrue(NSApp.sendAction(selectAllItem.action!, to: selectAllItem.target, from: selectAllItem))
         XCTAssertEqual(reading.selectedRange(), NSRange(location: 0, length: reading.string.utf16.count))
         XCTAssertNotEqual(search.currentEditor()?.selectedRange, reading.selectedRange())
+    }
+
+    func testReadingCodeCopyPastesAsCodeTextWithoutRichTable() {
+        let code = "let a = 1\nprint(a)"
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [.code(language: "swift", code: code)],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        let reading = ReadingNSTextView()
+        reading.textStorage?.setAttributedString(attributed)
+        reading.setSelectedRange(NSRange(location: 0, length: (code as NSString).length))
+        let pasteboard = NSPasteboard(name: .init("VulkanGlass-reading-code-copy-test"))
+        defer { pasteboard.clearContents() }
+        XCTAssertTrue(reading.writeSelection(to: pasteboard, types: [.string, .rtf, .html]))
+        XCTAssertNil(pasteboard.data(forType: .rtf))
+        XCTAssertNil(pasteboard.data(forType: .html))
+        XCTAssertEqual(pasteboard.string(forType: .string), code)
+
+        let editor = SourceTextView()
+        XCTAssertTrue(editor.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(editor.string, code)
+        XCTAssertFalse(editor.string.contains("<table"))
     }
 
     func testReadingWikiLinkRemainsActivatableAfterOpeningContextMenu() throws {

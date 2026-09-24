@@ -419,16 +419,12 @@ struct TabGroupHeader: View {
             }
             TabGroupTabStrip(groupID: groupID)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            TitleBarIcon(
-                symbol: editorMode == .source ? "book" : "square.and.pencil",
-                help: "Toggle reading view",
-                active: editorMode == .preview
-            ) {
-                Task {
-                    await model.focusGroup(groupID)
-                    guard model.tabGroupLayout.focusedGroupID == groupID else { return }
-                    model.editorMode = model.editorMode == .source ? .preview : .source
-                    model.centerView = .editor
+            HStack(spacing: 2) {
+                TitleBarIcon(symbol: "book", help: "Reading view", active: editorMode == .preview) {
+                    show(.preview)
+                }
+                TitleBarIcon(symbol: "square.and.pencil", help: "Edit", active: editorMode == .source) {
+                    show(.source)
                 }
             }
             .padding(.trailing, trailingPadding)
@@ -451,6 +447,15 @@ struct TabGroupHeader: View {
         }
         .overlay(alignment: .bottom) {
             VGTheme.divider(dark: model.dark).frame(height: 1)
+        }
+    }
+
+    private func show(_ mode: EditorMode) {
+        Task {
+            await model.focusGroup(groupID)
+            guard model.tabGroupLayout.focusedGroupID == groupID else { return }
+            model.editorMode = mode
+            model.centerView = .editor
         }
     }
 
