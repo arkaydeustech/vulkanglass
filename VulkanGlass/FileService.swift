@@ -100,6 +100,22 @@ enum FileService {
         return canonical
     }
 
+    /// Counts every file (not folder) beneath `folder`, including hidden and non-Markdown files,
+    /// so a confirmation can say how much moving the folder to the Trash takes with it.
+    static func fileCount(inFolder folder: URL) -> Int {
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        ) else { return 0 }
+        var count = 0
+        for case let url as URL in enumerator
+            where (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory != true
+        {
+            count += 1
+        }
+        return count
+    }
+
     static func moveToTrash(_ url: URL, root: URL) throws {
         let canonical = try validateExisting(url, inside: root)
         try FileManager.default.trashItem(at: canonical, resultingItemURL: nil)

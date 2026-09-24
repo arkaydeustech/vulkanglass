@@ -975,7 +975,10 @@ final class AppModelTests: XCTestCase {
         ))
         let target = hostingView.hitTest(point) ?? hostingView
         let menu = try XCTUnwrap(target.menu(for: event))
-        XCTAssertEqual(menu.items.map(\.title), ["New File", "Rename"])
+        XCTAssertEqual(
+            menu.items.filter { !$0.isSeparatorItem }.map(\.title),
+            ["New File", "Rename", "Move to Trash…"]
+        )
 
         let renameIndex = try XCTUnwrap(menu.items.firstIndex { $0.title == "Rename" })
         menu.performActionForItem(at: renameIndex)
@@ -1021,6 +1024,177 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(FileService.directoryExists(at: destination.path))
         XCTAssertFalse(FileService.directoryExists(at: folder.path))
         XCTAssertEqual(model.fileTree.map(\.name), ["Published"])
+    }
+
+    func testFolderTrashRequestDescribesContentsAndTrashesFolderOnConfirm() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Archive", isDirectory: true)
+        let nested = folder.appendingPathComponent("Nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let child = folder.appendingPathComponent("Plan.md")
+        let deep = nested.appendingPathComponent("Deep.md")
+        let attachment = nested.appendingPathComponent("diagram.png")
+        let outside = root.appendingPathComponent("Keep.md")
+        try "plan".write(to: child, atomically: true, encoding: .utf8)
+        try "deep".write(to: deep, atomically: true, encoding: .utf8)
+        try Data([0x89]).write(to: attachment)
+        try "keep".write(to: outside, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        await model.refreshVault()
+        // Tabs keep the path they were opened with, which need not be the tree's canonical path.
+        model.tabs = [
+            NoteTab(path: deep.path, title: "Deep", content: "edited", originalContent: "deep", isStandalone: false),
+            NoteTab(
+                path: FileService.canonicalURL(child).path,
+                title: "Plan",
+                content: "plan",
+                originalContent: "plan",
+                isStandalone: false
+            ),
+            NoteTab(path: outside.path, title: "Keep", content: "keep", originalContent: "keep", isStandalone: false)
+        ]
+        model.activeTabID = deep.path
+        let node = try XCTUnwrap(model.fileTree.first { $0.name == "Archive" })
+        let request = FolderTrashRequest()
+
+        request.begin(node)
+        XCTAssertTrue(request.isPresented)
+        XCTAssertEqual(request.path, node.path)
+        XCTAssertEqual(request.fileCount, 3)
+        XCTAssertEqual(request.title, "Move “Archive” to Trash?")
+        XCTAssertEqual(
+            request.message,
+            "This folder and all 3 files inside it will be moved to the Trash. You can recover it from the macOS Trash."
+        )
+
+        let confirmation = try XCTUnwrap(request.confirm(into: model))
+        XCTAssertFalse(request.isPresented)
+        XCTAssertNil(request.path)
+        await confirmation.value
+
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+        XCTAssertEqual(model.tabs.map(\.path), [outside.path])
+        XCTAssertEqual(model.fileTree.map(\.name), ["Keep.md"])
+        XCTAssertFalse(model.notes.contains { $0.title == "Deep" || $0.title == "Plan" })
+    }
+
+    func testFolderTrashRequestCancelKeepsFolder() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Keep", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try "note".write(to: folder.appendingPathComponent("Note.md"), atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        await model.refreshVault()
+        let request = FolderTrashRequest()
+
+        request.begin(try XCTUnwrap(model.fileTree.first))
+        XCTAssertEqual(
+            request.message,
+            "This folder and the 1 file inside it will be moved to the Trash. You can recover it from the macOS Trash."
+        )
+        request.cancel()
+
+        XCTAssertFalse(request.isPresented)
+        XCTAssertNil(request.path)
+        XCTAssertNil(request.confirm(into: model))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("Note.md").path))
+    }
+
+    func testFolderTrashRequestDescribesEmptyFolder() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Empty", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let request = FolderTrashRequest()
+
+        request.begin(FileNode(name: "Empty", path: folder.path, isDirectory: true, children: []))
+
+        XCTAssertEqual(request.fileCount, 0)
+        XCTAssertEqual(
+            request.message,
+            "This empty folder will be moved to the Trash. You can recover it from the macOS Trash."
+        )
+    }
+
+    func testFolderRowContextMenuAsksToConfirmMovingFolderToTrash() throws {
+        let root = try temporaryDirectory()
+        let folderURL = root.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: false)
+        let folder = FileNode(name: "Drafts", path: folderURL.path, isDirectory: true, children: [])
+        let request = FolderTrashRequest()
+        let hostingView = NSHostingView(
+            rootView: TreeRow(node: folder, depth: 0, onRenameFolder: { _ in }, onTrashFolder: request.begin)
+                .environment(modelWithVault(at: root))
+                .frame(width: 240, height: 30)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 240, height: 30)
+        let window = NSWindow(contentRect: hostingView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let point = NSPoint(x: 80, y: 15)
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .rightMouseDown,
+            location: point,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let target = hostingView.hitTest(point) ?? hostingView
+        let menu = try XCTUnwrap(target.menu(for: event))
+        let trashIndex = try XCTUnwrap(menu.items.firstIndex { $0.title == "Move to Trash…" })
+        menu.performActionForItem(at: trashIndex)
+
+        XCTAssertTrue(request.isPresented)
+        XCTAssertEqual(request.path, folder.path)
+        XCTAssertEqual(request.name, "Drafts")
+        XCTAssertTrue(FileService.directoryExists(at: folderURL.path))
+    }
+
+    func testFileExplorerConfirmsBeforeMovingFolderToTrash() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try "note".write(to: folder.appendingPathComponent("Note.md"), atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        await model.refreshVault()
+        let request = FolderTrashRequest()
+        let hostingView = NSHostingView(
+            rootView: FileExplorerView(renameDraft: FolderRenameDraft(), trashRequest: request)
+                .environment(model)
+                .frame(width: 300, height: 400)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        let window = NSWindow(contentRect: hostingView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+
+        request.begin(try XCTUnwrap(model.fileTree.first))
+        for _ in 0..<50 where window.attachedSheet == nil {
+            await drainMainQueue()
+            hostingView.layoutSubtreeIfNeeded()
+        }
+
+        // Nothing is trashed until the prompt is confirmed.
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        XCTAssertTrue(FileService.directoryExists(at: folder.path))
+        let content = try XCTUnwrap(sheet.contentView)
+        try XCTUnwrap(button(titled: "Move to Trash", in: content)).performClick(nil)
+        for _ in 0..<50 where !model.fileTree.isEmpty {
+            await drainMainQueue()
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertTrue(model.fileTree.isEmpty)
+        XCTAssertNil(model.errorMessage)
     }
 
     func testRenameFolderRetargetsOpenTabsAndSavesPendingEdits() async throws {

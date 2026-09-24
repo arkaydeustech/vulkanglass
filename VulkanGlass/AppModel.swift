@@ -1203,13 +1203,20 @@ final class AppModel {
         }
     }
 
+    /// Moves a vault note, or a folder and everything in it, to the macOS Trash and closes the
+    /// tabs of every note that went with it.
     func deletePath(_ path: String) async {
         guard let vault else { return }
         do {
             let url = URL(fileURLWithPath: path)
+            // Resolve paths before trashing: once the items are gone their canonical paths
+            // can't be read, and a tab may have been opened through a different spelling.
+            let canonical = FileService.canonicalURL(url).path
+            let removedIDs = Set(tabs.filter { tab in
+                let tabPath = FileService.canonicalURL(URL(fileURLWithPath: tab.path)).path
+                return tab.path == path || tabPath == canonical || tabPath.hasPrefix(canonical + "/")
+            }.map(\.id))
             try FileService.moveToTrash(url, root: URL(fileURLWithPath: vault.path))
-            let prefix = url.standardizedFileURL.path + "/"
-            let removedIDs = tabs.filter { $0.path == path || $0.path.hasPrefix(prefix) }.map(\.id)
             removedIDs.forEach { saveTasks[$0]?.cancel(); saveTasks[$0] = nil }
             if let titleEditingTabID, removedIDs.contains(titleEditingTabID) {
                 self.titleEditingTabID = nil
@@ -1220,7 +1227,7 @@ final class AppModel {
             {
                 editorFocusRequest = nil
             }
-            tabs.removeAll { $0.path == path || $0.path.hasPrefix(prefix) }
+            tabs.removeAll { removedIDs.contains($0.id) }
             await refreshVault()
         } catch {
             errorMessage = error.localizedDescription

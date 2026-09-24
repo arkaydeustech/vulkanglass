@@ -36,6 +36,41 @@ final class FileServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("outside.md").path))
     }
 
+    func testFolderFileCountIncludesNestedHiddenAndNonMarkdownFiles() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Archive")
+        let nested = folder.appendingPathComponent("Nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: folder.appendingPathComponent("Empty"),
+            withIntermediateDirectories: false
+        )
+        try "a".write(to: folder.appendingPathComponent("A.md"), atomically: true, encoding: .utf8)
+        try "b".write(to: nested.appendingPathComponent("B.md"), atomically: true, encoding: .utf8)
+        try "x".write(to: nested.appendingPathComponent("image.png"), atomically: true, encoding: .utf8)
+        try "h".write(to: nested.appendingPathComponent(".hidden"), atomically: true, encoding: .utf8)
+        try "o".write(to: root.appendingPathComponent("Outside.md"), atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(FileService.fileCount(inFolder: folder), 4)
+        XCTAssertEqual(FileService.fileCount(inFolder: folder.appendingPathComponent("Empty")), 0)
+        XCTAssertEqual(FileService.fileCount(inFolder: root.appendingPathComponent("Missing")), 0)
+    }
+
+    func testMoveFolderToTrashRemovesEverythingInsideButNotTheVaultRoot() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Archive")
+        let nested = folder.appendingPathComponent("Nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try "b".write(to: nested.appendingPathComponent("B.md"), atomically: true, encoding: .utf8)
+        try "o".write(to: root.appendingPathComponent("Outside.md"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try FileService.moveToTrash(root, root: root))
+        try FileService.moveToTrash(folder, root: root)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Outside.md").path))
+    }
+
     func testContainedFolderAcceptsVaultFoldersAndRejectsEscapesAndMissingFolders() throws {
         let parent = try temporaryDirectory()
         let root = parent.appendingPathComponent("vault")
