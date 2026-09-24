@@ -66,31 +66,51 @@ struct FileExplorerView: View {
             .padding(.bottom, 4)
 
             if let vault = model.vault {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(filtered(model.fileTree)) { node in
-                            TreeRow(node: node, depth: 0)
+                GeometryReader { geometry in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "tray")
+                                Text(vault.name)
+                                Spacer()
+                            }
+                            .font(.caption)
+                            .foregroundStyle(VGTheme.textMuted(dark: model.dark))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(rootDropTargeted ? VGTheme.dropTarget.opacity(0.18) : Color.clear)
+                            .contentShape(Rectangle())
+                            .onDrop(
+                                of: [.vulkanGlassNote],
+                                delegate: FolderDropDelegate(
+                                    model: model,
+                                    folderPath: vault.path,
+                                    targeted: $rootDropTargeted
+                                )
+                            )
+
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(filtered(model.fileTree)) { node in
+                                    TreeRow(node: node, depth: 0)
+                                }
+                            }
+
+                            // Only free space below the rows accepts a root drop.
+                            Spacer(minLength: 12)
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
+                                .onDrop(
+                                    of: [.vulkanGlassNote],
+                                    delegate: FolderDropDelegate(
+                                        model: model,
+                                        folderPath: vault.path,
+                                        targeted: $rootDropTargeted
+                                    )
+                                )
                         }
-                    }
-                    .padding(.bottom, 12)
-                }
-                .overlay {
-                    if rootDropTargeted {
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(VGTheme.dropTarget, lineWidth: 2)
-                            .padding(2)
-                            .allowsHitTesting(false)
+                        .frame(minHeight: geometry.size.height, alignment: .top)
                     }
                 }
-                // A note dropped outside every folder row moves to the top of the vault.
-                .onDrop(
-                    of: [.vulkanGlassNote],
-                    delegate: FolderDropDelegate(
-                        model: model,
-                        folderPath: vault.path,
-                        targeted: $rootDropTargeted
-                    )
-                )
             } else {
                 Text("This window is editing a standalone Markdown file. Open a GitHub vault to see a file tree.")
                     .font(.caption)
@@ -341,15 +361,48 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     var preview: ((CGSize) -> NSImage?)?
     var onClick: (() -> Void)?
     var menuItems: [MenuItem] = []
+    var presentContextMenu: (NSMenu, NSEvent, NSView) -> Void = { menu, event, view in
+        NSMenu.popUpContextMenu(menu, with: event, for: view)
+    }
     private var pressEvent: NSEvent?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        if event.charactersIgnoringModifiers == "\r" || event.charactersIgnoringModifiers == " " {
+            onClick?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+
+    override func accessibilityLabel() -> String? {
+        (path as NSString).lastPathComponent
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onClick else { return false }
+        onClick()
+        return true
+    }
+
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        menuItems.map { item in
+            NSAccessibilityCustomAction(name: item.title, handler: {
+                item.action()
+                return true
+            })
+        }
+    }
 
     override func mouseDown(with event: NSEvent) {
         if event.modifierFlags.contains(.control) {
             pressEvent = nil
             if let menu = menu(for: event) {
-                NSMenu.popUpContextMenu(menu, with: event, for: self)
+                presentContextMenu(menu, event, self)
             }
             return
         }

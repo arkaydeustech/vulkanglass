@@ -1075,6 +1075,7 @@ final class AppModel {
                 URL(fileURLWithPath: folderPath),
                 URL(fileURLWithPath: vault.path)
             )
+            retargetRecentFile(from: path, to: dest.path)
             let folderName = FileService.canonicalURL(URL(fileURLWithPath: folderPath)).path
                 == FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path
                 ? vault.name
@@ -1429,7 +1430,7 @@ final class AppModel {
         SettingsStore.save(settings)
     }
 
-    /// Keeps a renamed standalone file's recents entry pointing at its new name.
+    /// Keeps a previously opened standalone file's recents entry pointing at its new location.
     private func retargetRecentFile(from oldPath: String, to newPath: String) {
         let oldCanonical = FileService.canonicalURL(URL(fileURLWithPath: oldPath)).path
         guard let index = settings.recentFiles.firstIndex(where: {

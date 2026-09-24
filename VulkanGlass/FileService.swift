@@ -157,11 +157,16 @@ enum FileService {
     /// Returns the file's new location, or the original when it is already in that folder.
     static func move(_ url: URL, into folder: URL, root: URL) throws -> URL {
         let original = url.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: original.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue
+        else {
+            throw FileServiceError.missingFile(original.lastPathComponent)
+        }
         if try original.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
             throw FileServiceError.symbolicLinkRenameUnsupported(original.path)
         }
         let source = try validateExisting(original, inside: root)
-        var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory),
               !isDirectory.boolValue
         else {
