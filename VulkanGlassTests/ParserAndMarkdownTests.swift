@@ -4322,6 +4322,58 @@ final class EditorLifecycleTests: XCTestCase {
         withExtendedLifetime(hostingView) {}
     }
 
+    func testRawModeEditUpdatesTabAndSavedMarkdown() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("Raw.md")
+        let original = "Intro\n\nSome **bold** text"
+        let insertion = " and *raw*"
+        let expected = original + insertion
+        try original.write(to: file, atomically: true, encoding: .utf8)
+
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        model.tabs = [
+            NoteTab(
+                path: file.path,
+                title: "Raw",
+                content: original,
+                originalContent: original,
+                isStandalone: true
+            )
+        ]
+        model.activeTabID = file.path
+        model.editorMode = .raw
+
+        let hostingView = NSHostingView(
+            rootView: NoteEditorView().environment(model)
+                .frame(width: 600, height: 400, alignment: .topLeading)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let editor = try XCTUnwrap(firstSubview(of: SourceTextView.self, in: hostingView))
+        XCTAssertTrue(editor.isEditable)
+        editor.setSelectedRange(NSRange(location: (original as NSString).length, length: 0))
+        editor.insertText(insertion, replacementRange: editor.selectedRange())
+        XCTAssertEqual(editor.string, expected)
+
+        for _ in 0..<100 where model.activeTab?.content != expected {
+            hostingView.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.activeTab?.content, expected)
+        XCTAssertTrue(model.activeTab?.dirty == true)
+        XCTAssertEqual(try FileService.read(file), original)
+
+        await model.saveActive(sync: false)
+        XCTAssertEqual(try FileService.read(file), expected)
+        XCTAssertEqual(model.activeTab?.originalContent, expected)
+        XCTAssertFalse(model.activeTab?.dirty ?? true)
+        withExtendedLifetime(hostingView) {}
+    }
+
     func testSourceModeDoesNotInstallReadingSelectionOrMakeTheTitleSelectable() {
         let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
         let path = "/tmp/VulkanGlass-source-selection-test.md"
