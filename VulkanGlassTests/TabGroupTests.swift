@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import XCTest
 @testable import VulkanGlass
 
@@ -612,24 +613,89 @@ final class TabGroupInteractionTests: XCTestCase {
         XCTAssertEqual(model.tabs(inGroup: group).map(\.title), ["Three", "One", "Two"])
     }
 
-    func testReleasedDragProviderClearsCancelledDragWithoutErasingANewerOne() async throws {
+    func testEndingATabDragClearsItWithoutErasingANewerOne() throws {
         let model = try modelWithTabs()
         let first = model.tabs[0].id
         let second = model.tabs[1].id
-        model.draggedTabID = first
-        var cancelled: TabDragItemProvider? = TabDragItemProvider(tabID: first, title: "One", model: model)
-        XCTAssertNotNil(cancelled)
-        cancelled = nil
-        for _ in 0..<20 where model.draggedTabID != nil { await Task.yield() }
-        XCTAssertNil(model.draggedTabID)
+        let source = TabDragSourceView()
+        source.model = model
+        source.tabID = first
 
         model.draggedTabID = first
-        var old: TabDragItemProvider? = TabDragItemProvider(tabID: first, title: "One", model: model)
+        source.endTabDrag()
+        XCTAssertNil(model.draggedTabID)
+
         model.draggedTabID = second
-        old = nil
-        for _ in 0..<20 { await Task.yield() }
-        XCTAssertNil(old)
+        source.endTabDrag()
         XCTAssertEqual(model.draggedTabID, second)
+    }
+
+    func testTabDragNeitherMovesTheWindowNorOffersTypesTheEditorAccepts() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        let editor = SourceTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 150))
+        let source = TabDragSourceView(frame: NSRect(x: 0, y: 150, width: 120, height: 40))
+        window.contentView?.addSubview(editor)
+        window.contentView?.addSubview(source)
+        editor.updateDragTypeRegistration()
+
+        // Tabs live in the title bar; a press there must drag the tab, not the window. AppKit
+        // ignores `mouseDownCanMoveWindow` there and moves the window from any part of the title
+        // bar not covered by this private "opaque for window move" rect.
+        XCTAssertFalse(source.mouseDownCanMoveWindow)
+        let opaqueSelector = NSSelectorFromString("_opaqueRectForWindowMoveWhenInTitlebar")
+        if source.responds(to: opaqueSelector),
+           let implementation = class_getMethodImplementation(TabDragSourceView.self, opaqueSelector)
+        {
+            typealias OpaqueRect = @convention(c) (AnyObject, Selector) -> NSRect
+            let opaque = unsafeBitCast(implementation, to: OpaqueRect.self)(source, opaqueSelector)
+            XCTAssertEqual(opaque, source.bounds)
+        }
+        let offered = Set(TabDragSourceView.pasteboardItem(for: "/vault/One.md").types)
+        XCTAssertEqual(offered.map(\.rawValue), [UTType.vulkanGlassNoteTab.identifier])
+        XCTAssertFalse(editor.registeredDraggedTypes.isEmpty)
+        // Were the editor to accept the drag, the pane underneath would never see it.
+        XCTAssertTrue(offered.isDisjoint(with: editor.registeredDraggedTypes))
+    }
+
+    func testClickingATabWithoutDraggingSelectsIt() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 40),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        let source = TabDragSourceView(frame: NSRect(x: 0, y: 0, width: 200, height: 40))
+        window.contentView = source
+        var clicks = 0
+        source.onClick = { clicks += 1 }
+
+        func event(_ type: NSEvent.EventType) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(
+                with: type,
+                location: NSPoint(x: 50, y: 20),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: 1
+            ))
+        }
+
+        source.mouseDown(with: try event(.leftMouseDown))
+        source.mouseDragged(with: try event(.leftMouseDragged))
+        source.mouseUp(with: try event(.leftMouseUp))
+        XCTAssertEqual(clicks, 1, "a press that stays within the drag threshold is a click")
+        source.mouseUp(with: try event(.leftMouseUp))
+        XCTAssertEqual(clicks, 1, "a release without its own press does not select")
     }
 
     func testPaneMouseMonitorSkipsPaletteAndSwitcherClicks() throws {

@@ -7,30 +7,135 @@ extension UTType {
     static let vulkanGlassNoteTab = UTType(exportedAs: "app.vulkanglass.note-tab")
 }
 
-/// The drag session retains its provider until it ends, including when the drop is cancelled.
-/// Clear the in-process lookup when that session releases the provider.
-final class TabDragItemProvider: NSItemProvider {
-    private let onRelease: () -> Void
+/// Makes a tab clickable and draggable through AppKit rather than SwiftUI's `onDrag`.
+///
+/// The tabs sit in the window title bar, where a SwiftUI drag usually moved the whole window
+/// instead. `onDrag` also offers the tab as a file promise, which the note editor's text view
+/// accepts, so it took the drag and hid the pane's split zones. This view never moves the
+/// window, and its drag carries only the private tab type.
+struct TabDragSource: NSViewRepresentable {
+    let tabID: String
+    let model: AppModel
+    var preview: (CGSize) -> NSImage?
+    var onClick: () -> Void
 
-    init(tabID: String, title: String, model: AppModel) {
-        onRelease = { [weak model] in
-            Task { @MainActor in
-                if model?.draggedTabID == tabID { model?.draggedTabID = nil }
-            }
-        }
-        super.init()
-        let payload = Data(tabID.utf8)
-        registerDataRepresentation(
-            forTypeIdentifier: UTType.vulkanGlassNoteTab.identifier,
-            visibility: .ownProcess
-        ) { completion in
-            completion(payload, nil)
-            return nil
-        }
-        suggestedName = title
+    func makeNSView(context: Context) -> TabDragSourceView {
+        let view = TabDragSourceView()
+        updateNSView(view, context: context)
+        return view
     }
 
-    deinit { onRelease() }
+    func updateNSView(_ nsView: TabDragSourceView, context: Context) {
+        nsView.tabID = tabID
+        nsView.model = model
+        nsView.preview = preview
+        nsView.onClick = onClick
+    }
+}
+
+/// An `NSControl` rather than a plain `NSView`: in the title bar AppKit lets a drag on any
+/// non-control view move the window, whatever its `mouseDownCanMoveWindow` says.
+final class TabDragSourceView: NSControl, NSDraggingSource {
+    var tabID = ""
+    weak var model: AppModel?
+    var preview: ((CGSize) -> NSImage?)?
+    var onClick: (() -> Void)?
+    /// Pointer travel, in points, before a press on a tab becomes a drag.
+    static let dragThreshold: CGFloat = 4
+    private var pressEvent: NSEvent?
+
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        pressEvent = event
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let press = pressEvent else { return }
+        let start = press.locationInWindow
+        let now = event.locationInWindow
+        guard hypot(now.x - start.x, now.y - start.y) >= Self.dragThreshold else { return }
+        pressEvent = nil
+        beginTabDrag(with: press)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if pressEvent != nil { onClick?() }
+        pressEvent = nil
+    }
+
+    private func beginTabDrag(with event: NSEvent) {
+        guard let model else { return }
+        let draggingItem = NSDraggingItem(pasteboardWriter: Self.pasteboardItem(for: tabID))
+        draggingItem.setDraggingFrame(bounds, contents: preview?(bounds.size))
+        model.draggedTabID = tabID
+        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = true
+    }
+
+    /// The drag payload: the private tab type alone, which no text view registers for.
+    static func pasteboardItem(for tabID: String) -> NSPasteboardItem {
+        let item = NSPasteboardItem()
+        item.setString(tabID, forType: NSPasteboard.PasteboardType(UTType.vulkanGlassNoteTab.identifier))
+        return item
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        endedAt screenPoint: NSPoint,
+        operation: NSDragOperation
+    ) {
+        endTabDrag()
+    }
+
+    /// Clears the in-process drag lookup once this tab's drag ends, dropped or cancelled,
+    /// without erasing a newer drag that has since started.
+    func endTabDrag() {
+        if model?.draggedTabID == tabID { model?.draggedTabID = nil }
+    }
+}
+
+/// The image that follows the pointer while a tab is dragged.
+struct TabDragPreview: View {
+    let title: String
+    let dark: Bool
+
+    var body: some View {
+        Text(title)
+            .lineLimit(1)
+            .font(.system(size: 13))
+            .foregroundStyle(VGTheme.textNormal(dark: dark))
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6).fill(VGTheme.backgroundPrimary(dark: dark))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6).stroke(VGTheme.dropTarget, lineWidth: 1.5)
+            )
+            .opacity(0.9)
+    }
+
+    @MainActor
+    static func image(title: String, dark: Bool, size: CGSize, scale: CGFloat) -> NSImage? {
+        guard size.width > 0, size.height > 0 else { return nil }
+        let renderer = ImageRenderer(
+            content: TabDragPreview(title: title, dark: dark)
+                .frame(width: size.width, height: size.height)
+        )
+        renderer.scale = scale
+        return renderer.nsImage
+    }
 }
 
 /// Which outer edges of the main display area a pane touches. The pane along the top edge
@@ -457,6 +562,8 @@ struct TabGroupTabStrip: View {
                     active ? VGTheme.textNormal(dark: model.dark) : VGTheme.textMuted(dark: model.dark)
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Presses on the title fall through to the AppKit drag source behind it.
+                .allowsHitTesting(false)
             Button {
                 Task { await model.closeTab(tab.id) }
             } label: {
@@ -468,27 +575,36 @@ struct TabGroupTabStrip: View {
         .padding(.horizontal, 10)
         .frame(height: VGTheme.titleBarHeight)
         .frame(minWidth: 100, maxWidth: 200)
+        .background {
+            TabDragSource(
+                tabID: tab.id,
+                model: model,
+                preview: { [dark = model.dark] size in
+                    TabDragPreview.image(
+                        title: tab.title,
+                        dark: dark,
+                        size: size,
+                        scale: NSScreen.main?.backingScaleFactor ?? 2
+                    )
+                },
+                onClick: { Task { await model.setActiveTab(tab.id) } }
+            )
+        }
         .background(active ? VGTheme.backgroundPrimary(dark: model.dark) : Color.clear)
         .overlay(alignment: .bottom) {
             // Only the focused group's tab carries the accent, so the focused pane is obvious.
             Rectangle()
                 .fill(active && isFocused ? VGTheme.accent : Color.clear)
                 .frame(height: 2)
+                .allowsHitTesting(false)
         }
         .overlay(alignment: .trailing) {
-            VGTheme.divider(dark: model.dark).frame(width: 1)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            Task { await model.setActiveTab(tab.id) }
+            VGTheme.divider(dark: model.dark).frame(width: 1).allowsHitTesting(false)
         }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
         .accessibilityLabel(tab.title)
-        .onDrag {
-            model.draggedTabID = tab.id
-            return TabDragItemProvider(tabID: tab.id, title: tab.title, model: model)
-        }
+        .accessibilityAction { Task { await model.setActiveTab(tab.id) } }
     }
 }
 
