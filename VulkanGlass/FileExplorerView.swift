@@ -60,6 +60,87 @@ final class FolderRenameDraft {
     }
 }
 
+/// The folder awaiting confirmation in the "Move to Trash" prompt.
+@MainActor
+@Observable
+final class FolderTrashRequest {
+    var isPresented = false
+    private(set) var path: String?
+    private(set) var name = ""
+    private(set) var contents: FileService.FolderContents?
+    private var identity: FileService.FolderIdentity?
+    private var countTask: Task<Void, Never>?
+
+    /// Asks to confirm moving `folder` and everything inside it to the Trash.
+    func begin(_ folder: FileNode) {
+        countTask?.cancel()
+        let url = URL(fileURLWithPath: folder.path)
+        guard let identity = try? FileService.folderIdentity(at: url) else {
+            cancel()
+            return
+        }
+        path = folder.path
+        name = folder.name
+        self.identity = identity
+        contents = nil
+        isPresented = true
+        countTask = Task { [weak self] in
+            let work = Task.detached {
+                try? FileService.folderContents(in: url)
+            }
+            let result = await withTaskCancellationHandler {
+                await work.value
+            } onCancel: {
+                work.cancel()
+            }
+            guard !Task.isCancelled, self?.path == folder.path else { return }
+            self?.contents = result
+        }
+    }
+
+    func cancel() {
+        countTask?.cancel()
+        countTask = nil
+        path = nil
+        name = ""
+        contents = nil
+        identity = nil
+        isPresented = false
+    }
+
+    func awaitCount() async {
+        await countTask?.value
+    }
+
+    var title: String {
+        "Move “\(name)” to Trash?"
+    }
+
+    var message: String {
+        let description: String
+        if let contents {
+            description = switch (contents.files, contents.directories) {
+            case (0, 0): "This empty folder"
+            case (0, _): "This folder and its subfolders"
+            case (1, _): "This folder and the 1 file inside it"
+            default: "This folder and all \(contents.files) files inside it"
+            }
+        } else {
+            description = "This folder and everything inside it"
+        }
+        return "\(description) will be moved to the Trash. You can recover it from the macOS Trash."
+    }
+
+    @discardableResult
+    func confirm(into model: AppModel) -> Task<Void, Never>? {
+        let confirmedPath = path
+        let confirmedIdentity = identity
+        cancel()
+        guard let confirmedPath, let confirmedIdentity else { return nil }
+        return Task { await model.deletePath(confirmedPath, expectedFolderIdentity: confirmedIdentity) }
+    }
+}
+
 struct FileExplorerView: View {
     @Environment(AppModel.self) private var model
     @State private var filter = ""
@@ -68,13 +149,19 @@ struct FileExplorerView: View {
     @State private var rootDropTargeted = false
     @State private var treeRowsHeight: CGFloat = 0
     @State private var renameDraft: FolderRenameDraft
+    @State private var trashRequest: FolderTrashRequest
 
     init() {
-        _renameDraft = State(initialValue: FolderRenameDraft())
+        self.init(renameDraft: FolderRenameDraft())
     }
 
     init(renameDraft: FolderRenameDraft) {
+        self.init(renameDraft: renameDraft, trashRequest: FolderTrashRequest())
+    }
+
+    init(renameDraft: FolderRenameDraft, trashRequest: FolderTrashRequest) {
         _renameDraft = State(initialValue: renameDraft)
+        _trashRequest = State(initialValue: trashRequest)
     }
 
     var body: some View {
@@ -133,7 +220,12 @@ struct FileExplorerView: View {
 
                                 LazyVStack(alignment: .leading, spacing: 0) {
                                     ForEach(filtered(model.fileTree)) { node in
-                                        TreeRow(node: node, depth: 0, onRenameFolder: renameDraft.begin)
+                                        TreeRow(
+                                            node: node,
+                                            depth: 0,
+                                            onRenameFolder: renameDraft.begin,
+                                            onTrashFolder: trashRequest.begin
+                                        )
                                     }
                                 }
                             }
@@ -193,6 +285,20 @@ struct FileExplorerView: View {
         } message: {
             Text("Enter a new name for this folder.")
         }
+        .confirmationDialog(
+            trashRequest.title,
+            isPresented: $trashRequest.isPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Move to Trash", role: .destructive) {
+                trashRequest.confirm(into: model)
+            }
+            Button("Cancel", role: .cancel) {
+                trashRequest.cancel()
+            }
+        } message: {
+            Text(trashRequest.message)
+        }
     }
 
     private func filtered(_ nodes: [FileNode]) -> [FileNode] {
@@ -223,6 +329,7 @@ struct TreeRow: View {
     let node: FileNode
     let depth: Int
     let onRenameFolder: (FileNode) -> Void
+    var onTrashFolder: (FileNode) -> Void = { _ in }
     @State private var open = true
     @State private var confirmingDelete = false
     @State private var renaming = false
@@ -266,10 +373,17 @@ struct TreeRow: View {
             .contextMenu {
                 FolderContextMenu(path: node.path, open: $open)
                 Button("Rename") { onRenameFolder(node) }
+                Divider()
+                Button("Move to Trash…") { onTrashFolder(node) }
             }
             if open {
                 ForEach(node.children ?? []) { child in
-                    TreeRow(node: child, depth: depth + 1, onRenameFolder: onRenameFolder)
+                    TreeRow(
+                        node: child,
+                        depth: depth + 1,
+                        onRenameFolder: onRenameFolder,
+                        onTrashFolder: onTrashFolder
+                    )
                 }
             }
         } else {
