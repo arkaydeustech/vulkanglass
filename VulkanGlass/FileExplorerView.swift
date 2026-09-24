@@ -108,7 +108,10 @@ struct FileExplorerView: View {
                             // viewport explicitly rather than with a `Spacer`.
                             Color.clear
                                 .frame(maxWidth: .infinity)
-                                .frame(height: max(12, geometry.size.height - treeRowsHeight))
+                                .frame(height: Self.rootDropAreaHeight(
+                                    viewportHeight: geometry.size.height,
+                                    rowsHeight: treeRowsHeight
+                                ))
                                 .contentShape(Rectangle())
                                 .onDrop(
                                     of: [.vulkanGlassNote],
@@ -157,6 +160,10 @@ struct FileExplorerView: View {
             return node.name.lowercased().contains(q) ? node : nil
         }
         return nodes.compactMap(match)
+    }
+
+    static func rootDropAreaHeight(viewportHeight: CGFloat, rowsHeight: CGFloat) -> CGFloat {
+        max(12, viewportHeight - rowsHeight)
     }
 }
 
@@ -287,7 +294,7 @@ private struct TreeRow: View {
 }
 
 /// The height of the file tree's rows, so the root drop area can fill the space below them.
-private enum FileTreeRowsHeightKey: PreferenceKey {
+enum FileTreeRowsHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -444,6 +451,13 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     override func mouseUp(with event: NSEvent) {
         if pressEvent != nil { onClick?() }
         pressEvent = nil
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        pressEvent = nil
+        if let menu = menu(for: event) {
+            presentContextMenu(menu, event, self)
+        }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

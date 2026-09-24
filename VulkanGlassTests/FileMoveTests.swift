@@ -77,6 +77,42 @@ final class FileMoveServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("Linked.md").path))
     }
 
+    func testMoveResolvesASymlinkedDestinationInsideTheVault() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Ideas")
+        let link = root.appendingPathComponent("Ideas Link")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder)
+        let source = root.appendingPathComponent("Note.md")
+        try "note".write(to: source, atomically: true, encoding: .utf8)
+
+        let destination = try FileService.move(source, into: link, root: root)
+
+        XCTAssertEqual(destination.path, FileService.canonicalURL(folder.appendingPathComponent("Note.md")).path)
+        XCTAssertEqual(try FileService.read(destination), "note")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    func testMoveRejectsASymlinkedDestinationOutsideTheVault() throws {
+        let parent = try temporaryDirectory()
+        let root = parent.appendingPathComponent("vault")
+        let outside = parent.appendingPathComponent("outside")
+        let link = root.appendingPathComponent("Outside Link")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        let source = root.appendingPathComponent("Note.md")
+        try "note".write(to: source, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try FileService.move(source, into: link, root: root)) { error in
+            guard case .outsideRoot = error as? FileServiceError else {
+                return XCTFail("Expected outsideRoot, got \(error)")
+            }
+        }
+        XCTAssertEqual(try FileService.read(source), "note")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("Note.md").path))
+    }
+
     func testMoveReportsAMissingSourceAsMissingFile() throws {
         let root = try temporaryDirectory()
         let missing = root.appendingPathComponent("Gone.md")
@@ -197,6 +233,161 @@ final class FileMoveModelTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(model.activeTab).dirty)
     }
 
+    func testMoveStopsWhenThePreMoveSaveFails() async throws {
+        let (model, root) = try await vaultModel()
+        let source = root.appendingPathComponent("Broken.md")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
+        model.tabs = [NoteTab(path: source.path, title: "Broken", content: "new", originalContent: "old", isStandalone: false)]
+
+        let moved = await model.moveNote(path: source.path, toFolder: root.appendingPathComponent("Ideas").path)
+
+        XCTAssertFalse(moved)
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertTrue(model.tabs[0].dirty)
+        XCTAssertEqual(model.tabs[0].path, source.path)
+        XCTAssertTrue(FileService.directoryExists(at: source.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Ideas/Broken.md").path))
+    }
+
+    func testEditsDuringPendingMoveAreSavedOnlyAtTheDestination() async throws {
+        let started = expectation(description: "Move started")
+        let gate = FileMoveGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.moveFile = { source, folder, root in
+            started.fulfill()
+            await gate.wait()
+            return try FileService.move(source, into: folder, root: root)
+        }
+        let (model, root) = try await vaultModel(dependencies: dependencies)
+        let source = root.appendingPathComponent("Loose.md")
+        let destination = root.appendingPathComponent("Ideas/Loose.md")
+        await model.openTab(path: source.path)
+        model.updateContent(source.path, "before move")
+
+        let move = Task { await model.moveNote(path: source.path, toFolder: destination.deletingLastPathComponent().path) }
+        await fulfillment(of: [started], timeout: 2)
+        model.updateContent(source.path, "first edit")
+        model.updateContent(source.path, "latest edit")
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(try FileService.read(source), "before move")
+        gate.release()
+        let moved = await move.value
+        XCTAssertTrue(moved)
+
+        await model.awaitPendingSaves()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(try FileService.read(destination), "latest edit")
+        XCTAssertEqual(model.activeTab.map { canonical($0.path) }, canonical(destination.path))
+        XCTAssertFalse(try XCTUnwrap(model.activeTab).dirty)
+    }
+
+    func testEditsDuringAFailedMoveStayAtTheSource() async throws {
+        let started = expectation(description: "Move started")
+        let gate = FileMoveGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.moveFile = { _, _, _ in
+            started.fulfill()
+            await gate.wait()
+            throw FileServiceError.nameTaken("Loose.md")
+        }
+        let (model, root) = try await vaultModel(dependencies: dependencies)
+        let source = root.appendingPathComponent("Loose.md")
+        let folder = root.appendingPathComponent("Ideas")
+        await model.openTab(path: source.path)
+
+        let move = Task { await model.moveNote(path: source.path, toFolder: folder.path) }
+        await fulfillment(of: [started], timeout: 2)
+        model.updateContent(source.path, "edit during move")
+        gate.release()
+        let moved = await move.value
+
+        XCTAssertFalse(moved)
+        XCTAssertEqual(model.errorMessage, FileServiceError.nameTaken("Loose.md").localizedDescription)
+        XCTAssertEqual(try FileService.read(source), "edit during move")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("Loose.md").path))
+        XCTAssertFalse(try XCTUnwrap(model.activeTab).dirty)
+        XCTAssertTrue(model.canMoveNote(source.path, toFolder: folder.path))
+    }
+
+    func testCompletedMoveDoesNotSyncAReplacedVault() async throws {
+        let started = expectation(description: "Move started")
+        let gate = FileMoveGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.authenticationDisabled = { false }
+        dependencies.moveFile = { source, folder, root in
+            started.fulfill()
+            await gate.wait()
+            return try FileService.move(source, into: folder, root: root)
+        }
+        var syncPaths: [String] = []
+        dependencies.syncGit = { path, _, _ in
+            syncPaths.append(path)
+            return GitStatus(state: .synced)
+        }
+        var settings = AppSettings.default()
+        settings.autoSync = true
+        let (model, root) = try await vaultModel(settings: settings, dependencies: dependencies)
+        let otherRoot = try temporaryDirectory()
+        let other = VaultInfo(name: "other", path: otherRoot.path, remote: nil, branch: nil, isGitHub: false)
+        let source = root.appendingPathComponent("Loose.md")
+        let move = Task { await model.moveNote(path: source.path, toFolder: root.appendingPathComponent("Ideas").path) }
+        await fulfillment(of: [started], timeout: 2)
+
+        // Exercise the post-await identity guard even if a caller replaces vault directly.
+        model.vault = other
+        model.fileTree = []
+        model.notes = []
+        gate.release()
+        let moved = await move.value
+
+        XCTAssertTrue(moved)
+        XCTAssertTrue(syncPaths.isEmpty)
+        XCTAssertEqual(model.vault, other)
+        XCTAssertTrue(model.fileTree.isEmpty)
+        XCTAssertTrue(model.notes.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Ideas/Loose.md").path))
+    }
+
+    func testVaultSwitchWaitsForPendingMoveAndSyncsOnlyTheOriginalVault() async throws {
+        let started = expectation(description: "Move started")
+        let gate = FileMoveGate()
+        var dependencies = AppModelDependencies.live
+        dependencies.authenticationDisabled = { false }
+        dependencies.moveFile = { source, folder, root in
+            started.fulfill()
+            await gate.wait()
+            return try FileService.move(source, into: folder, root: root)
+        }
+        var syncPaths: [String] = []
+        dependencies.syncGit = { path, _, _ in
+            syncPaths.append(path)
+            return GitStatus(state: .synced)
+        }
+        var settings = AppSettings.default()
+        settings.autoSync = true
+        let (model, root) = try await vaultModel(settings: settings, dependencies: dependencies)
+        let otherRoot = try temporaryDirectory()
+        try "other".write(to: otherRoot.appendingPathComponent("Other.md"), atomically: true, encoding: .utf8)
+        let other = VaultInfo(name: "other", path: otherRoot.path, remote: nil, branch: nil, isGitHub: false)
+        let source = root.appendingPathComponent("Loose.md")
+
+        let move = Task { await model.moveNote(path: source.path, toFolder: root.appendingPathComponent("Ideas").path) }
+        await fulfillment(of: [started], timeout: 2)
+        let switching = Task { await model.openVault(other) }
+        await Task.yield()
+        XCTAssertEqual(model.vault?.path, root.path)
+        XCTAssertTrue(syncPaths.isEmpty)
+        gate.release()
+        let moved = await move.value
+        XCTAssertTrue(moved)
+        await switching.value
+
+        XCTAssertEqual(model.vault?.path, otherRoot.path)
+        XCTAssertEqual(syncPaths, [root.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Ideas/Loose.md").path))
+        XCTAssertFalse(model.notes.contains { $0.relativePath == "Ideas/Loose.md" })
+    }
+
     func testMoveOntoATakenNamePublishesAnErrorAndKeepsTheNote() async throws {
         let (model, root) = try await vaultModel()
         let source = root.appendingPathComponent("Existing.md")
@@ -291,8 +482,8 @@ final class FileMoveModelTests: XCTestCase {
         XCTAssertEqual(try FileService.read(source), "loose")
     }
 
-    func testNativeExplorerDragRoutesFolderOwnRowAndRootBackground() async throws {
-        for target in ["folder", "own row", "background"] {
+    func testNativeExplorerDragRoutesFolderOwnRowRootHeaderAndBackground() async throws {
+        for target in ["folder", "own row", "header", "background"] {
             let (model, root) = try await vaultModel()
             let host = NSHostingView(rootView: FileExplorerView().environment(model).frame(width: 260, height: 360))
             host.frame = NSRect(x: 0, y: 0, width: 260, height: 360)
@@ -319,6 +510,8 @@ final class FileMoveModelTests: XCTestCase {
                 targetInHost = NSPoint(x: nestedFrame.midX, y: nestedFrame.minY - 11)
             case "own row":
                 targetInHost = NSPoint(x: nestedFrame.midX + 15, y: nestedFrame.midY)
+            case "header":
+                targetInHost = NSPoint(x: nestedFrame.midX, y: host.bounds.maxY - 40)
             default:
                 targetInHost = NSPoint(x: nestedFrame.midX, y: 250)
             }
@@ -369,6 +562,16 @@ final class FileMoveModelTests: XCTestCase {
             XCTAssertNil(model.errorMessage, target)
             XCTAssertNil(model.draggedFilePath, target)
         }
+    }
+
+    func testRootDropAreaFillsViewportBelowMeasuredRows() {
+        var measuredRows = FileTreeRowsHeightKey.defaultValue
+        FileTreeRowsHeightKey.reduce(value: &measuredRows) { 96 }
+        FileTreeRowsHeightKey.reduce(value: &measuredRows) { 80 }
+
+        XCTAssertEqual(measuredRows, 96)
+        XCTAssertEqual(FileExplorerView.rootDropAreaHeight(viewportHeight: 360, rowsHeight: measuredRows), 264)
+        XCTAssertEqual(FileExplorerView.rootDropAreaHeight(viewportHeight: 80, rowsHeight: measuredRows), 12)
     }
 
     private func descendants(of view: NSView) -> [NSView] {
@@ -504,6 +707,21 @@ final class FileDragSourceTests: XCTestCase {
         XCTAssertEqual(clicks, 0)
     }
 
+    func testRightClickPresentsMenuWithoutOpeningTheNote() throws {
+        let (window, source) = hostedSource()
+        defer { window.orderOut(nil) }
+        var clicks = 0
+        var presented: [String] = []
+        source.onClick = { clicks += 1 }
+        source.menuItems = [FileDragSourceView.MenuItem(title: "Rename") {}]
+        source.presentContextMenu = { menu, _, _ in presented = menu.items.map(\.title) }
+
+        source.rightMouseDown(with: try event(.rightMouseDown, in: window))
+
+        XCTAssertEqual(presented, ["Rename"])
+        XCTAssertEqual(clicks, 0)
+    }
+
     func testKeyboardAndAccessibilityActionsOpenRenameAndTrash() throws {
         let (window, source) = hostedSource()
         defer { window.orderOut(nil) }
@@ -562,5 +780,22 @@ final class FileDragSourceTests: XCTestCase {
             clickCount: 1,
             pressure: 1
         ))
+    }
+}
+
+@MainActor
+private final class FileMoveGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }

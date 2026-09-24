@@ -266,6 +266,9 @@ final class AppModel {
 
     private var saveTasks: [String: Task<Void, Never>] = [:]
     private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var movingNotePaths: Set<String> = []
+    @ObservationIgnored private var moveWaiters: [CheckedContinuation<Void, Never>] = []
+    @ObservationIgnored private var vaultTransitions = 0
     @ObservationIgnored private var titleCommitTask: Task<Bool, Never>?
     @ObservationIgnored private var titleCommitTabID: String?
     @ObservationIgnored private var titleCommitGeneration: UUID?
@@ -384,6 +387,9 @@ final class AppModel {
                 return
             }
         }
+        vaultTransitions += 1
+        defer { vaultTransitions -= 1 }
+        await awaitPendingMoves()
         if (!tabs.isEmpty || vault != nil), vault?.path != info.path, !(await flushDirtyTabs()) {
             busyMessage = nil
             return
@@ -437,6 +443,9 @@ final class AppModel {
     func closeVault() async {
         guard await commitTitleEditing() else { return }
         guard await resolveUnsavedStandaloneChanges() else { return }
+        vaultTransitions += 1
+        defer { vaultTransitions -= 1 }
+        await awaitPendingMoves()
         guard await flushDirtyTabs() else { return }
         saveTasks.values.forEach { $0.cancel() }
         saveTasks = [:]
@@ -870,6 +879,9 @@ final class AppModel {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs[index].content = content
         guard tabs[index].savesAutomatically else { return }
+        // The move completion writes the latest text at the destination. An autosave using
+        // this old tab ID could recreate the source after the disk move.
+        guard !movingNotePaths.contains(id) else { return }
         saveTasks[id]?.cancel()
         saveTasks[id] = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
@@ -899,7 +911,8 @@ final class AppModel {
     }
 
     @discardableResult
-    func save(id: String, sync: Bool) async -> Bool {
+    func save(id: String, sync: Bool, allowMovingNote: Bool = false) async -> Bool {
+        guard allowMovingNote || !movingNotePaths.contains(id) else { return false }
         guard let tab = tabs.first(where: { $0.id == id }) else { return false }
         do {
             try FileService.write(URL(fileURLWithPath: tab.path), content: tab.content)
@@ -1052,7 +1065,7 @@ final class AppModel {
     /// Whether the explorer should accept a note dragged onto `folderPath` (a vault folder or
     /// the vault root): the note must be in the vault and not already in that folder.
     func canMoveNote(_ path: String, toFolder folderPath: String) -> Bool {
-        guard let vault else { return false }
+        guard let vault, vaultTransitions == 0, !movingNotePaths.contains(path) else { return false }
         let root = FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path
         let note = FileService.canonicalURL(URL(fileURLWithPath: path))
         let folder = FileService.canonicalURL(URL(fileURLWithPath: folderPath)).path
@@ -1065,9 +1078,14 @@ final class AppModel {
     /// Moves a vault note into another vault folder (or the vault root) and retargets its tab.
     @discardableResult
     func moveNote(path: String, toFolder folderPath: String) async -> Bool {
-        guard let vault, canMoveNote(path, toFolder: folderPath) else { return false }
+        guard let vault, canMoveNote(path, toFolder: folderPath), !movingNotePaths.contains(path) else {
+            return false
+        }
+        movingNotePaths.insert(path)
+        defer { finishMovingNote(path) }
+        saveTasks.removeValue(forKey: path)?.cancel()
         if let tab = tabs.first(where: { $0.path == path }), tab.dirty, tab.savesAutomatically {
-            guard await save(id: tab.id, sync: false) else { return false }
+            guard await save(id: tab.id, sync: false, allowMovingNote: true) else { return false }
         }
         do {
             let dest = try await dependencies.moveFile(
@@ -1076,6 +1094,13 @@ final class AppModel {
                 URL(fileURLWithPath: vault.path)
             )
             retargetRecentFile(from: path, to: dest.path)
+            // A caller can replace the vault while the file operation is suspended. The
+            // completed disk move must not mutate or sync that unrelated vault.
+            guard self.vault?.path == vault.path else { return true }
+            retargetOpenItems(from: path, to: dest.path)
+            if let tab = tabs.first(where: { $0.path == dest.path }), tab.dirty {
+                guard await save(id: tab.id, sync: false) else { return false }
+            }
             let folderName = FileService.canonicalURL(URL(fileURLWithPath: folderPath)).path
                 == FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path
                 ? vault.name
@@ -1088,16 +1113,35 @@ final class AppModel {
             return true
         } catch {
             errorMessage = error.localizedDescription
+            if let tab = tabs.first(where: { $0.path == path }), tab.dirty {
+                // The file stayed at its original location; persist edits made during the move.
+                _ = await save(id: path, sync: false, allowMovingNote: true)
+            }
             return false
         }
+    }
+
+    private func awaitPendingMoves() async {
+        while !movingNotePaths.isEmpty {
+            await withCheckedContinuation { moveWaiters.append($0) }
+        }
+    }
+
+    private func finishMovingNote(_ path: String) {
+        movingNotePaths.remove(path)
+        guard movingNotePaths.isEmpty else { return }
+        let waiters = moveWaiters
+        moveWaiters = []
+        waiters.forEach { $0.resume() }
     }
 
     /// Points open tabs at a note's new location and, inside a vault, re-reads the vault and
     /// commits the change when auto-sync is on and `syncMessage` is given.
     private func finishRelocatingNote(from path: String, to dest: URL, syncMessage: String?) async {
         retargetOpenItems(from: path, to: dest.path)
-        guard vault != nil else { return }
+        guard let vaultPath = vault?.path else { return }
         await refreshVault(reconcileTabs: true)
+        guard vault?.path == vaultPath else { return }
         if let aligned = notes.first(where: {
             FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path
                 == FileService.canonicalURL(dest).path
