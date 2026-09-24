@@ -356,7 +356,7 @@ final class MultiWindowTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: moved.path))
     }
 
-    func testFinderOpenRaisesAnOrderedOutReceivingWindow() async throws {
+    func testFinderOpenRaisesAMiniaturizedReceivingWindow() async throws {
         let session = AppSession(settings: .default())
         let file = try temporaryDirectory().appendingPathComponent("Visible.md")
         try "visible".write(to: file, atomically: true, encoding: .utf8)
@@ -364,14 +364,16 @@ final class MultiWindowTests: XCTestCase {
         let host = testWindow()
         defer { host.orderOut(nil) }
         session.attach(host, to: model)
-        host.orderOut(nil)
-        XCTAssertFalse(host.isVisible)
+        host.miniaturize(nil)
+        await waitUntil { host.isMiniaturized }
+        XCTAssertTrue(host.isMiniaturized)
         let delegate = VulkanGlassAppDelegate()
         delegate.session = session
 
         delegate.application(.shared, open: [file])
         await delegate.externalOpenTask?.value
 
+        XCTAssertFalse(host.isMiniaturized)
         XCTAssertTrue(host.isVisible)
         XCTAssertEqual(model.activeTab?.title, "Visible")
     }
@@ -610,7 +612,7 @@ final class MultiWindowTests: XCTestCase {
     private func testWindow() -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
