@@ -11,7 +11,7 @@ SOURCE_DIR = ROOT / "VulkanGlass"
 TEST_DIR = ROOT / "VulkanGlassTests"
 QUICK_LOOK_DIR = ROOT / "VulkanGlassQuickLook"
 PROJECT_DIR = ROOT / "VulkanGlass.xcodeproj"
-APP_MARKETING_VERSION = "0.3.0"
+APP_MARKETING_VERSION = "0.3.1"
 
 # Extension-safe renderer boundary. These files are compiled into both the app
 # and Quick Look targets, so they must not depend on other VulkanGlass sources.
