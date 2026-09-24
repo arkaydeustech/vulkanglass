@@ -130,7 +130,7 @@ struct SplitHandle: View {
 }
 
 /// Lets empty title-bar space drag the window, without eating clicks on buttons. A double-click
-/// on it zooms the window, as on a native title bar (see `TitleBarDoubleClick`).
+/// on it follows the system title-bar action (see `TitleBarDoubleClick`).
 struct WindowDragRegion: NSViewRepresentable {
     func makeNSView(context: Context) -> WindowDragRegionView {
         let view = WindowDragRegionView()
@@ -152,6 +152,7 @@ final class WindowDragRegionView: NSView {
 /// title bar to" setting in System Settings › Desktop & Dock.
 enum TitleBarDoubleClickAction: Equatable {
     case zoom
+    case fill
     case minimize
     case none
 
@@ -159,6 +160,7 @@ enum TitleBarDoubleClickAction: Equatable {
     /// "Minimize", or "None". Unset falls back to the older `AppleMiniaturizeOnDoubleClick` switch.
     init(preference: String?, legacyMinimize: Bool = false) {
         switch preference?.lowercased() {
+        case "fill": self = .fill
         case "minimize": self = .minimize
         case "none": self = .none
         case nil: self = legacyMinimize ? .minimize : .zoom
@@ -178,6 +180,9 @@ enum TitleBarDoubleClickAction: Equatable {
 /// window when that bar is double-clicked. This restores it for space holding no tab or button.
 @MainActor
 enum TitleBarDoubleClick {
+    /// Weak keys keep a filled window's restore frame only for that window's lifetime.
+    private static let fillRestoreFrames = NSMapTable<NSWindow, NSValue>.weakToStrongObjects()
+
     /// Performs the double-click action when `event` is a double-click on empty title-bar space
     /// in `window`, returning whether it did.
     static func handle(
@@ -204,6 +209,17 @@ enum TitleBarDoubleClick {
     static func perform(_ action: TitleBarDoubleClickAction, on window: NSWindow) {
         switch action {
         case .zoom: window.zoom(nil)
+        case .fill:
+            guard let visibleFrame = window.screen?.visibleFrame else { return }
+            if let restoreFrame = fillRestoreFrames.object(forKey: window)?.rectValue,
+               window.frame == visibleFrame
+            {
+                fillRestoreFrames.removeObject(forKey: window)
+                window.setFrame(restoreFrame, display: true, animate: false)
+            } else {
+                fillRestoreFrames.setObject(NSValue(rect: window.frame), forKey: window)
+                window.setFrame(visibleFrame, display: true, animate: false)
+            }
         case .minimize: window.miniaturize(nil)
         case .none: break
         }
@@ -213,15 +229,22 @@ enum TitleBarDoubleClick {
 /// Puts SwiftUI content in the same row as the macOS traffic lights.
 final class WindowChromeView: NSView {
     private var doubleClickMonitor: Any?
+    var doubleClickAction: () -> TitleBarDoubleClickAction = { .current() }
+    var isMonitoringDoubleClicks: Bool { doubleClickMonitor != nil }
 
-    override func viewWillMove(toWindow newWindow: NSWindow?) {
-        super.viewWillMove(toWindow: newWindow)
+    func stopMonitoring() {
         if let doubleClickMonitor { NSEvent.removeMonitor(doubleClickMonitor) }
         doubleClickMonitor = nil
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        stopMonitoring()
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        stopMonitoring()
         guard let window else { return }
         WindowChromeConfigurator.apply(to: window)
         DispatchQueue.main.async {
@@ -229,9 +252,11 @@ final class WindowChromeView: NSView {
         }
         // A local monitor sees the press before AppKit starts a window drag from the title bar,
         // which would otherwise swallow it.
-        doubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak window] event in
+        doubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             MainActor.assumeIsolated {
-                guard let window, TitleBarDoubleClick.handle(event, in: window) else { return event }
+                guard let self, let window = self.window,
+                      TitleBarDoubleClick.handle(event, in: window, action: self.doubleClickAction())
+                else { return event }
                 return nil
             }
         }
@@ -250,6 +275,10 @@ struct WindowChromeConfigurator: NSViewRepresentable {
 
     func updateNSView(_ nsView: WindowChromeView, context: Context) {
         if let window = nsView.window { Self.apply(to: window) }
+    }
+
+    static func dismantleNSView(_ nsView: WindowChromeView, coordinator: ()) {
+        nsView.stopMonitoring()
     }
 
     static func apply(to window: NSWindow) {
