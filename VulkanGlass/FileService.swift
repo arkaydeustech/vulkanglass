@@ -153,6 +153,43 @@ enum FileService {
         return destination
     }
 
+    /// Moves a Markdown file into `folder` (the vault root or one of its folders), keeping its name.
+    /// Returns the file's new location, or the original when it is already in that folder.
+    static func move(_ url: URL, into folder: URL, root: URL) throws -> URL {
+        let original = url.standardizedFileURL
+        if try original.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
+            throw FileServiceError.symbolicLinkRenameUnsupported(original.path)
+        }
+        let source = try validateExisting(original, inside: root)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue
+        else {
+            throw FileServiceError.missingFile(original.lastPathComponent)
+        }
+
+        let canonicalRoot = canonicalURL(root)
+        let destinationFolder = canonicalURL(folder)
+        guard destinationFolder.path == canonicalRoot.path
+            || destinationFolder.path.hasPrefix(canonicalRoot.path + "/")
+        else {
+            throw FileServiceError.outsideRoot(destinationFolder.path)
+        }
+        guard directoryExists(at: destinationFolder.path) else {
+            throw FileServiceError.invalidRelativePath(folder.path)
+        }
+
+        if canonicalURL(source.deletingLastPathComponent()).path == destinationFolder.path {
+            return original
+        }
+        let destination = destinationFolder.appendingPathComponent(source.lastPathComponent)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw FileServiceError.nameTaken(source.lastPathComponent)
+        }
+        try FileManager.default.moveItem(at: source, to: destination)
+        return destination
+    }
+
     /// Builds a `.md` filename from a user-entered title, rejecting path separators.
     static func markdownFileName(from raw: String) throws -> String {
         var stem = raw.trimmingCharacters(in: .whitespacesAndNewlines)

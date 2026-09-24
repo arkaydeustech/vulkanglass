@@ -67,6 +67,11 @@ struct AppModelDependencies {
             try FileService.rename(source, to: name, root: root)
         }.value
     }
+    var moveFile: (URL, URL, URL) async throws -> URL = { source, folder, root in
+        try await Task.detached {
+            try FileService.move(source, into: folder, root: root)
+        }.value
+    }
 
     static let live = AppModelDependencies(
         githubCLIStatus: { includeToken in
@@ -180,6 +185,8 @@ final class AppModel {
     private(set) var paneSplitFractions: [UUID: CGFloat] = [:]
     /// The tab being dragged between tab groups, if any.
     @ObservationIgnored var draggedTabID: String?
+    /// The note being dragged in the file explorer, if any.
+    @ObservationIgnored var draggedFilePath: String?
     /// The focused tab group's active tab.
     var activeTabID: String? {
         get { tabGroupLayout.activeTabID }
@@ -1029,24 +1036,75 @@ final class AppModel {
         do {
             let source = URL(fileURLWithPath: path)
             let dest = try await dependencies.renameFile(source, newName, root)
-            retargetOpenItems(from: path, to: dest.path)
             retargetRecentFile(from: path, to: dest.path)
-            if vault != nil {
-                await refreshVault(reconcileTabs: true)
-                if let aligned = notes.first(where: {
-                    FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path
-                        == FileService.canonicalURL(dest).path
-                })?.path, aligned != dest.path {
-                    retargetOpenItems(from: dest.path, to: aligned)
-                }
-                if sync && settings.autoSync {
-                    await syncNow(message: "Rename \(currentTitle) to \(Markdown.title(from: dest.path))")
-                }
-            }
+            await finishRelocatingNote(
+                from: path,
+                to: dest,
+                syncMessage: sync ? "Rename \(currentTitle) to \(Markdown.title(from: dest.path))" : nil
+            )
             return true
         } catch {
             errorMessage = error.localizedDescription
             return false
+        }
+    }
+
+    /// Whether the explorer should accept a note dragged onto `folderPath` (a vault folder or
+    /// the vault root): the note must be in the vault and not already in that folder.
+    func canMoveNote(_ path: String, toFolder folderPath: String) -> Bool {
+        guard let vault else { return false }
+        let root = FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path
+        let note = FileService.canonicalURL(URL(fileURLWithPath: path))
+        let folder = FileService.canonicalURL(URL(fileURLWithPath: folderPath)).path
+        guard note.path.hasPrefix(root + "/"), folder == root || folder.hasPrefix(root + "/") else {
+            return false
+        }
+        return FileService.canonicalURL(note.deletingLastPathComponent()).path != folder
+    }
+
+    /// Moves a vault note into another vault folder (or the vault root) and retargets its tab.
+    @discardableResult
+    func moveNote(path: String, toFolder folderPath: String) async -> Bool {
+        guard let vault, canMoveNote(path, toFolder: folderPath) else { return false }
+        if let tab = tabs.first(where: { $0.path == path }), tab.dirty, tab.savesAutomatically {
+            guard await save(id: tab.id, sync: false) else { return false }
+        }
+        do {
+            let dest = try await dependencies.moveFile(
+                URL(fileURLWithPath: path),
+                URL(fileURLWithPath: folderPath),
+                URL(fileURLWithPath: vault.path)
+            )
+            let folderName = FileService.canonicalURL(URL(fileURLWithPath: folderPath)).path
+                == FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path
+                ? vault.name
+                : URL(fileURLWithPath: folderPath).lastPathComponent
+            await finishRelocatingNote(
+                from: path,
+                to: dest,
+                syncMessage: "Move \(Markdown.title(from: dest.path)) to \(folderName)"
+            )
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Points open tabs at a note's new location and, inside a vault, re-reads the vault and
+    /// commits the change when auto-sync is on and `syncMessage` is given.
+    private func finishRelocatingNote(from path: String, to dest: URL, syncMessage: String?) async {
+        retargetOpenItems(from: path, to: dest.path)
+        guard vault != nil else { return }
+        await refreshVault(reconcileTabs: true)
+        if let aligned = notes.first(where: {
+            FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path
+                == FileService.canonicalURL(dest).path
+        })?.path, aligned != dest.path {
+            retargetOpenItems(from: dest.path, to: aligned)
+        }
+        if let syncMessage, settings.autoSync {
+            await syncNow(message: syncMessage)
         }
     }
 
