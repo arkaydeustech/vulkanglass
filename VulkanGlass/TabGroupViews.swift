@@ -426,6 +426,13 @@ struct TabGroupHeader: View {
                 TitleBarIcon(symbol: "square.and.pencil", help: "Edit", active: editorMode == .source) {
                     show(.source)
                 }
+                TitleBarIcon(
+                    symbol: "chevron.left.forwardslash.chevron.right",
+                    help: "Raw Markdown",
+                    active: editorMode == .raw
+                ) {
+                    show(.raw)
+                }
             }
             .padding(.trailing, trailingPadding)
             if showRightToggle {

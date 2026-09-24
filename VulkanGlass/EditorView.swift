@@ -6,6 +6,8 @@ struct SourceEditor: NSViewRepresentable {
     @Binding var text: String
     var notes: [NoteMeta]
     var dark: Bool
+    /// Shows every Markdown delimiter instead of revealing them only around the caret.
+    var raw = false
     var baseURL: URL?
     var loadRemoteImages = false
     var focusRequestID: UUID?
@@ -56,6 +58,7 @@ struct SourceEditor: NSViewRepresentable {
         context.coordinator.textView = textView
         context.coordinator.notes = notes
         context.coordinator.dark = dark
+        context.coordinator.raw = raw
         context.coordinator.baseURL = baseURL
         context.coordinator.loadRemoteImages = loadRemoteImages
         textView.onGeometryChange = { [weak coordinator = context.coordinator] in
@@ -73,8 +76,9 @@ struct SourceEditor: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.onChange = { text = $0 }
         context.coordinator.notes = notes
-        let darkChanged = context.coordinator.dark != dark
+        let styleChanged = context.coordinator.dark != dark || context.coordinator.raw != raw
         context.coordinator.dark = dark
+        context.coordinator.raw = raw
         context.coordinator.baseURL = baseURL
         context.coordinator.loadRemoteImages = loadRemoteImages
         context.coordinator.onFocusRequestFulfilled = onFocusRequestFulfilled
@@ -83,7 +87,7 @@ struct SourceEditor: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
             context.coordinator.restyle()
-        } else if darkChanged {
+        } else if styleChanged {
             context.coordinator.restyle()
         }
         applyChrome(textView)
@@ -117,6 +121,7 @@ struct SourceEditor: NSViewRepresentable {
         weak var textView: SourceTextView?
         var notes: [NoteMeta] = []
         var dark = true
+        var raw = false
         var baseURL: URL?
         var loadRemoteImages = false
         var onFocusRequestFulfilled: (UUID) -> Void = { _ in }
@@ -283,7 +288,8 @@ struct SourceEditor: NSViewRepresentable {
                 selection: selection,
                 dark: dark,
                 maximumTableWidth: textView.maximumTableWidth,
-                tokens: cachedTokens
+                tokens: cachedTokens,
+                raw: raw
             )
             textView.configureImages(baseURL: baseURL, loadRemoteImages: loadRemoteImages)
             textView.preloadImages()
@@ -1924,6 +1930,7 @@ struct NoteEditorView: View {
                         text: Bindable(model).tabs[index].content,
                         notes: model.notes,
                         dark: model.dark,
+                        raw: tab.editorMode == .raw,
                         baseURL: URL(fileURLWithPath: tab.path).deletingLastPathComponent(),
                         loadRemoteImages: model.settings.loadRemoteImages,
                         focusRequestID: model.editorFocusRequest?.tabID == tab.id

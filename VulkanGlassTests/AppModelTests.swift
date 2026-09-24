@@ -2316,6 +2316,41 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.editorFocusRequest)
     }
 
+    func testEditorModesDescribeTheirToggles() {
+        XCTAssertFalse(EditorMode.preview.isEditable)
+        XCTAssertTrue(EditorMode.source.isEditable)
+        XCTAssertTrue(EditorMode.raw.isEditable)
+        XCTAssertEqual(EditorMode.preview.label, "Reading")
+        XCTAssertEqual(EditorMode.source.label, "Source")
+        XCTAssertEqual(EditorMode.raw.label, "Raw")
+
+        XCTAssertEqual(EditorMode.preview.togglingReadingView, .source)
+        XCTAssertEqual(EditorMode.source.togglingReadingView, .preview)
+        XCTAssertEqual(EditorMode.raw.togglingReadingView, .preview)
+        XCTAssertEqual(EditorMode.preview.togglingRawMarkdown, .raw)
+        XCTAssertEqual(EditorMode.source.togglingRawMarkdown, .raw)
+        XCTAssertEqual(EditorMode.raw.togglingRawMarkdown, .source)
+    }
+
+    func testSubmittingTitleFocusesTheRawEditor() async throws {
+        let root = try temporaryDirectory()
+        let note = root.appendingPathComponent("Existing.md")
+        try "Existing body".write(to: note, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.openTab(path: note.path)
+        model.editorMode = .raw
+
+        model.beginEditingTitle(for: note.path)
+        await model.submitTitleEditing(for: note.path, draft: "Existing")
+        XCTAssertNil(model.titleEditingTabID)
+        XCTAssertEqual(model.editorFocusRequest?.tabID, note.path)
+        XCTAssertEqual(model.editorFocusRequest?.placement, .start)
+        XCTAssertEqual(model.editorMode, .raw)
+    }
+
     func testSubmittingTitleFocusesDocumentStartOnlyWhenTheSourceEditorIsShown() async throws {
         let root = try temporaryDirectory()
         let note = root.appendingPathComponent("Existing.md")

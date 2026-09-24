@@ -239,7 +239,7 @@ struct StatusBarView: View {
                 Text("\(backlinks) backlink\(backlinks == 1 ? "" : "s")")
             }
             Text("\(model.wordCount) words")
-            Text(model.editorMode == .source ? "Source" : "Reading")
+            Text(model.editorMode.label)
         }
         .font(.system(size: 11))
         .foregroundStyle(VGTheme.textMuted(dark: model.dark))

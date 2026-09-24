@@ -101,9 +101,13 @@ struct VulkanGlassApp: App {
                 Button("Toggle left sidebar") { model.leftOpen.toggle() }
                 Button("Toggle right sidebar") { model.rightOpen.toggle() }
                 Button("Toggle reading view") {
-                    model.editorMode = model.editorMode == .source ? .preview : .source
+                    model.editorMode = model.editorMode.togglingReadingView
                 }
                 .keyboardShortcut("e", modifiers: .command)
+                Button("Toggle raw Markdown") {
+                    model.editorMode = model.editorMode.togglingRawMarkdown
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
                 Button("Open graph view") { model.centerView = .graph }
                     .keyboardShortcut("g", modifiers: .command)
                 Divider()

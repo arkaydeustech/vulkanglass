@@ -691,7 +691,7 @@ final class AppModel {
         placement: EditorFocusRequest.Placement = .end
     ) {
         guard let id = activeTabID,
-              tabs.first(where: { $0.id == id })?.editorMode == .source
+              tabs.first(where: { $0.id == id })?.editorMode.isEditable == true
         else { return }
         editorFocusRequest = EditorFocusRequest(tabID: id, placement: placement)
     }
@@ -786,7 +786,7 @@ final class AppModel {
         if titleEditingTabID == id {
             titleEditingTabID = nil
             titleEditingDraft = ""
-            if activeTabID == id, editorMode == .source {
+            if activeTabID == id, editorMode.isEditable {
                 editorFocusRequest = EditorFocusRequest(tabID: id, placement: .start)
             }
         }
@@ -857,7 +857,7 @@ final class AppModel {
               let target,
               activeTabID == target,
               titleEditingTabID == nil,
-              editorMode == .source
+              editorMode.isEditable
         else { return }
         latestTitleSubmissionID = nil
         editorFocusRequest = EditorFocusRequest(tabID: target, placement: .start)
