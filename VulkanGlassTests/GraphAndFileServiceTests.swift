@@ -36,6 +36,57 @@ final class FileServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("outside.md").path))
     }
 
+    func testContainedFolderAcceptsVaultFoldersAndRejectsEscapesAndMissingFolders() throws {
+        let parent = try temporaryDirectory()
+        let root = parent.appendingPathComponent("vault")
+        let folder = root.appendingPathComponent("Projects")
+        let outside = parent.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("Linked"),
+            withDestinationURL: outside
+        )
+
+        XCTAssertEqual(
+            try FileService.containedFolder(folder, root: root).path,
+            FileService.canonicalURL(folder).path
+        )
+        XCTAssertEqual(
+            try FileService.containedFolder(root, root: root).path,
+            FileService.canonicalURL(root).path
+        )
+        XCTAssertThrowsError(try FileService.containedFolder(outside, root: root))
+        XCTAssertThrowsError(try FileService.containedFolder(root.appendingPathComponent("Linked"), root: root))
+        XCTAssertThrowsError(try FileService.containedFolder(root.appendingPathComponent("../outside"), root: root))
+        XCTAssertThrowsError(try FileService.containedFolder(root.appendingPathComponent("Missing"), root: root)) {
+            XCTAssertEqual($0 as? FileServiceError, .missingFolder("Missing"))
+        }
+    }
+
+    func testFilesystemRootContainsExistingChildFolder() throws {
+        let folder = try temporaryDirectory()
+        let filesystemRoot = URL(fileURLWithPath: "/", isDirectory: true)
+
+        XCTAssertEqual(
+            try FileService.containedFolder(folder, root: filesystemRoot).path,
+            FileService.canonicalURL(folder).path
+        )
+        XCTAssertEqual(try FileService.containedFolder(filesystemRoot, root: filesystemRoot).path, "/")
+        let directChild = "VulkanGlass-\(UUID().uuidString).md"
+        XCTAssertEqual(
+            try FileService.containedURL(root: filesystemRoot, relativePath: directChild).path,
+            "/\(directChild)"
+        )
+        XCTAssertThrowsError(try FileService.containedFolder(
+            folder.appendingPathComponent("Missing"), root: filesystemRoot
+        )) {
+            XCTAssertEqual($0 as? FileServiceError, .missingFolder("Missing"))
+        }
+        let note = try FileService.createNote(in: folder, name: "Untitled")
+        XCTAssertEqual(note.deletingLastPathComponent().path, FileService.canonicalURL(folder).path)
+    }
+
     func testSymlinkEscapeIsRejectedAndIndexerDoesNotFollowIt() throws {
         let parent = try temporaryDirectory()
         let root = parent.appendingPathComponent("vault")
@@ -160,6 +211,96 @@ final class FileServiceTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), target.path)
         XCTAssertFalse(FileManager.default.fileExists(atPath: linkDirectory.appendingPathComponent("Renamed.md").path))
+    }
+
+    func testRenameFolderMovesContentsAndRejectsCollisionAndTraversal() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Projects", isDirectory: true)
+        let nested = folder.appendingPathComponent("Nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Taken", isDirectory: true),
+            withIntermediateDirectories: false
+        )
+        try "child".write(to: nested.appendingPathComponent("Child.md"), atomically: true, encoding: .utf8)
+
+        let renamed = try FileService.renameFolder(nested, to: "  Deep  ", root: root)
+        XCTAssertEqual(renamed.lastPathComponent, "Deep")
+        XCTAssertEqual(
+            FileService.canonicalURL(renamed.deletingLastPathComponent()).path,
+            FileService.canonicalURL(folder).path
+        )
+        XCTAssertEqual(try FileService.read(renamed.appendingPathComponent("Child.md")), "child")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: nested.path))
+
+        XCTAssertThrowsError(try FileService.renameFolder(folder, to: "Taken", root: root)) { error in
+            XCTAssertEqual(error as? FileServiceError, .nameTaken("Taken"))
+        }
+        XCTAssertThrowsError(try FileService.renameFolder(folder, to: "   ", root: root)) { error in
+            XCTAssertEqual(error as? FileServiceError, .emptyName)
+        }
+        for invalid in ["../Escape", "a/b", "..", ".hidden", "a:b"] {
+            XCTAssertThrowsError(try FileService.renameFolder(folder, to: invalid, root: root)) { error in
+                XCTAssertEqual(error as? FileServiceError, .invalidRelativePath(invalid))
+            }
+        }
+        XCTAssertThrowsError(try FileService.renameFolder(root, to: "Vault", root: root)) { error in
+            XCTAssertEqual(
+                error as? FileServiceError,
+                .outsideRoot(FileService.canonicalURL(root).path)
+            )
+        }
+        XCTAssertTrue(FileService.directoryExists(at: folder.path))
+    }
+
+    func testRenameFolderCanChangeOnlyCaseAndRejectsFiles() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("projects", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let note = root.appendingPathComponent("Note.md")
+        try "note".write(to: note, atomically: true, encoding: .utf8)
+
+        let renamed = try FileService.renameFolder(folder, to: "Projects", root: root)
+
+        XCTAssertEqual(renamed.lastPathComponent, "Projects")
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.path).sorted(),
+            ["Note.md", "Projects"]
+        )
+        XCTAssertThrowsError(try FileService.renameFolder(note, to: "Folder", root: root))
+        XCTAssertEqual(try FileService.read(note), "note")
+    }
+
+    func testRenameFolderRejectsNamesExcludedFromTheVault() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let note = folder.appendingPathComponent("Keep.md")
+        try "keep".write(to: note, atomically: true, encoding: .utf8)
+
+        for name in ["dist", "out", "node_modules"] {
+            XCTAssertThrowsError(try FileService.renameFolder(folder, to: name, root: root)) { error in
+                XCTAssertEqual(error as? FileServiceError, .invalidRelativePath(name))
+            }
+            XCTAssertEqual(try FileService.read(note), "keep")
+            XCTAssertEqual(FileService.tree(at: root).map(\.name), ["Notes"])
+            XCTAssertEqual(FileService.index(at: root).map(\.path), [FileService.canonicalURL(note).path])
+        }
+    }
+
+    func testRenameFolderRejectsSymbolicLinkWithoutMovingItsTarget() throws {
+        let root = try temporaryDirectory()
+        let target = root.appendingPathComponent("Target", isDirectory: true)
+        let link = root.appendingPathComponent("Linked", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        XCTAssertThrowsError(try FileService.renameFolder(link, to: "Moved", root: root)) { error in
+            XCTAssertEqual(error as? FileServiceError, .invalidRelativePath(link.path))
+        }
+        XCTAssertTrue(FileService.directoryExists(at: target.path))
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), target.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Moved").path))
     }
 
     private func temporaryDirectory() throws -> URL {

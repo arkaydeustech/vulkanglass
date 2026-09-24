@@ -29,6 +29,37 @@ final class FolderCreationDraft {
     }
 }
 
+/// The name typed into the "Rename folder" alert and the folder it applies to.
+@MainActor
+@Observable
+final class FolderRenameDraft {
+    var name = ""
+    var isPresented = false
+    private(set) var path: String?
+
+    /// Starts renaming `folder`, pre-filling its current name.
+    func begin(_ folder: FileNode) {
+        path = folder.path
+        name = folder.name
+        isPresented = true
+    }
+
+    func cancel() {
+        path = nil
+        name = ""
+        isPresented = false
+    }
+
+    @discardableResult
+    func submit(into model: AppModel) -> Task<Void, Never>? {
+        let submittedName = name
+        let submittedPath = path
+        cancel()
+        guard let submittedPath else { return nil }
+        return Task { await model.renameFolder(path: submittedPath, newName: submittedName) }
+    }
+}
+
 struct FileExplorerView: View {
     @Environment(AppModel.self) private var model
     @State private var filter = ""
@@ -36,6 +67,15 @@ struct FileExplorerView: View {
     @State private var askingFolder = false
     @State private var rootDropTargeted = false
     @State private var treeRowsHeight: CGFloat = 0
+    @State private var renameDraft: FolderRenameDraft
+
+    init() {
+        _renameDraft = State(initialValue: FolderRenameDraft())
+    }
+
+    init(renameDraft: FolderRenameDraft) {
+        _renameDraft = State(initialValue: renameDraft)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -93,7 +133,7 @@ struct FileExplorerView: View {
 
                                 LazyVStack(alignment: .leading, spacing: 0) {
                                     ForEach(filtered(model.fileTree)) { node in
-                                        TreeRow(node: node, depth: 0)
+                                        TreeRow(node: node, depth: 0, onRenameFolder: renameDraft.begin)
                                     }
                                 }
                             }
@@ -142,6 +182,17 @@ struct FileExplorerView: View {
                 folderDraft.cancel()
             }
         }
+        .alert("Rename folder", isPresented: $renameDraft.isPresented) {
+            TextField("Name", text: $renameDraft.name)
+            Button("Rename") {
+                renameDraft.submit(into: model)
+            }
+            Button("Cancel", role: .cancel) {
+                renameDraft.cancel()
+            }
+        } message: {
+            Text("Enter a new name for this folder.")
+        }
     }
 
     private func filtered(_ nodes: [FileNode]) -> [FileNode] {
@@ -167,10 +218,11 @@ struct FileExplorerView: View {
     }
 }
 
-private struct TreeRow: View {
+struct TreeRow: View {
     @Environment(AppModel.self) private var model
     let node: FileNode
     let depth: Int
+    let onRenameFolder: (FileNode) -> Void
     @State private var open = true
     @State private var confirmingDelete = false
     @State private var renaming = false
@@ -211,9 +263,13 @@ private struct TreeRow: View {
                     onMove: { open = true }
                 )
             )
+            .contextMenu {
+                FolderContextMenu(path: node.path, open: $open)
+                Button("Rename") { onRenameFolder(node) }
+            }
             if open {
                 ForEach(node.children ?? []) { child in
-                    TreeRow(node: child, depth: depth + 1)
+                    TreeRow(node: child, depth: depth + 1, onRenameFolder: onRenameFolder)
                 }
             }
         } else {
@@ -515,6 +571,19 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     /// without erasing a newer drag that has since started.
     func endFileDrag() {
         if model?.draggedFilePath == path { model?.draggedFilePath = nil }
+    }
+}
+
+struct FolderContextMenu: View {
+    @Environment(AppModel.self) private var model
+    let path: String
+    @Binding var open: Bool
+
+    var body: some View {
+        Button("New File") {
+            open = true
+            Task { await model.newNote(inFolder: path) }
+        }
     }
 }
 

@@ -898,6 +898,345 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(draft.name, "")
     }
 
+    func testFolderRenameDraftPrefillsCurrentNameAndRenamesOnSubmit() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let model = modelWithVault(at: root)
+        await model.refreshVault()
+        let node = try XCTUnwrap(model.fileTree.first)
+        let draft = FolderRenameDraft()
+
+        draft.begin(node)
+        XCTAssertEqual(draft.name, "Drafts")
+        XCTAssertEqual(draft.path, node.path)
+        XCTAssertTrue(draft.isPresented)
+
+        draft.name = "Published"
+        let submission = try XCTUnwrap(draft.submit(into: model))
+        XCTAssertEqual(draft.name, "")
+        XCTAssertNil(draft.path)
+        XCTAssertFalse(draft.isPresented)
+        await submission.value
+
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.fileTree.map(\.name), ["Published"])
+        XCTAssertTrue(FileService.directoryExists(at: root.appendingPathComponent("Published").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+    }
+
+    func testFolderRenameDraftCancelDoesNotRename() async throws {
+        let root = try temporaryDirectory()
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Keep", isDirectory: true),
+            withIntermediateDirectories: false
+        )
+        let model = modelWithVault(at: root)
+        await model.refreshVault()
+        let draft = FolderRenameDraft()
+
+        draft.begin(try XCTUnwrap(model.fileTree.first))
+        draft.name = "Changed"
+        draft.cancel()
+
+        XCTAssertEqual(draft.name, "")
+        XCTAssertFalse(draft.isPresented)
+        XCTAssertNil(draft.submit(into: model))
+        XCTAssertTrue(FileService.directoryExists(at: root.appendingPathComponent("Keep").path))
+    }
+
+    func testFolderRowContextMenuStartsRenameWithAlertState() throws {
+        let root = try temporaryDirectory()
+        let folder = FileNode(name: "Drafts", path: root.appendingPathComponent("Drafts").path, isDirectory: true, children: [])
+        let draft = FolderRenameDraft()
+        let hostingView = NSHostingView(
+            rootView: TreeRow(node: folder, depth: 0, onRenameFolder: draft.begin)
+                .environment(modelWithVault(at: root))
+                .frame(width: 240, height: 30)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 240, height: 30)
+        let window = NSWindow(contentRect: hostingView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+
+        let point = NSPoint(x: 80, y: 15)
+        let event = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .rightMouseDown,
+            location: point,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let target = hostingView.hitTest(point) ?? hostingView
+        let menu = try XCTUnwrap(target.menu(for: event))
+        XCTAssertEqual(menu.items.map(\.title), ["New File", "Rename"])
+
+        let renameIndex = try XCTUnwrap(menu.items.firstIndex { $0.title == "Rename" })
+        menu.performActionForItem(at: renameIndex)
+        XCTAssertEqual(draft.path, folder.path)
+        XCTAssertEqual(draft.name, "Drafts")
+        XCTAssertTrue(draft.isPresented)
+    }
+
+    func testFileExplorerPresentsPrefilledRenameAlert() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let model = modelWithVault(at: root)
+        await model.refreshVault()
+        let draft = FolderRenameDraft()
+        let hostingView = NSHostingView(
+            rootView: FileExplorerView(renameDraft: draft)
+                .environment(model)
+                .frame(width: 300, height: 400)
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        let window = NSWindow(contentRect: hostingView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+
+        draft.begin(try XCTUnwrap(model.fileTree.first))
+        for _ in 0..<50 where window.attachedSheet == nil {
+            await drainMainQueue()
+            hostingView.layoutSubtreeIfNeeded()
+        }
+
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        let content = try XCTUnwrap(sheet.contentView)
+        XCTAssertTrue(containsTextField(value: "Drafts", in: content))
+        draft.name = "Published"
+        try XCTUnwrap(button(titled: "Rename", in: content)).performClick(nil)
+        let destination = root.appendingPathComponent("Published", isDirectory: true)
+        for _ in 0..<50 where model.fileTree.map(\.name) != ["Published"] {
+            await drainMainQueue()
+        }
+        XCTAssertTrue(FileService.directoryExists(at: destination.path))
+        XCTAssertFalse(FileService.directoryExists(at: folder.path))
+        XCTAssertEqual(model.fileTree.map(\.name), ["Published"])
+    }
+
+    func testRenameFolderRetargetsOpenTabsAndSavesPendingEdits() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Projects", isDirectory: true)
+        let nested = folder.appendingPathComponent("Nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let child = FileService.canonicalURL(folder.appendingPathComponent("Plan.md"))
+        let deep = FileService.canonicalURL(nested.appendingPathComponent("Deep.md"))
+        let outside = FileService.canonicalURL(root.appendingPathComponent("Projects Old.md"))
+        try "plan".write(to: child, atomically: true, encoding: .utf8)
+        try "deep".write(to: deep, atomically: true, encoding: .utf8)
+        try "outside".write(to: outside, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.openTab(path: child.path)
+        await model.openTab(path: deep.path)
+        await model.openTab(path: outside.path)
+        await model.setActiveTab(deep.path)
+        model.updateContent(deep.path, "edited")
+
+        let renamed = await model.renameFolder(path: folder.path, newName: "Archive")
+
+        XCTAssertTrue(renamed)
+        XCTAssertNil(model.errorMessage)
+        let archive = FileService.canonicalURL(root.appendingPathComponent("Archive", isDirectory: true))
+        let movedChild = archive.appendingPathComponent("Plan.md").path
+        let movedDeep = archive.appendingPathComponent("Nested/Deep.md").path
+        XCTAssertEqual(Set(model.tabs.map(\.path)), [movedChild, movedDeep, outside.path])
+        XCTAssertEqual(model.activeTabID, movedDeep)
+        XCTAssertEqual(model.activeTab?.content, "edited")
+        XCTAssertFalse(try XCTUnwrap(model.activeTab).dirty)
+        await model.awaitPendingSaves()
+        XCTAssertEqual(try FileService.read(URL(fileURLWithPath: movedDeep)), "edited")
+        XCTAssertEqual(try FileService.read(URL(fileURLWithPath: movedChild)), "plan")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertEqual(model.fileTree.map(\.name), ["Archive", "Projects Old.md"])
+        XCTAssertTrue(model.notes.contains { $0.path == movedDeep })
+    }
+
+    func testRenameFolderCollisionPublishesErrorAndKeepsTabs() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Source", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Taken", isDirectory: true),
+            withIntermediateDirectories: false
+        )
+        let child = FileService.canonicalURL(folder.appendingPathComponent("Child.md"))
+        try "child".write(to: child, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        await model.openTab(path: child.path)
+
+        let renamed = await model.renameFolder(path: folder.path, newName: "Taken")
+
+        XCTAssertFalse(renamed)
+        XCTAssertEqual(model.errorMessage, FileServiceError.nameTaken("Taken").localizedDescription)
+        XCTAssertEqual(model.tabs.map(\.path), [child.path])
+        XCTAssertEqual(try FileService.read(child), "child")
+    }
+
+    func testRenameFolderRejectsSkippedNameAndKeepsNotesIndexed() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Visible", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let note = folder.appendingPathComponent("Keep.md")
+        try "keep".write(to: note, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        await model.refreshVault()
+
+        for name in ["dist", "out", "node_modules"] {
+            let renamed = await model.renameFolder(path: folder.path, newName: name)
+            XCTAssertFalse(renamed)
+            XCTAssertEqual(model.errorMessage, FileServiceError.invalidRelativePath(name).localizedDescription)
+            XCTAssertEqual(model.fileTree.map(\.name), ["Visible"])
+            XCTAssertEqual(model.notes.map(\.path), [FileService.canonicalURL(note).path])
+            XCTAssertTrue(FileService.directoryExists(at: folder.path))
+        }
+    }
+
+    func testCaseOnlyFolderRenameRetargetsOpenTab() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("projects", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let note = folder.appendingPathComponent("Plan.md")
+        try "plan".write(to: note, atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        await model.openTab(path: note.path)
+
+        let renamed = await model.renameFolder(path: folder.path, newName: "Projects")
+        XCTAssertTrue(renamed)
+
+        let moved = FileService.canonicalURL(root.appendingPathComponent("Projects/Plan.md"))
+        XCTAssertEqual(model.activeTabID, moved.path)
+        XCTAssertEqual(model.tabs.map(\.path), [moved.path])
+        XCTAssertEqual(model.fileTree.map(\.name), ["Projects"])
+        XCTAssertEqual(model.notes.map(\.path), [moved.path])
+        XCTAssertEqual(try FileService.read(moved), "plan")
+    }
+
+    func testRenameFolderStopsWhenPendingTitleCannotCommit() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Source", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try "taken".write(to: root.appendingPathComponent("Taken.md"), atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        await model.newNote()
+        let tab = try XCTUnwrap(model.activeTab)
+        model.updateTitleDraft(for: tab.id, draft: "Taken")
+
+        let renamed = await model.renameFolder(path: folder.path, newName: "Moved")
+        XCTAssertFalse(renamed)
+
+        XCTAssertTrue(FileService.directoryExists(at: folder.path))
+        XCTAssertFalse(FileService.directoryExists(at: root.appendingPathComponent("Moved").path))
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+        XCTAssertEqual(model.titleEditingDraft, "Taken")
+    }
+
+    func testRenameFolderStopsWhenDirtyTabCannotBeSaved() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Source", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let fileUsedAsParent = folder.appendingPathComponent("Parent.md")
+        try "parent".write(to: fileUsedAsParent, atomically: true, encoding: .utf8)
+        let unwritablePath = fileUsedAsParent.appendingPathComponent("Child.md").path
+        let model = modelWithVault(at: root)
+        model.tabs = [NoteTab(path: unwritablePath, title: "Child", content: "new", originalContent: "old", isStandalone: false)]
+
+        let renamed = await model.renameFolder(path: folder.path, newName: "Moved")
+        XCTAssertFalse(renamed)
+
+        XCTAssertTrue(FileService.directoryExists(at: folder.path))
+        XCTAssertFalse(FileService.directoryExists(at: root.appendingPathComponent("Moved").path))
+        XCTAssertEqual(model.tabs.map(\.path), [unwritablePath])
+        XCTAssertTrue(try XCTUnwrap(model.tabs.first).dirty)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testRenameFolderSyncsTheRenamedVaultWithItsMessage() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Source", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        var settings = AppSettings.default()
+        settings.autoSync = true
+        var calls: [(String, String)] = []
+        var dependencies = AppModelDependencies.live
+        dependencies.authenticationDisabled = { false }
+        dependencies.syncGit = { path, message, _ in
+            calls.append((path, message))
+            return GitStatus(state: .idle)
+        }
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "first", path: root.path, remote: nil, branch: nil, isGitHub: false)
+
+        let renamed = await model.renameFolder(path: folder.path, newName: "Moved")
+        XCTAssertTrue(renamed)
+
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.0, root.path)
+        XCTAssertEqual(calls.first?.1, "Rename folder Source to Moved")
+    }
+
+    func testRenameFolderDoesNotSyncAnotherVaultAfterRefresh() async throws {
+        let firstRoot = try temporaryDirectory()
+        let secondRoot = try temporaryDirectory()
+        let folder = firstRoot.appendingPathComponent("Source", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let snapshotStarted = expectation(description: "Renamed vault snapshot started")
+        let gate = TitleSyncGate()
+        var settings = AppSettings.default()
+        settings.autoSync = true
+        var syncPaths: [String] = []
+        var dependencies = AppModelDependencies.live
+        dependencies.authenticationDisabled = { false }
+        dependencies.loadVaultSnapshot = { root in
+            snapshotStarted.fulfill()
+            await gate.wait()
+            return (FileService.tree(at: root), FileService.index(at: root))
+        }
+        dependencies.syncGit = { path, _, _ in
+            syncPaths.append(path)
+            return GitStatus(state: .idle)
+        }
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "first", path: firstRoot.path, remote: nil, branch: nil, isGitHub: false)
+
+        let rename = Task { await model.renameFolder(path: folder.path, newName: "Moved") }
+        await fulfillment(of: [snapshotStarted], timeout: 2)
+        model.vault = VaultInfo(name: "second", path: secondRoot.path, remote: nil, branch: nil, isGitHub: false)
+        gate.release()
+
+        let renamed = await rename.value
+        XCTAssertTrue(renamed)
+        XCTAssertTrue(syncPaths.isEmpty)
+        XCTAssertEqual(model.vault?.path, secondRoot.path)
+        XCTAssertTrue(FileService.directoryExists(at: firstRoot.appendingPathComponent("Moved").path))
+    }
+
+    func testRenameFolderIgnoresEmptyAndUnchangedNames() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Same", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let model = modelWithVault(at: root)
+
+        let emptyResult = await model.renameFolder(path: folder.path, newName: "  ")
+        let unchangedResult = await model.renameFolder(path: folder.path, newName: " Same ")
+
+        XCTAssertTrue(emptyResult)
+        XCTAssertTrue(unchangedResult)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertTrue(FileService.directoryExists(at: folder.path))
+    }
+
     func testCreateFolderReportsExistingName() async throws {
         let root = try temporaryDirectory()
         try FileManager.default.createDirectory(
@@ -933,6 +1272,89 @@ final class AppModelTests: XCTestCase {
             FileServiceError.invalidRelativePath("Nested/Folder").localizedDescription
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Nested").path))
+    }
+
+    func testNewNoteInFolderCreatesAndOpensUntitledNoteInsideThatFolder() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Projects/Active", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "taken".write(to: folder.appendingPathComponent("Untitled.md"), atomically: true, encoding: .utf8)
+        let model = modelWithVault(at: root)
+        model.editorMode = .preview
+
+        await model.newNote(inFolder: folder.path)
+
+        let created = FileService.canonicalURL(folder.appendingPathComponent("Untitled 1.md"))
+        let tab = try XCTUnwrap(model.activeTab)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(FileService.canonicalURL(URL(fileURLWithPath: tab.path)).path, created.path)
+        XCTAssertEqual(try FileService.read(created), "")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Untitled.md").path))
+        XCTAssertEqual(model.titleEditingTabID, tab.id)
+        XCTAssertEqual(model.titleEditingDraft, "Untitled 1")
+        XCTAssertEqual(model.editorMode, .source)
+        XCTAssertEqual(model.centerView, .editor)
+        let projects = try XCTUnwrap(model.fileTree.first { $0.name == "Projects" })
+        let active = try XCTUnwrap(projects.children?.first { $0.name == "Active" })
+        XCTAssertEqual(Set(active.children?.map(\.name) ?? []), ["Untitled 1.md", "Untitled.md"])
+
+        await model.submitTitleEditing(for: tab.id, draft: "Roadmap")
+
+        let renamed = FileService.canonicalURL(folder.appendingPathComponent("Roadmap.md"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamed.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: created.path))
+        XCTAssertEqual(
+            model.activeTab.map { FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path },
+            renamed.path
+        )
+    }
+
+    func testNewNoteInFolderWorksWhenVaultIsFilesystemRoot() async throws {
+        let folder = try temporaryDirectory()
+        var dependencies = disabledAuthDependencies()
+        // A real snapshot of / would scan the entire machine; the folder action only
+        // needs the selected path to verify this containment edge case.
+        dependencies.loadVaultSnapshot = { _ in ([], []) }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "root", path: "/", remote: nil, branch: nil, isGitHub: false)
+
+        await model.newNote(inFolder: folder.path)
+
+        let created = FileService.canonicalURL(folder.appendingPathComponent("Untitled.md"))
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.activeTab?.path, created.path)
+        XCTAssertEqual(model.titleEditingTabID, created.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: created.path))
+    }
+
+    func testNewNoteInFolderOutsideVaultReportsErrorWithoutCreatingNote() async throws {
+        let parent = try temporaryDirectory()
+        let root = parent.appendingPathComponent("vault", isDirectory: true)
+        let outside = parent.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let model = modelWithVault(at: root)
+
+        await model.newNote(inFolder: outside.path)
+
+        XCTAssertEqual(
+            model.errorMessage,
+            FileServiceError.outsideRoot(FileService.canonicalURL(outside).path).localizedDescription
+        )
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+
+    func testNewNoteInDeletedFolderReportsMissingFolder() async throws {
+        let root = try temporaryDirectory()
+        let model = modelWithVault(at: root)
+
+        await model.newNote(inFolder: root.appendingPathComponent("Gone").path)
+
+        XCTAssertEqual(model.errorMessage, FileServiceError.missingFolder("Gone").localizedDescription)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Gone").path))
     }
 
     func testBackToBackNewNotesKeepFocusTargetAndEditorModesScopedPerTab() async throws {
@@ -3324,6 +3746,19 @@ private func firstDescendant<View: NSView>(of type: View.Type, in root: NSView) 
     if let match = root as? View { return match }
     for subview in root.subviews {
         if let match = firstDescendant(of: type, in: subview) { return match }
+    }
+    return nil
+}
+
+private func containsTextField(value: String, in root: NSView) -> Bool {
+    if let field = root as? NSTextField, field.stringValue == value { return true }
+    return root.subviews.contains { containsTextField(value: value, in: $0) }
+}
+
+private func button(titled title: String, in root: NSView) -> NSButton? {
+    if let button = root as? NSButton, button.title == title { return button }
+    for subview in root.subviews {
+        if let button = button(titled: title, in: subview) { return button }
     }
     return nil
 }

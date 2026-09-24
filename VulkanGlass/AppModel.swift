@@ -965,11 +965,17 @@ final class AppModel {
         return await resolveUnsavedStandaloneChanges()
     }
 
-    func newNote(inGroup groupID: UUID? = nil) async {
+    /// Creates an "Untitled" note and opens it with its title ready to rename. In a vault the note
+    /// goes in `folderPath` when given (it must be the vault or a folder inside it), else the root.
+    func newNote(inFolder folderPath: String? = nil, inGroup groupID: UUID? = nil) async {
         guard await commitTitleEditing() else { return }
         if let vault {
             do {
-                let url = try FileService.createNote(in: URL(fileURLWithPath: vault.path), name: "Untitled")
+                let root = URL(fileURLWithPath: vault.path)
+                let directory = try folderPath.map {
+                    try FileService.containedFolder(URL(fileURLWithPath: $0), root: root)
+                } ?? root
+                let url = try FileService.createNote(in: directory, name: "Untitled")
                 await refreshVault()
                 await openTab(path: url.path)
                 if let groupID, tabGroupLayout.group(groupID) != nil {
@@ -1024,6 +1030,50 @@ final class AppModel {
             await refreshVault()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Renames a vault folder on disk and retargets every open tab for a note inside it.
+    @discardableResult
+    func renameFolder(path: String, newName: String) async -> Bool {
+        guard let vault else { return false }
+        let source = FileService.canonicalURL(URL(fileURLWithPath: path))
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != source.lastPathComponent else { return true }
+        guard await commitTitleEditing() else { return false }
+        guard self.vault?.path == vault.path else { return false }
+
+        let prefix = source.path + "/"
+        let canonicalTabPaths = tabs.map { ($0.path, FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path) }
+        let inside = canonicalTabPaths.filter { $0.1.hasPrefix(prefix) }
+        // Pending edits must land in the folder before it moves, or a late autosave would
+        // recreate the old path.
+        for (tabPath, _) in inside {
+            if let tab = tabs.first(where: { $0.path == tabPath }), tab.dirty, tab.savesAutomatically {
+                guard await save(id: tab.id, sync: false) else { return false }
+            }
+        }
+        guard self.vault?.path == vault.path else { return false }
+
+        do {
+            let dest = try FileService.renameFolder(
+                source,
+                to: newName,
+                root: URL(fileURLWithPath: vault.path)
+            )
+            let destPath = FileService.canonicalURL(dest).path
+            for (tabPath, canonical) in inside {
+                retargetOpenItems(from: tabPath, to: destPath + "/" + canonical.dropFirst(prefix.count))
+            }
+            await refreshVault(reconcileTabs: true)
+            guard self.vault?.path == vault.path else { return true }
+            if settings.autoSync {
+                await syncNow(message: "Rename folder \(source.lastPathComponent) to \(dest.lastPathComponent)")
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 
