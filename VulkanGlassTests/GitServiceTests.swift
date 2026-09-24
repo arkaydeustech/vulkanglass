@@ -39,6 +39,33 @@ final class GitServiceTests: XCTestCase {
         }
     }
 
+    func testGitLocatorPrefersDeveloperToolsGit() {
+        let path = GitExecutable.locate(
+            developerDirectory: { "/Library/Developer/CommandLineTools" },
+            isExecutable: { ["/Library/Developer/CommandLineTools/usr/bin/git", "/opt/homebrew/bin/git"].contains($0) }
+        )
+        XCTAssertEqual(path, "/usr/bin/git")
+    }
+
+    func testGitLocatorFallsBackToHomebrewWithoutDeveloperTools() {
+        XCTAssertEqual(
+            GitExecutable.locate(developerDirectory: { nil }, isExecutable: { $0 == "/opt/homebrew/bin/git" }),
+            "/opt/homebrew/bin/git"
+        )
+        // A developer directory that has no git (e.g. a deleted Xcode) must not select the shim.
+        XCTAssertEqual(
+            GitExecutable.locate(
+                developerDirectory: { "/Applications/Xcode.app/Contents/Developer" },
+                isExecutable: { $0 == "/usr/local/bin/git" }
+            ),
+            "/usr/local/bin/git"
+        )
+    }
+
+    func testGitLocatorReportsMissingGit() {
+        XCTAssertNil(GitExecutable.locate(developerDirectory: { nil }, isExecutable: { _ in false }))
+    }
+
     func testCredentialSecretIsSeparatedFromGitArguments() {
         let sentinel = "sentinel-secret"
         XCTAssertFalse(GitService.credentialArguments.joined().contains(sentinel))

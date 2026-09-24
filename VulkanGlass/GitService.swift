@@ -18,6 +18,7 @@ enum GitServiceError: LocalizedError, Equatable {
     case invalidDestination(String)
     case rebaseInProgress
     case unmergedPaths([String])
+    case gitNotInstalled
 
     var errorDescription: String? {
         switch self {
@@ -31,6 +32,8 @@ enum GitServiceError: LocalizedError, Equatable {
             return "This repository already has a rebase in progress. Resolve or abort it before syncing."
         case .unmergedPaths(let paths):
             return "Git could not reapply local changes cleanly. Resolve the conflicts before syncing: \(paths.joined(separator: ", "))."
+        case .gitNotInstalled:
+            return "Git is not installed. Install the Command Line Tools (xcode-select --install) or Homebrew Git (brew install git), then try again."
         }
     }
 }
@@ -78,8 +81,50 @@ enum Shell {
         return trimmed
     }
 
-    static func git(_ arguments: [String], cwd: URL) throws -> String {
-        try run("/usr/bin/git", arguments, cwd: cwd)
+    static func git(_ arguments: [String], cwd: URL? = nil, input: Data? = nil) throws -> String {
+        guard let git = GitExecutable.path() else { throw GitServiceError.gitNotInstalled }
+        return try run(git, arguments, cwd: cwd, input: input)
+    }
+}
+
+/// Finds a working `git` without running `/usr/bin/git`, which on a Mac without the developer
+/// tools only opens Apple's install prompt.
+enum GitExecutable {
+    static let systemPath = "/usr/bin/git"
+    static let homebrewPaths = ["/opt/homebrew/bin/git", "/usr/local/bin/git"]
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cachedPath: String?
+
+    /// Returns the git to run, or nil when neither the developer tools nor Homebrew provide one.
+    /// Only a hit is cached, so installing git while the app is open is picked up on the next call.
+    static func path() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cachedPath { return cachedPath }
+        cachedPath = locate()
+        return cachedPath
+    }
+
+    /// Prefers the developer tools' git behind `/usr/bin/git`, then Homebrew's.
+    static func locate(
+        developerDirectory: () -> String? = activeDeveloperDirectory,
+        isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+    ) -> String? {
+        if let developer = developerDirectory(),
+           isExecutable(URL(fileURLWithPath: developer).appendingPathComponent("usr/bin/git").path) {
+            return systemPath
+        }
+        return homebrewPaths.first(where: isExecutable)
+    }
+
+    /// The developer directory the `/usr/bin` shims forward to. `xcode-select` is not a shim, so
+    /// asking it never triggers the install prompt.
+    static func activeDeveloperDirectory() -> String? {
+        guard let path = try? Shell.run("/usr/bin/xcode-select", ["--print-path"]), !path.isEmpty else {
+            return nil
+        }
+        return path
     }
 }
 
@@ -167,10 +212,7 @@ enum GitService {
                 throw GitServiceError.destinationExists(target.path)
             }
             try prepareCredential(credential, remote: cloneURL)
-            _ = try Shell.run(
-                "/usr/bin/git",
-                credentialArguments(for: credential, remote: cloneURL) + ["clone", cloneURL, target.path]
-            )
+            _ = try Shell.git(credentialArguments(for: credential, remote: cloneURL) + ["clone", cloneURL, target.path])
             return target
         }
     }
@@ -297,11 +339,7 @@ enum GitService {
     private static func approveGitHubCredential(_ token: String?) throws {
         guard let token, !token.isEmpty else { return }
         let request = credentialPayload(token: token)
-        _ = try Shell.run(
-            "/usr/bin/git",
-            credentialArguments + ["credential", "approve"],
-            input: Data(request.utf8)
-        )
+        _ = try Shell.git(credentialArguments + ["credential", "approve"], input: Data(request.utf8))
     }
 
     private static func ensureIdentity(at url: URL) {

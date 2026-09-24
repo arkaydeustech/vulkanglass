@@ -50,6 +50,9 @@ struct AppModelDependencies {
     }
     /// Asks whether to save standalone files with unsaved edits before they are closed.
     var confirmUnsavedChanges: @MainActor ([String]) -> UnsavedChangesDecision = { _ in .cancel }
+    var gitExecutablePath: () async -> String? = {
+        await Task.detached { GitExecutable.path() }.value
+    }
     var syncGit: (String, String, GitCredential?) async throws -> GitStatus = { path, message, credential in
         try await Task.detached {
             try GitService.sync(path: path, message: message, credential: credential)
@@ -210,6 +213,7 @@ final class AppModel {
     var settingsOpen = false
     var cloneOpen = false
     var createOpen = false
+    var gitMissingWarningOpen = false
     var errorMessage: String?
     var busyMessage: String?
     var githubCLIStatus = GitHubCLIStatus()
@@ -281,14 +285,20 @@ final class AppModel {
         systemDarkMode = isDark
     }
 
-    /// Loads GitHub identity from GitHub CLI or a saved PAT, then opens `--vault`.
+    /// Checks for git, loads GitHub identity from GitHub CLI or a saved PAT, then opens `--vault`.
     func bootstrap() async {
+        await checkGitInstalled()
         await connectGitHub()
         let args = ProcessInfo.processInfo.arguments
         if let index = args.firstIndex(of: "--vault"), args.indices.contains(index + 1) {
             let path = args[index + 1]
             await openVault(path: path)
         }
+    }
+
+    /// Raises the install warning when neither the developer tools nor Homebrew provide git.
+    func checkGitInstalled() async {
+        gitMissingWarningOpen = await dependencies.gitExecutablePath() == nil
     }
 
     /// Resolves a GitHub token from `gh` (when enabled and available) or the Keychain PAT.

@@ -164,6 +164,26 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.authenticationDisabled)
     }
 
+    func testMissingGitRaisesInstallWarning() async {
+        var dependencies = disabledAuthDependencies()
+        dependencies.gitExecutablePath = { nil }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+
+        await model.bootstrap()
+
+        XCTAssertTrue(model.gitMissingWarningOpen)
+    }
+
+    func testInstalledGitDoesNotWarn() async {
+        var dependencies = disabledAuthDependencies()
+        dependencies.gitExecutablePath = { "/usr/bin/git" }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+
+        await model.checkGitInstalled()
+
+        XCTAssertFalse(model.gitMissingWarningOpen)
+    }
+
     func testDisabledAuthenticationRefusesToWriteAPersonalAccessToken() async {
         final class Calls {
             var saved: [String] = []
