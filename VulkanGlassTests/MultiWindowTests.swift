@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 @testable import VulkanGlass
 
 /// Each window has its own `AppModel`; windows share one `AppSession`.
@@ -57,6 +58,103 @@ final class MultiWindowTests: XCTestCase {
         XCTAssertEqual(model.tabs.map(\.title), ["Alpha"])
     }
 
+    func testFinderOpenUsesTheWindowOwningTheFileAndKeepsTheOtherVault() async throws {
+        let session = AppSession(settings: .default())
+        let first = try vault(named: "FinderFirst", note: "Alpha")
+        let second = try vault(named: "FinderSecond", note: "Beta")
+        let firstWindow = window(in: session)
+        let secondWindow = window(in: session)
+        await firstWindow.openVault(path: first.path)
+        await secondWindow.openVault(path: second.path)
+        session.activate(firstWindow)
+        let delegate = VulkanGlassAppDelegate()
+        delegate.session = session
+
+        delegate.application(.shared, open: [second.appendingPathComponent("Beta.md")])
+        await delegate.externalOpenTask?.value
+
+        XCTAssertEqual(firstWindow.vault?.path, first.path)
+        XCTAssertEqual(secondWindow.vault?.path, second.path)
+        XCTAssertEqual(secondWindow.activeTab?.title, "Beta")
+        XCTAssertTrue(session.activeModel === secondWindow)
+    }
+
+    func testStandaloneOpenAndRecentFocusTheExistingWindow() async throws {
+        let session = AppSession(settings: .default())
+        let file = try temporaryDirectory().appendingPathComponent("Shared.md")
+        try "old".write(to: file, atomically: true, encoding: .utf8)
+        let first = window(in: session)
+        let second = window(in: session)
+        await first.openStandalone(url: file)
+        await second.openStandalone(url: file)
+        XCTAssertTrue(second.tabs.isEmpty)
+        XCTAssertTrue(session.activeModel === first)
+
+        session.activate(second)
+        guard let recent = session.settings.recentFiles.first else {
+            return XCTFail("The standalone file should be in recents")
+        }
+        await second.openRecent(.file(recent))
+        XCTAssertTrue(second.tabs.isEmpty)
+        XCTAssertTrue(session.activeModel === first)
+    }
+
+    func testStandaloneOpenFocusesVaultWindowOwningTheFile() async throws {
+        let session = AppSession(settings: .default())
+        let root = try vault(named: "Owner", note: "Alpha")
+        let owner = window(in: session)
+        let other = window(in: session)
+        await owner.openVault(path: root.path)
+
+        await other.openStandalone(url: root.appendingPathComponent("Alpha.md"))
+
+        XCTAssertNil(other.vault)
+        XCTAssertTrue(other.tabs.isEmpty)
+        XCTAssertTrue(session.activeModel === owner)
+    }
+
+    func testSimultaneousVaultOpensReserveTheCanonicalPath() async throws {
+        let session = AppSession(settings: .default())
+        let root = try vault(named: "Racing", note: "Alpha")
+        var resumeInspect: CheckedContinuation<VaultInfo, Never>?
+        var dependencies = disabledAuthDependencies()
+        dependencies.inspectVault = { path in
+            await withCheckedContinuation { continuation in resumeInspect = continuation }
+        }
+        let first = AppModel(session: session, bootstrapOnLaunch: false, dependencies: dependencies)
+        let second = window(in: session)
+        session.register(first)
+        let firstOpen = Task { await first.openVault(path: root.path) }
+        await waitUntil { resumeInspect != nil }
+        XCTAssertNotNil(resumeInspect)
+
+        await second.openVault(path: root.appendingPathComponent("../Racing").path)
+        XCTAssertNil(second.vault)
+        XCTAssertTrue(session.activeModel === first)
+
+        resumeInspect?.resume(returning: GitService.inspect(path: root.path))
+        await firstOpen.value
+        XCTAssertEqual(first.vault?.path, root.path)
+        XCTAssertNil(second.vault)
+    }
+
+    func testSymlinkedVaultAndFilePathsFocusTheirOwners() async throws {
+        let session = AppSession(settings: .default())
+        let root = try vault(named: "Real", note: "Alpha")
+        let alias = root.deletingLastPathComponent().appendingPathComponent("Alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
+        let owner = window(in: session)
+        let other = window(in: session)
+        await owner.openVault(path: root.path)
+
+        await other.openVault(path: alias.path)
+        await other.openStandalone(url: alias.appendingPathComponent("Alpha.md"))
+
+        XCTAssertNil(other.vault)
+        XCTAssertTrue(other.tabs.isEmpty)
+        XCTAssertTrue(session.activeModel === owner)
+    }
+
     func testWindowsShareSettingsAndRecents() async throws {
         let session = AppSession(settings: .default())
         let root = try vault(named: "Recent", note: "Alpha")
@@ -111,6 +209,31 @@ final class MultiWindowTests: XCTestCase {
         XCTAssertEqual(gitChecks, 1)
         XCTAssertTrue(firstWindow.gitMissingWarningOpen)
         XCTAssertFalse(secondWindow.gitMissingWarningOpen)
+    }
+
+    func testLaunchVaultMovesToAWindowRegisteredDuringBootstrap() async throws {
+        let session = AppSession(settings: .default())
+        let root = try vault(named: "Launch", note: "Alpha")
+        session.pendingLaunchVaultPath = root.path
+        var resumeGitCheck: CheckedContinuation<String?, Never>?
+        var dependencies = disabledAuthDependencies()
+        dependencies.gitExecutablePath = {
+            await withCheckedContinuation { continuation in resumeGitCheck = continuation }
+        }
+        let first = AppModel(session: session, bootstrapOnLaunch: false, dependencies: dependencies)
+        session.register(first)
+        let bootstrap = Task { await first.bootstrap() }
+        await waitUntil { resumeGitCheck != nil }
+        XCTAssertFalse(session.hasBootstrapped)
+        session.unregister(first)
+        let second = window(in: session)
+
+        resumeGitCheck?.resume(returning: "/usr/bin/git")
+        await bootstrap.value
+
+        XCTAssertTrue(session.hasBootstrapped)
+        XCTAssertNil(first.vault)
+        XCTAssertEqual(second.vault?.path, root.path)
     }
 
     func testSessionTracksWindowsMostRecentlyFocusedFirst() {
@@ -175,6 +298,187 @@ final class MultiWindowTests: XCTestCase {
         XCTAssertEqual(try FileService.read(firstFile), "first")
         XCTAssertEqual(try FileService.read(secondFile), "second")
         XCTAssertEqual(delegate.applicationShouldTerminate(.shared), .terminateNow)
+    }
+
+    func testTerminationCommitsTitleEditingOnAnOtherwiseCleanWindow() async throws {
+        let session = AppSession(settings: .default())
+        let root = try vault(named: "RenameOnQuit", note: "Alpha")
+        let model = window(in: session)
+        await model.openVault(path: root.path)
+        guard let tabID = model.activeTabID else { return XCTFail("Expected a vault tab") }
+        model.beginEditingTitle(for: tabID)
+        model.updateTitleDraft(for: tabID, draft: "Beta")
+        XCTAssertTrue(model.needsPreparationBeforeClosing)
+        XCTAssertFalse(model.tabs.contains { $0.dirty })
+        let delegate = VulkanGlassAppDelegate()
+        delegate.session = session
+        let accepted = expectation(description: "quit after rename")
+        delegate.replyToTermination = { _, ready in
+            XCTAssertTrue(ready)
+            accepted.fulfill()
+        }
+
+        XCTAssertEqual(delegate.applicationShouldTerminate(.shared), .terminateLater)
+        await fulfillment(of: [accepted], timeout: 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("Beta.md").path))
+    }
+
+    func testTerminationWaitsForAPendingMoveWithoutDirtyTabs() async throws {
+        let session = AppSession(settings: .default())
+        let root = try vault(named: "MoveOnQuit", note: "Alpha")
+        let folder = root.appendingPathComponent("Folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var resumeMove: CheckedContinuation<URL, Error>?
+        var dependencies = disabledAuthDependencies()
+        dependencies.moveFile = { _, _, _ in
+            try await withCheckedThrowingContinuation { continuation in resumeMove = continuation }
+        }
+        let model = AppModel(session: session, bootstrapOnLaunch: false, dependencies: dependencies)
+        session.register(model)
+        await model.openVault(path: root.path)
+        let source = root.appendingPathComponent("Alpha.md")
+        let move = Task { await model.moveNote(path: source.path, toFolder: folder.path) }
+        await waitUntil { resumeMove != nil }
+        XCTAssertTrue(model.needsPreparationBeforeClosing)
+        XCTAssertFalse(model.tabs.contains { $0.dirty })
+        let delegate = VulkanGlassAppDelegate()
+        delegate.session = session
+        let accepted = expectation(description: "quit after move")
+        delegate.replyToTermination = { _, ready in
+            XCTAssertTrue(ready)
+            accepted.fulfill()
+        }
+        XCTAssertEqual(delegate.applicationShouldTerminate(.shared), .terminateLater)
+        let moved = try FileService.move(source, into: folder, root: root)
+        resumeMove?.resume(returning: moved)
+        await move.value
+        await fulfillment(of: [accepted], timeout: 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: moved.path))
+    }
+
+    func testFinderOpenRaisesAnOrderedOutReceivingWindow() async throws {
+        let session = AppSession(settings: .default())
+        let file = try temporaryDirectory().appendingPathComponent("Visible.md")
+        try "visible".write(to: file, atomically: true, encoding: .utf8)
+        let model = window(in: session)
+        let host = testWindow()
+        defer { host.orderOut(nil) }
+        session.attach(host, to: model)
+        host.orderOut(nil)
+        XCTAssertFalse(host.isVisible)
+        let delegate = VulkanGlassAppDelegate()
+        delegate.session = session
+
+        delegate.application(.shared, open: [file])
+        await delegate.externalOpenTask?.value
+
+        XCTAssertTrue(host.isVisible)
+        XCTAssertEqual(model.activeTab?.title, "Visible")
+    }
+
+    func testWindowBridgeAttachesAndRestoresAHostedWindowDelegate() async {
+        let session = AppSession(settings: .default())
+        let model = window(in: session)
+        let host = testWindow()
+        let original = RecordingWindowDelegate()
+        host.delegate = original
+        let content = NSHostingView(rootView: AnyView(
+            Color.clear.background(WindowSessionBridge(session: session, model: model))
+        ))
+        host.contentView = content
+        defer { host.orderOut(nil) }
+        await waitUntil { host.delegate is WindowCloseGuard }
+        XCTAssertTrue(session.window(for: model) === host)
+        guard let guardDelegate = host.delegate as? WindowCloseGuard else {
+            return XCTFail("Expected the close guard on a hosted window")
+        }
+        XCTAssertTrue(guardDelegate.original === original)
+
+        let replacement = RecordingWindowDelegate()
+        host.delegate = replacement
+        func bridgeView(in view: NSView?) -> WindowSessionView? {
+            guard let view else { return nil }
+            if let bridge = view as? WindowSessionView { return bridge }
+            return view.subviews.lazy.compactMap { bridgeView(in: $0) }.first
+        }
+        bridgeView(in: host.contentView)?.installCloseGuard()
+        XCTAssertTrue((host.delegate as? WindowCloseGuard)?.original === replacement)
+
+        content.rootView = AnyView(Color.clear)
+        await waitUntil { host.delegate === replacement }
+        XCTAssertTrue(host.delegate === replacement)
+    }
+
+    func testHostedAppWindowsCreateIndependentModels() async {
+        let session = AppSession(settings: .default())
+        session.hasBootstrapped = true
+        let delegate = VulkanGlassAppDelegate()
+        delegate.session = session
+        let updater = AppUpdater(disabled: true)
+        let firstHost = testWindow()
+        let secondHost = testWindow()
+        defer {
+            firstHost.close()
+            secondHost.close()
+        }
+        firstHost.contentView = NSHostingView(rootView: AppWindow(
+            session: session, updater: updater, appDelegate: delegate
+        ))
+        secondHost.contentView = NSHostingView(rootView: AppWindow(
+            session: session, updater: updater, appDelegate: delegate
+        ))
+        await waitUntil { session.models.count == 2 }
+
+        XCTAssertEqual(AppWindow.sceneID, "main")
+        XCTAssertEqual(session.models.count, 2)
+        XCTAssertFalse(session.models[0] === session.models[1])
+        XCTAssertTrue(session.window(for: session.models[0]) != nil)
+        XCTAssertTrue(session.window(for: session.models[1]) != nil)
+        guard let firstModel = session.models.first(where: { session.window(for: $0) === firstHost }) else {
+            return XCTFail("Expected the first hosted model")
+        }
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: firstHost)
+        XCTAssertTrue(session.activeModel === firstModel)
+    }
+
+    func testNewWindowAndNewNoteMenuShortcuts() {
+        func menuItem(_ title: String, in menu: NSMenu?) -> NSMenuItem? {
+            guard let menu else { return nil }
+            for item in menu.items {
+                if item.title == title { return item }
+                if let nested = menuItem(title, in: item.submenu) { return nested }
+            }
+            return nil
+        }
+
+        let newWindow = menuItem("New Window", in: NSApp.mainMenu)
+        let newNote = menuItem("New note", in: NSApp.mainMenu)
+        XCTAssertEqual(newWindow?.keyEquivalent, "n")
+        XCTAssertEqual(newNote?.keyEquivalent, "t")
+        XCTAssertEqual(newWindow?.keyEquivalentModifierMask, .command)
+        XCTAssertEqual(newNote?.keyEquivalentModifierMask, .command)
+    }
+
+    func testCloseGuardRetainsTheOriginalDelegateUntilRestored() {
+        let model = window(in: AppSession(settings: .default()))
+        let host = testWindow()
+        defer { host.orderOut(nil) }
+        var original: RecordingWindowDelegate? = RecordingWindowDelegate()
+        weak var retained = original
+        let guardDelegate = WindowCloseGuard(original: original, model: model)
+        host.delegate = guardDelegate
+        original = nil
+
+        XCTAssertNotNil(retained)
+        host.close()
+        XCTAssertEqual(retained?.willCloseCalls, 1)
+    }
+
+    func testAppLaunchDisablesAutomaticWindowTabbing() {
+        NSWindow.allowsAutomaticWindowTabbing = true
+        let delegate = VulkanGlassAppDelegate()
+        delegate.applicationWillFinishLaunching(Notification(name: NSApplication.willFinishLaunchingNotification))
+        XCTAssertFalse(NSWindow.allowsAutomaticWindowTabbing)
     }
 
     func testClosingAWindowWritesItsPendingAutosaves() async throws {

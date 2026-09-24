@@ -53,6 +53,9 @@ struct AppModelDependencies {
     var gitExecutablePath: () async -> String? = {
         await Task.detached { GitExecutable.path() }.value
     }
+    var inspectVault: (String) async -> VaultInfo = { path in
+        await Task.detached { GitService.inspect(path: path) }.value
+    }
     var createGithubRepo: (String, Bool, String) async throws -> GitHubRepo = { name, isPrivate, token in
         try await GitHubService.createRepo(name: name, isPrivate: isPrivate, token: token)
     }
@@ -332,15 +335,10 @@ final class AppModel {
     /// Checks for git, loads GitHub identity from GitHub CLI or a saved PAT, then opens `--vault`.
     /// Only the first window of a session does this; later windows share its results.
     func bootstrap() async {
-        guard !session.hasBootstrapped else { return }
-        session.hasBootstrapped = true
+        guard session.beginBootstrap() else { return }
         await checkGitInstalled()
         await connectGitHub()
-        let args = ProcessInfo.processInfo.arguments
-        if let index = args.firstIndex(of: "--vault"), args.indices.contains(index + 1) {
-            let path = args[index + 1]
-            await openVault(path: path)
-        }
+        await session.finishBootstrap()
     }
 
     /// Raises the install warning when neither the developer tools nor Homebrew provide git.
@@ -394,6 +392,8 @@ final class AppModel {
     /// Inspects and opens a vault folder. Missing paths toast and return to welcome.
     func openVault(path: String) async {
         guard !focusWindowShowingVault(path: path) else { return }
+        let reserved = session.reserveVault(path, for: self)
+        defer { if reserved { session.releaseVault(path, for: self) } }
         busyMessage = "Inspecting vault…"
         guard FileService.directoryExists(at: path) else {
             guard await commitTitleEditing() else {
@@ -403,7 +403,7 @@ final class AppModel {
             await rejectMissingVault(path: path, name: URL(fileURLWithPath: path).lastPathComponent)
             return
         }
-        let info = await Task.detached { GitService.inspect(path: path) }.value
+        let info = await dependencies.inspectVault(path)
         await openVault(info)
     }
 
@@ -413,6 +413,8 @@ final class AppModel {
             busyMessage = nil
             return
         }
+        let reserved = session.reserveVault(info.path, for: self)
+        defer { if reserved { session.releaseVault(info.path, for: self) } }
         guard FileService.directoryExists(at: info.path) else {
             guard await commitTitleEditing() else { return }
             await rejectMissingVault(path: info.path, name: info.name)
@@ -546,6 +548,11 @@ final class AppModel {
             files.contains { isInside(vault: current, path: $0.path) }
         } ?? false
         for file in files {
+            if let owner = session.model(owningFile: file.path, excluding: self) {
+                session.focus(owner)
+                await owner.openExternalFiles([file])
+                continue
+            }
             if let vault, isInside(vault: vault, path: file.path) {
                 await openTab(path: file.path)
             } else if keepVault {
@@ -589,7 +596,8 @@ final class AppModel {
                 return
             }
             if let existing = tabs.first(where: {
-                $0.isStandalone && FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path == file.path
+                $0.isStandalone && FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path
+                    == FileService.canonicalURL(URL(fileURLWithPath: file.path)).path
             }) {
                 await openTab(path: existing.path)
                 return
@@ -622,8 +630,18 @@ final class AppModel {
         content: String? = nil,
         focusEditor: Bool = true
     ) async {
+        if standalone, let owner = session.model(owningFile: path, excluding: self) {
+            session.focus(owner)
+            await owner.openExternalFiles([URL(fileURLWithPath: path)])
+            return
+        }
         if activeTabID != path {
             guard await commitTitleEditing() else { return }
+        }
+        if standalone, let owner = session.model(owningFile: path, excluding: self) {
+            session.focus(owner)
+            await owner.openExternalFiles([URL(fileURLWithPath: path)])
+            return
         }
         if let existing = tabs.first(where: { $0.path == path }) {
             editorFocusRequest = nil
@@ -1677,6 +1695,12 @@ final class AppModel {
     }
 
     func openStandalone(url: URL) async {
+        let canonical = FileService.canonicalURL(url)
+        if let owner = session.model(owningFile: canonical.path, excluding: self) {
+            session.focus(owner)
+            await owner.openExternalFiles([canonical])
+            return
+        }
         do {
             // Reject unreadable replacements before changing or flushing the current workspace.
             _ = try FileService.read(url)
@@ -1685,6 +1709,11 @@ final class AppModel {
             guard await flushDirtyTabs() else { return }
             // A Save decision may have changed this same file since the readability check.
             let text = try FileService.read(url)
+            if let owner = session.model(owningFile: canonical.path, excluding: self) {
+                session.focus(owner)
+                await owner.openExternalFiles([canonical])
+                return
+            }
             saveTasks.values.forEach { $0.cancel() }
             saveTasks = [:]
             syncTask?.cancel()

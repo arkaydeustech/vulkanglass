@@ -17,14 +17,20 @@ final class AppSession {
     var githubAuthSource: GitHubAuthSource?
     var activeToken: String?
     var githubConnectionGeneration = 0
-    /// Set when the first window runs the launch-only work (git check, GitHub sign-in, `--vault`),
-    /// so windows opened later do not repeat it.
+    /// Set after launch-only work finishes, so later windows do not repeat it.
     var hasBootstrapped = false
+    private var bootstrapInProgress = false
+    var pendingLaunchVaultPath: String?
 
     @ObservationIgnored private var windows: [WindowEntry] = []
+    @ObservationIgnored private var openingVaults: [String: WeakModel] = [:]
 
     init(settings: AppSettings? = nil) {
         self.settings = settings ?? SettingsStore.load()
+        let args = ProcessInfo.processInfo.arguments
+        if let index = args.firstIndex(of: "--vault"), args.indices.contains(index + 1) {
+            pendingLaunchVaultPath = args[index + 1]
+        }
     }
 
     /// Open windows' models, most recently focused first.
@@ -45,6 +51,9 @@ final class AppSession {
         } else {
             windows.insert(WindowEntry(model: model, window: window), at: 0)
         }
+        if hasBootstrapped, pendingLaunchVaultPath != nil {
+            Task { await openPendingLaunchVault() }
+        }
     }
 
     /// Records the window hosting a registered model, so another window can bring it forward.
@@ -58,6 +67,7 @@ final class AppSession {
 
     func unregister(_ model: AppModel) {
         windows.removeAll { $0.model == nil || $0.model === model }
+        openingVaults = openingVaults.filter { $0.value.model != nil && $0.value.model !== model }
     }
 
     /// Moves a model to the front when its window becomes key.
@@ -72,11 +82,66 @@ final class AppSession {
 
     /// Another window that already has the vault at `path` open, if any.
     func model(showingVault path: String, excluding model: AppModel) -> AppModel? {
-        let target = FileService.canonicalURL(URL(fileURLWithPath: path)).path
+        let target = canonicalPath(path)
+        if let opening = openingVaults[target]?.model, opening !== model { return opening }
         return models.first { other in
             guard other !== model, let vault = other.vault else { return false }
-            return FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path == target
+            return canonicalPath(vault.path) == target
         }
+    }
+
+    /// The existing window that owns a file, including a vault note not yet open as a tab.
+    func model(owningFile path: String, excluding model: AppModel) -> AppModel? {
+        let target = canonicalPath(path)
+        let others = models.filter { $0 !== model }
+        if let vaultOwner = others.first(where: {
+            guard let vault = $0.vault else { return false }
+            return target.hasPrefix(canonicalPath(vault.path) + "/")
+        }) { return vaultOwner }
+        return others.first { other in
+            other.tabs.contains { canonicalPath($0.path) == target }
+        }
+    }
+
+    /// Reserves a vault before an async inspect or workspace transition can suspend.
+    func reserveVault(_ path: String, for model: AppModel) -> Bool {
+        let target = canonicalPath(path)
+        guard openingVaults[target]?.model == nil else { return false }
+        openingVaults[target] = WeakModel(model)
+        return true
+    }
+
+    func releaseVault(_ path: String, for model: AppModel) {
+        let target = canonicalPath(path)
+        if openingVaults[target]?.model === model { openingVaults.removeValue(forKey: target) }
+    }
+
+    func beginBootstrap() -> Bool {
+        guard !hasBootstrapped, !bootstrapInProgress else { return false }
+        bootstrapInProgress = true
+        return true
+    }
+
+    func finishBootstrap() async {
+        await openPendingLaunchVault()
+        bootstrapInProgress = false
+        hasBootstrapped = true
+    }
+
+    private func openPendingLaunchVault() async {
+        guard let path = pendingLaunchVaultPath, let model = activeModel else { return }
+        pendingLaunchVaultPath = nil
+        await model.openVault(path: path)
+        // The first window can close while GitHub or vault inspection is suspended.
+        if !models.contains(where: { $0 === model }) {
+            if model.vault != nil { await model.closeVault() }
+            pendingLaunchVaultPath = path
+            if activeModel != nil { await openPendingLaunchVault() }
+        }
+    }
+
+    private func canonicalPath(_ path: String) -> String {
+        FileService.canonicalURL(URL(fileURLWithPath: path)).path
     }
 
     /// Brings the window showing `model` to the front.
@@ -100,6 +165,11 @@ final class AppSession {
             self.model = model
             self.window = window
         }
+    }
+
+    private final class WeakModel {
+        weak var model: AppModel?
+        init(_ model: AppModel) { self.model = model }
     }
 }
 
@@ -136,6 +206,7 @@ struct WindowSessionBridge: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: WindowSessionView, coordinator: ()) {
         nsView.stopObserving()
+        nsView.restoreDelegate()
     }
 }
 
@@ -144,9 +215,11 @@ final class WindowSessionView: NSView {
     weak var model: AppModel?
     private var keyObserver: NSObjectProtocol?
     private var closeGuard: WindowCloseGuard?
+    private weak var guardedWindow: NSWindow?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if guardedWindow !== window { restoreDelegate() }
         stopObserving()
         guard let window else { return }
         if let session, let model { session.attach(window, to: model) }
@@ -172,8 +245,15 @@ final class WindowSessionView: NSView {
             closeGuard.model = model
             return
         }
+        if let existing = window.delegate as? WindowCloseGuard {
+            existing.model = model
+            closeGuard = existing
+            guardedWindow = window
+            return
+        }
         let closeGuard = WindowCloseGuard(original: window.delegate, model: model)
         self.closeGuard = closeGuard
+        guardedWindow = window
         window.delegate = closeGuard
     }
 
@@ -181,12 +261,20 @@ final class WindowSessionView: NSView {
         if let keyObserver { NotificationCenter.default.removeObserver(keyObserver) }
         keyObserver = nil
     }
+
+    func restoreDelegate() {
+        if let guardedWindow, let closeGuard, guardedWindow.delegate === closeGuard {
+            guardedWindow.delegate = closeGuard.original
+        }
+        closeGuard = nil
+        guardedWindow = nil
+    }
 }
 
 /// A window delegate that asks the window's model before it closes and forwards everything else
 /// to the delegate SwiftUI installed.
 final class WindowCloseGuard: NSObject, NSWindowDelegate {
-    private(set) weak var original: NSWindowDelegate?
+    private(set) var original: NSWindowDelegate?
     weak var model: AppModel?
     private var closing = false
 

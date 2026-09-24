@@ -27,7 +27,7 @@ final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         pendingFileURLs.append(contentsOf: urls)
-        if model == nil { openMainWindow?() }
+        if let model { session.focus(model) } else { openMainWindow?() }
         openPendingFiles()
     }
 
@@ -45,19 +45,20 @@ final class VulkanGlassAppDelegate: NSObject, NSApplicationDelegate {
         let previous = externalOpenTask
         externalOpenTask = Task { @MainActor in
             await previous?.value
+            session.focus(model)
             await model.openExternalFiles(urls)
         }
     }
 
     /// Settles every window's unsaved work one window at a time; any cancellation stops the quit.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let dirty = session.models.filter { model in model.tabs.contains { $0.dirty } }
-        guard !dirty.isEmpty else { return .terminateNow }
+        let pending = session.models.filter(\.needsPreparationBeforeClosing)
+        guard !pending.isEmpty else { return .terminateNow }
         Task { @MainActor in
             var ready = true
-            for model in dirty {
+            for model in pending {
                 session.focus(model)
-                guard await model.prepareToTerminate() else {
+                guard await model.prepareToCloseWindow() else {
                     ready = false
                     break
                 }
