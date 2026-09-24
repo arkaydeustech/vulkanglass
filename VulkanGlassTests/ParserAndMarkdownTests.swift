@@ -505,6 +505,34 @@ final class SourceTextFormattingTests: XCTestCase {
 }
 
 final class MarkdownBlockTests: XCTestCase {
+    func testIndentedBackticksInsideFenceRemainCodeContent() {
+        let source = "```markdown\n1. Step\n  ```bash\n    ```bash\n    cmd\n    ```\n\t```\n```\n\nAfter"
+        XCTAssertEqual(
+            MDBlock.parse(source),
+            [
+                .code(language: "markdown", code: "1. Step\n  ```bash\n    ```bash\n    cmd\n    ```\n\t```"),
+                .lines(["After"]),
+            ]
+        )
+        XCTAssertEqual(MDBlock.parse("    ```swift\ncode\n    ```"), [
+            .lines(["    ```swift", "code", "    ```"])
+        ])
+        XCTAssertEqual(MDBlock.parse("\t```swift\ncode\n\t```"), [
+            .lines(["\t```swift", "code", "\t```"])
+        ])
+        XCTAssertEqual(MDBlock.parse("   ```swift\nlet x = 1\n       ```\n      ```\nAfter"), [
+            .code(language: "swift", code: "let x = 1\n    ```"),
+            .lines(["After"]),
+        ])
+    }
+
+    func testFenceLanguageUsesFirstInfoStringWord() {
+        XCTAssertEqual(
+            MDBlock.parse("```js title=\"hello\" hl_lines=1\nconst x = 1\n```"),
+            [.code(language: "js", code: "const x = 1")]
+        )
+    }
+
     func testIndentedFencesAreCodeBlocksWithTheirIndentRemoved() {
         XCTAssertEqual(
             MDBlock.parse("1. **Clone the repo**\n\n   ```bash\n   git clone repo\n     cd repo\n   ```\n\nAfter"),
@@ -1274,6 +1302,31 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertTrue(decorations.codeBlocks[0].showBadge)
         let fence = (text as NSString).range(of: "   ```bash")
         XCTAssertTrue(isHidden(storage, at: fence.location + 3), "The indented fence is hidden like any other")
+    }
+
+    func testIndentedFenceLikeContentDoesNotSplitLiveCodeBlock() {
+        let text = "```markdown\n1. Step\n  ```bash\n    ```bash\n    cmd\n    ```\n\t```\n```\n\nAfter"
+        let blocks = LivePreview.tokens(in: text).compactMap { token -> (String, String, Int)? in
+            guard case .codeBlock(let language, let content) = token.kind else { return nil }
+            return (language, (text as NSString).substring(with: content), token.delimiterRanges.count)
+        }
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.0, "markdown")
+        XCTAssertEqual(blocks.first?.1, "1. Step\n  ```bash\n    ```bash\n    cmd\n    ```\n\t```\n")
+        XCTAssertEqual(blocks.first?.2, 2)
+        XCTAssertTrue(LivePreview.tokens(in: "    ```swift\ncode\n    ```").allSatisfy {
+            if case .codeBlock = $0.kind { return false }
+            return true
+        })
+        XCTAssertTrue(LivePreview.tokens(in: "\t```swift\ncode\n\t```").allSatisfy {
+            if case .codeBlock = $0.kind { return false }
+            return true
+        })
+        let longer = LivePreview.tokens(in: "````swift\n```\nvalue\n````")
+        XCTAssertEqual(longer.filter {
+            if case .codeBlock = $0.kind { return true }
+            return false
+        }.count, 1)
     }
 
     func testCodeBlockHighlightsAndHidesFencesUntilEdited() {
@@ -2608,6 +2661,22 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertFalse(textView.liveDecorations.bars.isEmpty)
     }
 
+    func testLiveCodeBadgeResolvesNameAndClipsInsideBlock() throws {
+        let rect = NSRect(x: 20, y: 30, width: 120, height: 80)
+        let badge = try XCTUnwrap(SourceTextView.codeBadge(language: "js", in: rect))
+        XCTAssertEqual(badge.label, "JavaScript")
+        XCTAssertEqual(badge.origin.y, rect.minY + 6)
+        XCTAssertEqual(badge.clipRect, NSRect(x: 28, y: 30, width: 104, height: 80))
+        let width = (badge.label as NSString).size(withAttributes: [.font: CodeHighlight.labelFont]).width
+        XCTAssertEqual(badge.origin.x + width, badge.clipRect.maxX - 4, accuracy: 0.01)
+        XCTAssertNil(SourceTextView.codeBadge(language: "", in: rect))
+
+        let narrow = try XCTUnwrap(SourceTextView.codeBadge(language: "a-very-long-language-name", in: NSRect(x: 0, y: 0, width: 30, height: 30)))
+        XCTAssertLessThan(narrow.origin.x, narrow.clipRect.minX)
+        XCTAssertEqual(narrow.clipRect.maxX, 22)
+        XCTAssertNil(SourceTextView.codeBadge(language: "js", in: NSRect(x: 0, y: 0, width: 16, height: 30)))
+    }
+
     func testHoverColumnControlIsAccessibleAndMutatesThroughTheEditorDelegate() throws {
         let table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
         var changes: [String] = []
@@ -3239,6 +3308,31 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertEqual(after?.textBlocks.isEmpty ?? true, true, "Prose after the block is outside the box")
     }
 
+    func testReadingCodeBlockUsesLanguageWordForBadgeAndHighlighting() throws {
+        let source = "```js title=\"hello\"\nconst x = 1\n```"
+        let blocks = MDBlock.parse(source)
+        let attributed = ReadingAttributedDocument.make(
+            blocks: blocks,
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        let style = try XCTUnwrap(
+            attributed.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        XCTAssertEqual((style.textBlocks.first as? ReadingCodeBlock)?.label, "JavaScript")
+        XCTAssertEqual(
+            attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
+            CodeHighlight.color(for: .keyword, dark: false)
+        )
+        let live = try XCTUnwrap(LivePreview.tokens(in: source).first)
+        guard case .codeBlock(let language, _) = live.kind else {
+            return XCTFail("expected live code block")
+        }
+        XCTAssertEqual(language, "js")
+        XCTAssertEqual(CodeHighlight.displayName(for: language), "JavaScript")
+    }
+
     func testReadingCodeBlockWithoutLanguageHasNoLabel() throws {
         let attributed = ReadingAttributedDocument.make(
             blocks: [.code(language: "", code: "plain")],
@@ -3768,6 +3862,30 @@ final class EditorLifecycleTests: XCTestCase {
         XCTAssertTrue(NSApp.sendAction(selectAllItem.action!, to: selectAllItem.target, from: selectAllItem))
         XCTAssertEqual(reading.selectedRange(), NSRange(location: 0, length: reading.string.utf16.count))
         XCTAssertNotEqual(search.currentEditor()?.selectedRange, reading.selectedRange())
+    }
+
+    func testReadingCodeCopyPastesAsCodeTextWithoutRichTable() {
+        let code = "let a = 1\nprint(a)"
+        let attributed = ReadingAttributedDocument.make(
+            blocks: [.code(language: "swift", code: code)],
+            noteTitles: [],
+            baseURL: nil,
+            dark: false
+        )
+        let reading = ReadingNSTextView()
+        reading.textStorage?.setAttributedString(attributed)
+        reading.setSelectedRange(NSRange(location: 0, length: (code as NSString).length))
+        let pasteboard = NSPasteboard(name: .init("VulkanGlass-reading-code-copy-test"))
+        defer { pasteboard.clearContents() }
+        XCTAssertTrue(reading.writeSelection(to: pasteboard, types: [.string, .rtf, .html]))
+        XCTAssertNil(pasteboard.data(forType: .rtf))
+        XCTAssertNil(pasteboard.data(forType: .html))
+        XCTAssertEqual(pasteboard.string(forType: .string), code)
+
+        let editor = SourceTextView()
+        XCTAssertTrue(editor.pasteMarkdown(from: pasteboard))
+        XCTAssertEqual(editor.string, code)
+        XCTAssertFalse(editor.string.contains("<table"))
     }
 
     func testReadingWikiLinkRemainsActivatableAfterOpeningContextMenu() throws {

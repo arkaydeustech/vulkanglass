@@ -381,6 +381,13 @@ struct UnifiedReadingTextView: NSViewRepresentable {
 }
 
 final class ReadingNSTextView: NSTextView {
+    override func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+        let range = selectedRange()
+        guard range.location != NSNotFound else { return false }
+        pboard.declareTypes([.string], owner: nil)
+        return pboard.setString((string as NSString).substring(with: range), forType: .string)
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         window?.makeFirstResponder(self)
         let menu = NSMenu()
@@ -1091,14 +1098,18 @@ enum MDBlock: Equatable, Sendable {
                 i += 1
                 while i < raw.count {
                     buffer.append(raw[i])
-                    if isCodeFenceClosing(raw[i], minimumLength: openingFence.length) {
+                    if isCodeFenceClosing(
+                        raw[i],
+                        minimumLength: openingFence.length,
+                        openingIndent: openingFence.indent
+                    ) {
                         closed = true
                         i += 1
                         break
                     }
                     i += 1
                 }
-                let language = openingFence.info
+                let language = openingFence.info.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
                 let content = closed ? buffer.dropFirst().dropLast() : buffer.dropFirst()[...]
                 let code = content
                     .map { dropIndent(upTo: openingFence.indent, from: $0) }
@@ -1331,15 +1342,22 @@ enum MDBlock: Equatable, Sendable {
     /// Fences may be indented, e.g. under a list item; `indent` counts the whitespace
     /// before the backticks, which is stripped from the code lines that follow.
     private static func codeFenceOpening(_ line: String) -> (length: Int, info: String, indent: Int)? {
-        let indent = line.prefix { $0 == " " || $0 == "\t" }.count
+        let indent = line.prefix { $0 == " " }.count
+        guard indent <= 3 else { return nil }
         let rest = line.dropFirst(indent)
         let length = rest.prefix { $0 == "`" }.count
-        guard length >= 3 else { return nil }
+        guard length >= 3, !rest.dropFirst(length).contains("`") else { return nil }
         return (length, String(rest.dropFirst(length)).trimmingCharacters(in: .whitespaces), indent)
     }
 
-    private static func isCodeFenceClosing(_ line: String, minimumLength: Int) -> Bool {
-        let rest = line.drop { $0 == " " || $0 == "\t" }
+    private static func isCodeFenceClosing(
+        _ line: String,
+        minimumLength: Int,
+        openingIndent: Int
+    ) -> Bool {
+        let indent = line.prefix { $0 == " " }.count
+        guard indent <= openingIndent + 3 else { return false }
+        let rest = line.dropFirst(indent)
         let length = rest.prefix { $0 == "`" }.count
         guard length >= minimumLength else { return false }
         return rest.dropFirst(length).allSatisfy(\.isWhitespace)

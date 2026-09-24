@@ -856,11 +856,27 @@ enum LivePreview {
         var i = 0
         while i < matches.count {
             let open = matches[i]
-            let language = fenceLanguage(ns.substring(with: open.range))
+            let openingLine = ns.substring(with: open.range)
+            let openingIndent = openingLine.prefix { $0 == " " }.count
+            let openingLength = open.range(at: 1).length
+            guard openingIndent <= 3,
+                  !openingLine.dropFirst(openingIndent + openingLength).contains("`") else {
+                i += 1
+                continue
+            }
+            let language = fenceLanguage(openingLine)
             let openDelim = includingTerminator(open.range, in: ns)
             let contentStart = NSMaxRange(openDelim)
-            if i + 1 < matches.count {
-                let close = matches[i + 1]
+            let closingIndex = matches.indices.dropFirst(i + 1).first { candidate in
+                let close = matches[candidate]
+                let line = ns.substring(with: close.range)
+                let indent = line.prefix { $0 == " " }.count
+                return indent <= openingIndent + 3
+                    && close.range(at: 1).length >= openingLength
+                    && line.dropFirst(indent + close.range(at: 1).length).allSatisfy(\.isWhitespace)
+            }
+            if let closingIndex {
+                let close = matches[closingIndex]
                 let content = NSRange(location: contentStart, length: max(0, close.range.location - contentStart))
                 let full = NSRange(
                     location: open.range.location,
@@ -874,7 +890,7 @@ enum LivePreview {
                         language: language
                     )
                 )
-                i += 2
+                i = closingIndex + 1
             } else {
                 let content = NSRange(location: contentStart, length: max(0, ns.length - contentStart))
                 let full = NSRange(location: open.range.location, length: ns.length - open.range.location)

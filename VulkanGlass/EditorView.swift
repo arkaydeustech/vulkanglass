@@ -1204,19 +1204,39 @@ final class SourceTextView: NSTextView {
         }
     }
 
+    struct CodeBadge {
+        let label: String
+        let origin: NSPoint
+        let clipRect: NSRect
+    }
+
+    static func codeBadge(language: String, in rect: NSRect) -> CodeBadge? {
+        let label = CodeHighlight.displayName(for: language)
+        guard !label.isEmpty else { return nil }
+        let size = (label as NSString).size(withAttributes: [.font: CodeHighlight.labelFont])
+        let clipRect = rect.insetBy(dx: 8, dy: 0)
+        guard clipRect.width > 0, clipRect.height > 0 else { return nil }
+        return CodeBadge(
+            label: label,
+            origin: NSPoint(x: clipRect.maxX - 4 - size.width, y: rect.minY + 6),
+            clipRect: clipRect
+        )
+    }
+
     private func drawLiveOverlays(in dirtyRect: NSRect) {
         guard let layoutManager, let textContainer else { return }
         for decoration in liveDecorations.codeBlocks where decoration.showBadge {
-            let label = CodeHighlight.displayName(for: decoration.language)
-            guard !label.isEmpty else { continue }
             guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
                   rect.intersects(dirtyRect) else { continue }
+            guard let badge = Self.codeBadge(language: decoration.language, in: rect) else { continue }
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: CodeHighlight.labelFont,
                 .foregroundColor: CodeHighlight.labelColor(dark: decoration.dark)
             ]
-            let size = (label as NSString).size(withAttributes: attrs)
-            (label as NSString).draw(at: NSPoint(x: rect.maxX - 12 - size.width, y: rect.minY + 6), withAttributes: attrs)
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: badge.clipRect).addClip()
+            (badge.label as NSString).draw(at: badge.origin, withAttributes: attrs)
+            NSGraphicsContext.restoreGraphicsState()
         }
         for decoration in liveDecorations.bars {
             if case .alert(let kind) = decoration.kind, decoration.collapsed {
