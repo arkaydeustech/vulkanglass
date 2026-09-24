@@ -45,7 +45,7 @@ struct WorkspaceView: View {
                             }
                         )
                     }
-                    mainColumn(showRightToggle: !model.rightOpen)
+                    mainColumn
                     if model.rightOpen {
                         SplitHandle(
                             dark: model.dark,
@@ -147,66 +147,13 @@ struct WorkspaceView: View {
         .background(VGTheme.backgroundSecondary(dark: model.dark))
     }
 
-    private func mainColumn(showRightToggle: Bool) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                if !model.leftOpen {
-                    TitleBarIcon(
-                        symbol: "sidebar.left",
-                        help: "Toggle left sidebar",
-                        active: false
-                    ) {
-                        model.leftOpen = true
-                    }
-                    .padding(.leading, VGTheme.collapsedLeftTitleBarInset + 8)
-                    .layoutPriority(1)
-                    VGTheme.divider(dark: model.dark)
-                        .frame(width: 1)
-                        .padding(.vertical, 8)
-                        .padding(.trailing, 2)
-                }
-                TitleBarTabStrip()
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                TitleBarIcon(
-                    symbol: model.editorMode == .source ? "book" : "square.and.pencil",
-                    help: "Toggle reading view",
-                    active: model.editorMode == .preview
-                ) {
-                    model.editorMode = model.editorMode == .source ? .preview : .source
-                    model.centerView = .editor
-                }
-                .padding(.trailing, showRightToggle ? 0 : VGTheme.paneDividerInset)
-                if showRightToggle {
-                    TitleBarIcon(
-                        symbol: "sidebar.right",
-                        help: "Toggle right sidebar",
-                        active: false
-                    ) {
-                        model.rightOpen = true
-                    }
-                    .padding(.trailing, VGTheme.titleBarTrailingInset)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: VGTheme.titleBarHeight)
-            .background(VGTheme.backgroundSecondary(dark: model.dark))
-            .background(WindowDragRegion())
-            .overlay(alignment: .bottom) {
-                VGTheme.divider(dark: model.dark).frame(height: 1)
-            }
-
-            Group {
-                if model.centerView == .graph {
-                    GraphView()
-                } else {
-                    NoteEditorView()
-                }
-            }
+    /// Tab groups fill the main column, each with its own tab strip; the panes along the top
+    /// carry their strips in the window title bar.
+    private var mainColumn: some View {
+        TabGroupsView()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .layoutPriority(1)
-        .background(VGTheme.backgroundPrimary(dark: model.dark))
+            .layoutPriority(1)
+            .background(VGTheme.backgroundPrimary(dark: model.dark))
     }
 
     private func rightColumn(width: CGFloat) -> some View {

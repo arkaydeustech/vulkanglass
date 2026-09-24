@@ -43,6 +43,8 @@
 		A7D7D88C3E388896B30A9850 /* RightSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE43400DE1D5F7775B45FC4 /* RightSidebarView.swift */; };
 		6872D78A6D2B95A7488B4CE2 /* SemanticHTML.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4112B3ED5F1B29BC17BAB55C /* SemanticHTML.swift */; };
 		8530619F71E8C4E9F1C1FAF2 /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E8A8252E73E536CBFEBF545 /* SettingsStore.swift */; };
+		F3FCC34D79C7B16A65984245 /* TabGroupViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3030F168E3B18D97519F076C /* TabGroupViews.swift */; };
+		E03FD2155687FE252885BDF7 /* TabGroups.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30E193913F6FE7297FA71766 /* TabGroups.swift */; };
 		010A1717B1853D0CE9EC0F84 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 911DAA6D3C2457F595D32DC5 /* Theme.swift */; };
 		6EC36D9CED9AA09F619136FA /* VulkanGlassApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E88E7EC49D83A8C22E7C8C06 /* VulkanGlassApp.swift */; };
 		CF42D3A8DFC1BC74723E57BD /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8D41BB89E6CDA35129B68AF /* WelcomeView.swift */; };
@@ -63,6 +65,7 @@
 		A024950F98F3A5135D9670D0 /* PaletteSearchFieldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FB0B4390DC2705F0EB9D64C /* PaletteSearchFieldTests.swift */; };
 		9B2AF4F97D758C0C68D2545A /* ParserAndMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */; };
 		50552FC725A83E7B9687814D /* QuickLookPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */; };
+		40931A793B41E31F670F3910 /* TabGroupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55FA1561241038DB809CE31A /* TabGroupTests.swift */; };
 		B276852630900D7E2BA5C81D /* WikiLinkPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 409CD772ED7093F43F555624 /* WikiLinkPickerTests.swift */; };
 		EB572FAC6BCE104D8D5E9686 /* PreviewViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F681E7978D0947CBDFA29AD /* PreviewViewController.swift */; };
 		CB7DDC33E0F468D06DE274D9 /* QuickLookPreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */; };
@@ -117,6 +120,8 @@
 				AAE43400DE1D5F7775B45FC4 /* RightSidebarView.swift */,
 				4112B3ED5F1B29BC17BAB55C /* SemanticHTML.swift */,
 				2E8A8252E73E536CBFEBF545 /* SettingsStore.swift */,
+				3030F168E3B18D97519F076C /* TabGroupViews.swift */,
+				30E193913F6FE7297FA71766 /* TabGroups.swift */,
 				911DAA6D3C2457F595D32DC5 /* Theme.swift */,
 				E88E7EC49D83A8C22E7C8C06 /* VulkanGlassApp.swift */,
 				D8D41BB89E6CDA35129B68AF /* WelcomeView.swift */,
@@ -151,6 +156,7 @@
 				6FB0B4390DC2705F0EB9D64C /* PaletteSearchFieldTests.swift */,
 				4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */,
 				616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */,
+				55FA1561241038DB809CE31A /* TabGroupTests.swift */,
 				409CD772ED7093F43F555624 /* WikiLinkPickerTests.swift */,
 			);
 			path = VulkanGlassTests;
@@ -200,6 +206,8 @@
 		AAE43400DE1D5F7775B45FC4 /* RightSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightSidebarView.swift; sourceTree = "<group>"; };
 		4112B3ED5F1B29BC17BAB55C /* SemanticHTML.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticHTML.swift; sourceTree = "<group>"; };
 		2E8A8252E73E536CBFEBF545 /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
+		3030F168E3B18D97519F076C /* TabGroupViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabGroupViews.swift; sourceTree = "<group>"; };
+		30E193913F6FE7297FA71766 /* TabGroups.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabGroups.swift; sourceTree = "<group>"; };
 		911DAA6D3C2457F595D32DC5 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		E88E7EC49D83A8C22E7C8C06 /* VulkanGlassApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VulkanGlassApp.swift; sourceTree = "<group>"; };
 		D8D41BB89E6CDA35129B68AF /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
@@ -215,6 +223,7 @@
 		6FB0B4390DC2705F0EB9D64C /* PaletteSearchFieldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteSearchFieldTests.swift; sourceTree = "<group>"; };
 		4390CFAAE4678250CE9A819F /* ParserAndMarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParserAndMarkdownTests.swift; sourceTree = "<group>"; };
 		616BE81D9D6FA531AFA02742 /* QuickLookPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewTests.swift; sourceTree = "<group>"; };
+		55FA1561241038DB809CE31A /* TabGroupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabGroupTests.swift; sourceTree = "<group>"; };
 		409CD772ED7093F43F555624 /* WikiLinkPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WikiLinkPickerTests.swift; sourceTree = "<group>"; };
 		F5BF48AA40CAD7891EB709FC /* VulkanGlass.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VulkanGlass.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6835773A78C20D6EB54F02C6 /* VulkanGlassTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VulkanGlassTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -252,6 +261,8 @@
 				A7D7D88C3E388896B30A9850 /* RightSidebarView.swift in Sources */,
 				6872D78A6D2B95A7488B4CE2 /* SemanticHTML.swift in Sources */,
 				8530619F71E8C4E9F1C1FAF2 /* SettingsStore.swift in Sources */,
+				F3FCC34D79C7B16A65984245 /* TabGroupViews.swift in Sources */,
+				E03FD2155687FE252885BDF7 /* TabGroups.swift in Sources */,
 				010A1717B1853D0CE9EC0F84 /* Theme.swift in Sources */,
 				6EC36D9CED9AA09F619136FA /* VulkanGlassApp.swift in Sources */,
 				CF42D3A8DFC1BC74723E57BD /* WelcomeView.swift in Sources */,
@@ -272,6 +283,7 @@
 				A024950F98F3A5135D9670D0 /* PaletteSearchFieldTests.swift in Sources */,
 				9B2AF4F97D758C0C68D2545A /* ParserAndMarkdownTests.swift in Sources */,
 				50552FC725A83E7B9687814D /* QuickLookPreviewTests.swift in Sources */,
+				40931A793B41E31F670F3910 /* TabGroupTests.swift in Sources */,
 				B276852630900D7E2BA5C81D /* WikiLinkPickerTests.swift in Sources */,
 				EB572FAC6BCE104D8D5E9686 /* PreviewViewController.swift in Sources */,
 				CB7DDC33E0F468D06DE274D9 /* QuickLookPreviewSupport.swift in Sources */,

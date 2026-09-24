@@ -4,6 +4,12 @@ Native macOS SwiftUI app for Markdown notes. Vaults are GitHub repositories; sav
 
 Accent color is teal. Layout follows Obsidian (ribbon, file tree, editor, backlinks, graph).
 
+Tabs can be arranged in tab groups. Drag a tab to the left, right, top, or bottom of a note pane
+and a blue box previews the half the tab will take; release to split the pane in two. Drop a
+tab in the middle of another pane, or on its tab strip, to move it into that group. View → Split
+right (`⌘\`) and Split down (`⇧⌘\`) split off the active tab from the keyboard, and dragging the
+line between panes resizes them.
+
 ## Toolchain and tasks
 
 Tool versions and the development scripts are managed by

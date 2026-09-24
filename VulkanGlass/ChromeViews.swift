@@ -32,70 +32,12 @@ struct TitleBarIcon: View {
     }
 }
 
-/// Note tabs that sit in the main-column title bar.
-struct TitleBarTabStrip: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(model.tabs) { tab in
-                        let active = tab.id == model.activeTabID && model.centerView == .editor
-                        HStack(spacing: 6) {
-                            Button {
-                                Task { await model.setActiveTab(tab.id) }
-                            } label: {
-                                Text((tab.dirty ? "• " : "") + tab.title)
-                                    .lineLimit(1)
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(
-                                        active ? VGTheme.textNormal(dark: model.dark) : VGTheme.textMuted(dark: model.dark)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            Button {
-                                Task { await model.closeTab(tab.id) }
-                            } label: {
-                                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(VGTheme.textFaint(dark: model.dark))
-                        }
-                        .padding(.horizontal, 10)
-                        .frame(height: VGTheme.titleBarHeight)
-                        .frame(minWidth: 100, maxWidth: 200)
-                        .background(active ? VGTheme.backgroundPrimary(dark: model.dark) : Color.clear)
-                        .overlay(alignment: .bottom) {
-                            Rectangle()
-                                .fill(active ? VGTheme.accent : Color.clear)
-                                .frame(height: 2)
-                        }
-                        .overlay(alignment: .trailing) {
-                            VGTheme.divider(dark: model.dark).frame(width: 1)
-                        }
-                    }
-                }
-            }
-            .frame(minWidth: 0)
-            Button {
-                Task { await model.newNote() }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: VGTheme.titleBarIconFont))
-                    .frame(width: VGTheme.titleBarIconSize, height: VGTheme.titleBarHeight)
-                    .foregroundStyle(VGTheme.textMuted(dark: model.dark))
-            }
-            .buttonStyle(.plain)
-            .help("New note")
-        }
-    }
-}
-
-/// Hairline pane boundary that glows teal on hover, matching Obsidian's split.
+/// Hairline pane boundary that glows teal on hover, matching Obsidian's split. A horizontal
+/// axis divides side-by-side panes with a vertical line; a vertical axis divides stacked panes.
 struct SplitHandle: View {
     var dark: Bool
     var resizable: Bool = false
+    var axis: SplitAxis = .horizontal
     var onChanged: (CGFloat) -> Void = { _ in }
     var onEnded: () -> Void = {}
 
@@ -108,27 +50,30 @@ struct SplitHandle: View {
         ZStack {
             Rectangle()
                 .fill(VGTheme.accent)
-                .frame(width: 4)
+                .frame(width: across(4), height: along(4))
                 .blur(radius: 7)
                 .opacity(glowing ? 0.7 : 0)
                 .animation(.easeInOut(duration: VGTheme.splitGlowDuration), value: glowing)
             Rectangle()
                 .fill(VGTheme.textAccent)
-                .frame(width: VGTheme.splitLineWidth)
+                .frame(width: across(VGTheme.splitLineWidth), height: along(VGTheme.splitLineWidth))
                 .shadow(color: VGTheme.accent.opacity(glowing ? 1 : 0), radius: 5)
                 .opacity(glowing ? 1 : 0)
                 .animation(.easeInOut(duration: VGTheme.splitGlowDuration), value: glowing)
             Rectangle()
                 .fill(glowing ? VGTheme.textAccent : VGTheme.divider(dark: dark))
-                .frame(width: VGTheme.splitLineWidth)
+                .frame(width: across(VGTheme.splitLineWidth), height: along(VGTheme.splitLineWidth))
                 .animation(.easeInOut(duration: VGTheme.splitGlowDuration), value: glowing)
         }
-        .frame(width: VGTheme.splitLineWidth)
-        .frame(maxHeight: .infinity)
+        .frame(width: across(VGTheme.splitLineWidth), height: along(VGTheme.splitLineWidth))
+        .frame(
+            maxWidth: axis == .vertical ? .infinity : nil,
+            maxHeight: axis == .horizontal ? .infinity : nil
+        )
         .overlay {
             Rectangle()
                 .fill(.white.opacity(0.001))
-                .frame(width: VGTheme.splitHandleWidth)
+                .frame(width: across(VGTheme.splitHandleWidth), height: along(VGTheme.splitHandleWidth))
                 .contentShape(Rectangle())
                 .onHover { inside in
                     hovering = inside
@@ -139,13 +84,23 @@ struct SplitHandle: View {
         .zIndex(1)
     }
 
+    /// Thickness for a vertical line; nil lets a horizontal line stretch.
+    private func across(_ thickness: CGFloat) -> CGFloat? {
+        axis == .horizontal ? thickness : nil
+    }
+
+    /// Thickness for a horizontal line; nil lets a vertical line stretch.
+    private func along(_ thickness: CGFloat) -> CGFloat? {
+        axis == .vertical ? thickness : nil
+    }
+
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 1, coordinateSpace: .global)
             .onChanged { value in
                 guard resizable else { return }
                 dragging = true
                 updateCursor()
-                onChanged(value.translation.width)
+                onChanged(Self.translation(value.translation, for: axis))
             }
             .onEnded { _ in
                 guard resizable else { return }
@@ -155,10 +110,14 @@ struct SplitHandle: View {
             }
     }
 
+    static func translation(_ size: CGSize, for axis: SplitAxis) -> CGFloat {
+        axis == .horizontal ? size.width : size.height
+    }
+
     private func updateCursor() {
         guard resizable else { return }
         if hovering || dragging {
-            NSCursor.resizeLeftRight.set()
+            (axis == .horizontal ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set()
         } else {
             NSCursor.arrow.set()
         }

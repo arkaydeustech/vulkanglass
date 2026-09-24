@@ -13,6 +13,8 @@ struct CommandPaletteView: View {
             ("preview", "Toggle reading view", "⌘E", {
                 model.editorMode = model.editorMode == .source ? .preview : .source
             }),
+            ("split-right", "Split right", "⌘\\", { model.splitActiveTab(.trailing) }),
+            ("split-down", "Split down", "⇧⌘\\", { model.splitActiveTab(.bottom) }),
             (
                 "sync",
                 model.activeTab?.savesAutomatically == false ? "Save file" : "Sync vault to GitHub",

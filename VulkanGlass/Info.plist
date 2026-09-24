@@ -36,6 +36,19 @@
 	<false/>
 	<key>SUVerifyUpdateBeforeExtraction</key>
 	<true/>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>app.vulkanglass.note-tab</string>
+			<key>UTTypeDescription</key>
+			<string>Vulkan Glass note tab</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

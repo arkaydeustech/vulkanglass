@@ -180,10 +180,14 @@ struct SourceEditor: NSViewRepresentable {
                     return
                 }
                 self.pendingFocusRequestID = nil
-                let insertionPoint = self.focusPlacement == .start
-                    ? 0
-                    : (textView.string as NSString).length
-                textView.setSelectedRange(NSRange(location: insertionPoint, length: 0))
+                switch self.focusPlacement {
+                case .start:
+                    textView.setSelectedRange(NSRange(location: 0, length: 0))
+                case .end:
+                    textView.setSelectedRange(NSRange(location: (textView.string as NSString).length, length: 0))
+                case .preserveSelection:
+                    break
+                }
                 if self.focus(textView) {
                     self.fulfilledFocusRequestID = id
                     self.onFocusRequestFulfilled(id)
@@ -1825,14 +1829,25 @@ enum NoteEditorLeadingElement {
 
 struct NoteEditorView: View {
     @Environment(AppModel.self) private var model
+    /// The tab group whose active tab to show; nil shows the app-wide active tab.
+    var groupID: UUID? = nil
     var onDocumentLeading: ((NoteEditorLeadingElement, CGFloat) -> Void)? = nil
     var onLayout: ((CGSize) -> Void)? = nil
 
+    private var displayedTabID: String? {
+        if let groupID {
+            model.tabGroupLayout.group(groupID)?.activeTabID
+        } else {
+            model.activeTabID
+        }
+    }
+
     var body: some View {
-        if let tab = model.activeTab, let index = model.tabs.firstIndex(where: { $0.id == tab.id }) {
+        if let id = displayedTabID, let index = model.tabs.firstIndex(where: { $0.id == id }) {
+            let tab = model.tabs[index]
             VStack(alignment: .leading, spacing: 0) {
                 titleRow(tab)
-                if model.editorMode == .preview {
+                if tab.editorMode == .preview {
                     MarkdownPreviewView(
                         text: tab.content,
                         noteTitles: Set(model.notes.map { $0.title.lowercased() }),
@@ -1846,7 +1861,7 @@ struct NoteEditorView: View {
                             }
                         }
                     ) { target in
-                        Task { await model.followWikiLink(target) }
+                        Task { await model.followWikiLink(target, inGroup: groupID) }
                     }
                 } else {
                     SourceEditor(
