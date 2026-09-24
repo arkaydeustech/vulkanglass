@@ -169,6 +169,48 @@ enum FileService {
         return destination
     }
 
+    /// Moves a Markdown file into `folder` (the vault root or one of its folders), keeping its name.
+    /// Returns the file's new location, or the original when it is already in that folder.
+    static func move(_ url: URL, into folder: URL, root: URL) throws -> URL {
+        let original = url.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: original.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue
+        else {
+            throw FileServiceError.missingFile(original.lastPathComponent)
+        }
+        if try original.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
+            throw FileServiceError.symbolicLinkRenameUnsupported(original.path)
+        }
+        let source = try validateExisting(original, inside: root)
+        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue
+        else {
+            throw FileServiceError.missingFile(original.lastPathComponent)
+        }
+
+        let canonicalRoot = canonicalURL(root)
+        let destinationFolder = canonicalURL(folder)
+        guard destinationFolder.path == canonicalRoot.path
+            || destinationFolder.path.hasPrefix(canonicalRoot.path + "/")
+        else {
+            throw FileServiceError.outsideRoot(destinationFolder.path)
+        }
+        guard directoryExists(at: destinationFolder.path) else {
+            throw FileServiceError.invalidRelativePath(folder.path)
+        }
+
+        if canonicalURL(source.deletingLastPathComponent()).path == destinationFolder.path {
+            return original
+        }
+        let destination = destinationFolder.appendingPathComponent(source.lastPathComponent)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw FileServiceError.nameTaken(source.lastPathComponent)
+        }
+        try FileManager.default.moveItem(at: source, to: destination)
+        return destination
+    }
+
     /// Renames a folder inside the vault in place, keeping it under the same parent.
     static func renameFolder(_ url: URL, to newName: String, root: URL) throws -> URL {
         let name = try folderName(from: newName)
