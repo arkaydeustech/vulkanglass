@@ -35,6 +35,7 @@ struct FileExplorerView: View {
     @State private var folderDraft = FolderCreationDraft()
     @State private var askingFolder = false
     @State private var rootDropTargeted = false
+    @State private var treeRowsHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -69,35 +70,45 @@ struct FileExplorerView: View {
                 GeometryReader { geometry in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "tray")
-                                Text(vault.name)
-                                Spacer()
-                            }
-                            .font(.caption)
-                            .foregroundStyle(VGTheme.textMuted(dark: model.dark))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .background(rootDropTargeted ? VGTheme.dropTarget.opacity(0.18) : Color.clear)
-                            .contentShape(Rectangle())
-                            .onDrop(
-                                of: [.vulkanGlassNote],
-                                delegate: FolderDropDelegate(
-                                    model: model,
-                                    folderPath: vault.path,
-                                    targeted: $rootDropTargeted
+                            VStack(alignment: .leading, spacing: 0) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "tray")
+                                    Text(vault.name)
+                                    Spacer()
+                                }
+                                .font(.caption)
+                                .foregroundStyle(VGTheme.textMuted(dark: model.dark))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(rootDropTargeted ? VGTheme.dropTarget.opacity(0.18) : Color.clear)
+                                .contentShape(Rectangle())
+                                .onDrop(
+                                    of: [.vulkanGlassNote],
+                                    delegate: FolderDropDelegate(
+                                        model: model,
+                                        folderPath: vault.path,
+                                        targeted: $rootDropTargeted
+                                    )
                                 )
-                            )
 
-                            LazyVStack(alignment: .leading, spacing: 0) {
-                                ForEach(filtered(model.fileTree)) { node in
-                                    TreeRow(node: node, depth: 0)
+                                LazyVStack(alignment: .leading, spacing: 0) {
+                                    ForEach(filtered(model.fileTree)) { node in
+                                        TreeRow(node: node, depth: 0)
+                                    }
+                                }
+                            }
+                            .background {
+                                GeometryReader { rows in
+                                    Color.clear.preference(key: FileTreeRowsHeightKey.self, value: rows.size.height)
                                 }
                             }
 
-                            // Only free space below the rows accepts a root drop.
-                            Spacer(minLength: 12)
+                            // Only free space below the rows accepts a root drop. The scroll view
+                            // proposes no height, so the area is sized to fill the rest of the
+                            // viewport explicitly rather than with a `Spacer`.
+                            Color.clear
                                 .frame(maxWidth: .infinity)
+                                .frame(height: max(12, geometry.size.height - treeRowsHeight))
                                 .contentShape(Rectangle())
                                 .onDrop(
                                     of: [.vulkanGlassNote],
@@ -108,8 +119,8 @@ struct FileExplorerView: View {
                                     )
                                 )
                         }
-                        .frame(minHeight: geometry.size.height, alignment: .top)
                     }
+                    .onPreferenceChange(FileTreeRowsHeightKey.self) { treeRowsHeight = $0 }
                 }
             } else {
                 Text("This window is editing a standalone Markdown file. Open a GitHub vault to see a file tree.")
@@ -275,6 +286,15 @@ private struct TreeRow: View {
     }
 }
 
+/// The height of the file tree's rows, so the root drop area can fill the space below them.
+private enum FileTreeRowsHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 /// Accepts a note dragged from the file explorer onto a folder row (or, for the vault root,
 /// onto the tree's free space) and moves the note into that folder.
 struct FolderDropDelegate: DropDelegate {
@@ -364,6 +384,9 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     var presentContextMenu: (NSMenu, NSEvent, NSView) -> Void = { menu, event, view in
         NSMenu.popUpContextMenu(menu, with: event, for: view)
     }
+    /// Whether AppKit is still running a drag session this view started, which outlives the
+    /// drop itself while AppKit finishes (or animates back) the drag.
+    private(set) var isDragSessionActive = false
     private var pressEvent: NSEvent?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -444,6 +467,7 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
         let draggingItem = NSDraggingItem(pasteboardWriter: Self.pasteboardItem(for: path))
         draggingItem.setDraggingFrame(bounds, contents: preview?(bounds.size))
         model.draggedFilePath = path
+        isDragSessionActive = true
         let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
         session.animatesToStartingPositionsOnCancelOrFail = true
     }
@@ -469,6 +493,7 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
         endedAt screenPoint: NSPoint,
         operation: NSDragOperation
     ) {
+        isDragSessionActive = false
         endFileDrag()
     }
 

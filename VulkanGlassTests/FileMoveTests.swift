@@ -356,17 +356,14 @@ final class FileMoveModelTests: XCTestCase {
                 host.layoutSubtreeIfNeeded()
                 try await Task.sleep(for: .milliseconds(20))
             }
-            if target == "own row" {
-                // A synthetic cancelled drag may not deliver AppKit's session-ended callback.
-                try await Task.sleep(for: .milliseconds(200))
-                source.endFileDrag()
-            } else {
-                let completionDeadline = ContinuousClock().now.advanced(by: .seconds(2))
-                while ContinuousClock().now < completionDeadline, model.draggedFilePath != nil {
-                    host.layoutSubtreeIfNeeded()
-                    try await Task.sleep(for: .milliseconds(20))
-                }
+            // AppKit finishes the session (or animates a refused drag back) after the drop;
+            // a scenario that starts dragging before then never reaches a drop target.
+            let sessionDeadline = ContinuousClock().now.advanced(by: .seconds(3))
+            while ContinuousClock().now < sessionDeadline, source.isDragSessionActive {
+                host.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(20))
             }
+            XCTAssertFalse(source.isDragSessionActive, target)
             XCTAssertEqual(FileManager.default.fileExists(atPath: destination.path), shouldMove, target)
             XCTAssertEqual(FileManager.default.fileExists(atPath: sourcePath), !shouldMove, target)
             XCTAssertNil(model.errorMessage, target)
