@@ -7,6 +7,7 @@ enum FileServiceError: LocalizedError, Equatable {
     case outsideRoot(String)
     case missingVault(String)
     case missingFile(String)
+    case missingFolder(String)
     case nameTaken(String)
     case symbolicLinkRenameUnsupported(String)
 
@@ -22,6 +23,8 @@ enum FileServiceError: LocalizedError, Equatable {
             return "The vault “\(name)” doesn’t exist."
         case .missingFile(let name):
             return "The file “\(name)” doesn’t exist."
+        case .missingFolder(let name):
+            return "The folder “\(name)” doesn’t exist."
         case .nameTaken(let name):
             return "A file named \(name) already exists."
         case .symbolicLinkRenameUnsupported(let path):
@@ -84,6 +87,19 @@ enum FileService {
         return url
     }
 
+    /// Resolves a folder that must be the vault root or an existing directory inside it.
+    static func containedFolder(_ url: URL, root: URL) throws -> URL {
+        let canonicalRoot = canonicalURL(root)
+        let canonical = canonicalURL(url)
+        guard canonical.path == canonicalRoot.path || isInside(canonical, root: canonicalRoot) else {
+            throw FileServiceError.outsideRoot(canonical.path)
+        }
+        guard directoryExists(at: canonical.path) else {
+            throw FileServiceError.missingFolder(url.lastPathComponent)
+        }
+        return canonical
+    }
+
     static func moveToTrash(_ url: URL, root: URL) throws {
         let canonical = try validateExisting(url, inside: root)
         try FileManager.default.trashItem(at: canonical, resultingItemURL: nil)
@@ -116,7 +132,7 @@ enum FileService {
             let sourceParent = canonicalURL(source.deletingLastPathComponent())
             let destParent = canonicalURL(destination.deletingLastPathComponent())
             guard destParent.path == sourceParent.path,
-                  destCanonical.path.hasPrefix(canonicalRoot.path + "/")
+                  isInside(destCanonical, root: canonicalRoot)
             else {
                 throw FileServiceError.outsideRoot(destination.path)
             }
@@ -244,7 +260,7 @@ enum FileService {
         // re-express an existing /private/var path through /var during standardization, which
         // otherwise makes the second generated "Untitled" filename look outside its vault.
         let candidate = canonicalURL(raw)
-        guard candidate.path.hasPrefix(canonicalRoot.path + "/") else {
+        guard isInside(candidate, root: canonicalRoot) else {
             throw FileServiceError.outsideRoot(candidate.path)
         }
         return candidate
@@ -253,10 +269,17 @@ enum FileService {
     private static func validateExisting(_ url: URL, inside root: URL) throws -> URL {
         let canonicalRoot = canonicalURL(root)
         let canonical = canonicalURL(url)
-        guard canonical.path.hasPrefix(canonicalRoot.path + "/") else {
+        guard isInside(canonical, root: canonicalRoot) else {
             throw FileServiceError.outsideRoot(canonical.path)
         }
         return canonical
+    }
+
+    /// Both paths are canonical. Preserve the separator boundary for ordinary
+    /// vaults without adding a second slash when the vault is the filesystem root.
+    private static func isInside(_ candidate: URL, root: URL) -> Bool {
+        candidate.path != root.path
+            && candidate.path.hasPrefix(root.path == "/" ? "/" : root.path + "/")
     }
 
     static func canonicalURL(_ url: URL) -> URL {

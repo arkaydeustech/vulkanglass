@@ -130,6 +130,9 @@ private struct TreeRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .contextMenu {
+                FolderContextMenu(path: node.path, open: $open)
+            }
             if open {
                 ForEach(node.children ?? []) { child in
                     TreeRow(node: child, depth: depth + 1)
@@ -191,6 +194,19 @@ private struct TreeRow: View {
             } message: {
                 Text("You can recover it from the macOS Trash.")
             }
+        }
+    }
+}
+
+struct FolderContextMenu: View {
+    @Environment(AppModel.self) private var model
+    let path: String
+    @Binding var open: Bool
+
+    var body: some View {
+        Button("New File") {
+            open = true
+            Task { await model.newNote(inFolder: path) }
         }
     }
 }
