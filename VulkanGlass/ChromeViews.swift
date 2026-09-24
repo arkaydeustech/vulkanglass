@@ -129,26 +129,111 @@ struct SplitHandle: View {
     }
 }
 
-/// Lets empty title-bar space drag the window, without eating clicks on buttons.
+/// Lets empty title-bar space drag the window, without eating clicks on buttons. A double-click
+/// on it zooms the window, as on a native title bar (see `TitleBarDoubleClick`).
 struct WindowDragRegion: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
+    func makeNSView(context: Context) -> WindowDragRegionView {
+        let view = WindowDragRegionView()
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.clear.cgColor
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: WindowDragRegionView, context: Context) {}
+}
+
+/// Marks title-bar space with nothing on it, so a double-click there can be told apart from
+/// one on a tab or button.
+final class WindowDragRegionView: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
+/// What a double-click on empty title-bar space does, following the "Double-click a window's
+/// title bar to" setting in System Settings › Desktop & Dock.
+enum TitleBarDoubleClickAction: Equatable {
+    case zoom
+    case minimize
+    case none
+
+    /// `preference` is the global `AppleActionOnDoubleClick` value: "Maximize" (Zoom), "Fill",
+    /// "Minimize", or "None". Unset falls back to the older `AppleMiniaturizeOnDoubleClick` switch.
+    init(preference: String?, legacyMinimize: Bool = false) {
+        switch preference?.lowercased() {
+        case "minimize": self = .minimize
+        case "none": self = .none
+        case nil: self = legacyMinimize ? .minimize : .zoom
+        default: self = .zoom
+        }
+    }
+
+    static func current(defaults: UserDefaults = .standard) -> Self {
+        Self(
+            preference: defaults.string(forKey: "AppleActionOnDoubleClick"),
+            legacyMinimize: defaults.bool(forKey: "AppleMiniaturizeOnDoubleClick")
+        )
+    }
+}
+
+/// The window draws its own title bar over a hidden system one, so AppKit no longer zooms the
+/// window when that bar is double-clicked. This restores it for space holding no tab or button.
+@MainActor
+enum TitleBarDoubleClick {
+    /// Performs the double-click action when `event` is a double-click on empty title-bar space
+    /// in `window`, returning whether it did.
+    static func handle(
+        _ event: NSEvent,
+        in window: NSWindow,
+        action: TitleBarDoubleClickAction = .current()
+    ) -> Bool {
+        guard event.type == .leftMouseDown,
+              event.clickCount == 2,
+              event.window === window,
+              isEmptyTitleBarSpace(at: event.locationInWindow, in: window)
+        else { return false }
+        perform(action, on: window)
+        return true
+    }
+
+    /// Whether `point`, in window coordinates, lands on a `WindowDragRegion` rather than on a
+    /// tab, a button, or the traffic lights drawn above it.
+    static func isEmptyTitleBarSpace(at point: NSPoint, in window: NSWindow) -> Bool {
+        guard let root = window.contentView?.superview ?? window.contentView else { return false }
+        return root.hitTest(point) is WindowDragRegionView
+    }
+
+    static func perform(_ action: TitleBarDoubleClickAction, on window: NSWindow) {
+        switch action {
+        case .zoom: window.zoom(nil)
+        case .minimize: window.miniaturize(nil)
+        case .none: break
+        }
+    }
 }
 
 /// Puts SwiftUI content in the same row as the macOS traffic lights.
 final class WindowChromeView: NSView {
+    private var doubleClickMonitor: Any?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if let doubleClickMonitor { NSEvent.removeMonitor(doubleClickMonitor) }
+        doubleClickMonitor = nil
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard let window else { return }
         WindowChromeConfigurator.apply(to: window)
         DispatchQueue.main.async {
             WindowChromeConfigurator.centerTrafficLights(in: window)
+        }
+        // A local monitor sees the press before AppKit starts a window drag from the title bar,
+        // which would otherwise swallow it.
+        doubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak window] event in
+            MainActor.assumeIsolated {
+                guard let window, TitleBarDoubleClick.handle(event, in: window) else { return event }
+                return nil
+            }
         }
     }
 

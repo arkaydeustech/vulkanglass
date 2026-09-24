@@ -417,7 +417,7 @@ struct TabGroupHeader: View {
                     .padding(.vertical, 8)
                     .padding(.trailing, 2)
             }
-            TabGroupTabStrip(groupID: groupID)
+            TabGroupTabStrip(groupID: groupID, inTitleBar: edges.top)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 2) {
                 TitleBarIcon(symbol: "book", help: "Reading view", active: editorMode == .preview) {
@@ -441,10 +441,11 @@ struct TabGroupHeader: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: VGTheme.titleBarHeight)
-        .background(VGTheme.backgroundSecondary(dark: model.dark))
+        // Above the fill, so empty space hit-tests to the region (see `TitleBarDoubleClick`).
         .background {
             if edges.top { WindowDragRegion() }
         }
+        .background(VGTheme.backgroundSecondary(dark: model.dark))
         .overlay(alignment: .bottom) {
             VGTheme.divider(dark: model.dark).frame(height: 1)
         }
@@ -471,8 +472,11 @@ struct TabGroupHeader: View {
 struct TabGroupTabStrip: View {
     @Environment(AppModel.self) private var model
     let groupID: UUID
+    /// Whether the strip sits in the window title bar, where its empty space behaves like it.
+    var inTitleBar = false
     @State private var insertionIndex: Int?
     @State private var appending = false
+    @State private var visibleWidth: CGFloat = 0
 
     private var group: TabGroup? { model.tabGroupLayout.group(groupID) }
     private var isFocused: Bool { model.tabGroupLayout.focusedGroupID == groupID }
@@ -502,8 +506,15 @@ struct TabGroupTabStrip: View {
                             )
                     }
                 }
+                // The scroll view covers the space past the last tab, so the title bar's drag
+                // region has to reach in there too.
+                .frame(minWidth: inTitleBar ? visibleWidth : 0, alignment: .leading)
+                .background {
+                    if inTitleBar { WindowDragRegion() }
+                }
             }
             .frame(minWidth: 0)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { visibleWidth = $0 }
             Button {
                 Task {
                     await model.focusGroup(groupID)
