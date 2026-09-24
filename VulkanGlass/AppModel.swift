@@ -72,6 +72,10 @@ struct AppModelDependencies {
             try FileService.move(source, into: folder, root: root)
         }.value
     }
+    var moveToTrash: @MainActor (URL, URL, FileService.FolderIdentity?) throws -> Void = {
+        url, root, identity in
+        try FileService.moveToTrash(url, root: root, expectedFolderIdentity: identity)
+    }
 
     static let live = AppModelDependencies(
         githubCLIStatus: { includeToken in
@@ -1205,10 +1209,21 @@ final class AppModel {
 
     /// Moves a vault note, or a folder and everything in it, to the macOS Trash and closes the
     /// tabs of every note that went with it.
-    func deletePath(_ path: String) async {
+    func deletePath(_ path: String, expectedFolderIdentity: FileService.FolderIdentity? = nil) async {
         guard let vault else { return }
         do {
             let url = URL(fileURLWithPath: path)
+            let folderIdentity: FileService.FolderIdentity?
+            if let expectedFolderIdentity {
+                folderIdentity = expectedFolderIdentity
+            } else if FileService.directoryExists(at: path) {
+                folderIdentity = try FileService.folderIdentity(at: url)
+            } else {
+                folderIdentity = nil
+            }
+            if let folderIdentity {
+                try FileService.verifyFolderIdentity(folderIdentity, at: url)
+            }
             // Resolve paths before trashing: once the items are gone their canonical paths
             // can't be read, and a tab may have been opened through a different spelling.
             let canonical = FileService.canonicalURL(url).path
@@ -1216,7 +1231,18 @@ final class AppModel {
                 let tabPath = FileService.canonicalURL(URL(fileURLWithPath: tab.path)).path
                 return tab.path == path || tabPath == canonical || tabPath.hasPrefix(canonical + "/")
             }.map(\.id))
-            try FileService.moveToTrash(url, root: URL(fileURLWithPath: vault.path))
+            // Commit edits while the folder is still at its original path. A cancelled
+            // debounced save must not be the only copy of a note's latest text.
+            for id in removedIDs {
+                if let folderIdentity {
+                    try FileService.verifyFolderIdentity(folderIdentity, at: url)
+                }
+                if let tab = tabs.first(where: { $0.id == id }), tab.dirty, tab.savesAutomatically {
+                    guard await save(id: id, sync: false) else { return }
+                    guard self.vault?.path == vault.path else { return }
+                }
+            }
+            try dependencies.moveToTrash(url, URL(fileURLWithPath: vault.path), folderIdentity)
             removedIDs.forEach { saveTasks[$0]?.cancel(); saveTasks[$0] = nil }
             if let titleEditingTabID, removedIDs.contains(titleEditingTabID) {
                 self.titleEditingTabID = nil

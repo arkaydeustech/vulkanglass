@@ -36,7 +36,7 @@ final class FileServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("outside.md").path))
     }
 
-    func testFolderFileCountIncludesNestedHiddenAndNonMarkdownFiles() throws {
+    func testFolderContentsIncludeNestedHiddenNonMarkdownAndExcludedTrees() throws {
         let root = try temporaryDirectory()
         let folder = root.appendingPathComponent("Archive")
         let nested = folder.appendingPathComponent("Nested")
@@ -49,11 +49,29 @@ final class FileServiceTests: XCTestCase {
         try "b".write(to: nested.appendingPathComponent("B.md"), atomically: true, encoding: .utf8)
         try "x".write(to: nested.appendingPathComponent("image.png"), atomically: true, encoding: .utf8)
         try "h".write(to: nested.appendingPathComponent(".hidden"), atomically: true, encoding: .utf8)
+        let excluded = folder.appendingPathComponent("node_modules", isDirectory: true)
+        try FileManager.default.createDirectory(at: excluded, withIntermediateDirectories: false)
+        try "x".write(to: excluded.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
         try "o".write(to: root.appendingPathComponent("Outside.md"), atomically: true, encoding: .utf8)
 
-        XCTAssertEqual(FileService.fileCount(inFolder: folder), 4)
-        XCTAssertEqual(FileService.fileCount(inFolder: folder.appendingPathComponent("Empty")), 0)
-        XCTAssertEqual(FileService.fileCount(inFolder: root.appendingPathComponent("Missing")), 0)
+        XCTAssertEqual(try FileService.folderContents(in: folder), .init(files: 5, directories: 3))
+        XCTAssertEqual(try FileService.folderContents(in: folder.appendingPathComponent("Empty")), .init())
+        XCTAssertThrowsError(try FileService.folderContents(in: root.appendingPathComponent("Missing")))
+    }
+
+    func testFolderContentsReportsUnreadableSubdirectory() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Archive", isDirectory: true)
+        let unreadable = folder.appendingPathComponent("Private", isDirectory: true)
+        try FileManager.default.createDirectory(at: unreadable, withIntermediateDirectories: true)
+        try "secret".write(to: unreadable.appendingPathComponent("Secret.md"), atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: unreadable.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unreadable.path) }
+        if (try? FileManager.default.contentsOfDirectory(atPath: unreadable.path)) != nil {
+            throw XCTSkip("This test process can read directories with mode 000")
+        }
+
+        XCTAssertThrowsError(try FileService.folderContents(in: folder))
     }
 
     func testMoveFolderToTrashRemovesEverythingInsideButNotTheVaultRoot() throws {

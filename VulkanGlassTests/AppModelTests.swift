@@ -1058,9 +1058,11 @@ final class AppModelTests: XCTestCase {
         let request = FolderTrashRequest()
 
         request.begin(node)
+        await request.awaitCount()
         XCTAssertTrue(request.isPresented)
         XCTAssertEqual(request.path, node.path)
-        XCTAssertEqual(request.fileCount, 3)
+        XCTAssertEqual(request.contents?.files, 3)
+        XCTAssertEqual(request.contents?.directories, 1)
         XCTAssertEqual(request.title, "Move “Archive” to Trash?")
         XCTAssertEqual(
             request.message,
@@ -1090,6 +1092,7 @@ final class AppModelTests: XCTestCase {
         let request = FolderTrashRequest()
 
         request.begin(try XCTUnwrap(model.fileTree.first))
+        await request.awaitCount()
         XCTAssertEqual(
             request.message,
             "This folder and the 1 file inside it will be moved to the Trash. You can recover it from the macOS Trash."
@@ -1102,19 +1105,75 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("Note.md").path))
     }
 
-    func testFolderTrashRequestDescribesEmptyFolder() throws {
+    func testFolderTrashRequestDescribesEmptyFolder() async throws {
         let root = try temporaryDirectory()
         let folder = root.appendingPathComponent("Empty", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         let request = FolderTrashRequest()
 
         request.begin(FileNode(name: "Empty", path: folder.path, isDirectory: true, children: []))
+        await request.awaitCount()
 
-        XCTAssertEqual(request.fileCount, 0)
+        XCTAssertEqual(request.contents?.files, 0)
+        XCTAssertEqual(request.contents?.directories, 0)
         XCTAssertEqual(
             request.message,
             "This empty folder will be moved to the Trash. You can recover it from the macOS Trash."
         )
+    }
+
+    func testFolderTrashRequestDescribesOnlyEmptySubfolders() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Scaffold", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: folder.appendingPathComponent("Nested/Empty"),
+            withIntermediateDirectories: true
+        )
+        let request = FolderTrashRequest()
+
+        request.begin(FileNode(name: "Scaffold", path: folder.path, isDirectory: true, children: []))
+        await request.awaitCount()
+
+        XCTAssertEqual(request.contents, FileService.FolderContents(files: 0, directories: 2))
+        XCTAssertEqual(
+            request.message,
+            "This folder and its subfolders will be moved to the Trash. You can recover it from the macOS Trash."
+        )
+    }
+
+    func testFolderTrashRequestStartsWithAccurateGenericMessageWhileCounting() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Archive", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let request = FolderTrashRequest()
+
+        request.begin(FileNode(name: "Archive", path: folder.path, isDirectory: true, children: []))
+
+        XCTAssertNil(request.contents)
+        XCTAssertEqual(
+            request.message,
+            "This folder and everything inside it will be moved to the Trash. You can recover it from the macOS Trash."
+        )
+        request.cancel()
+    }
+
+    func testFolderTrashRequestRejectsReplacementAtSamePath() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let model = modelWithVault(at: root)
+        let request = FolderTrashRequest()
+        request.begin(FileNode(name: "Drafts", path: folder.path, isDirectory: true, children: []))
+        let oldFolder = root.appendingPathComponent("OldDrafts", isDirectory: true)
+        try FileManager.default.moveItem(at: folder, to: oldFolder)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let replacementNote = folder.appendingPathComponent("New.md")
+        try "new".write(to: replacementNote, atomically: true, encoding: .utf8)
+
+        try await XCTUnwrap(request.confirm(into: model)).value
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: replacementNote.path))
+        XCTAssertNotNil(model.errorMessage)
     }
 
     func testFolderRowContextMenuAsksToConfirmMovingFolderToTrash() throws {
@@ -1195,6 +1254,82 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
         XCTAssertTrue(model.fileTree.isEmpty)
         XCTAssertNil(model.errorMessage)
+    }
+
+    func testFolderTrashSavesPendingEditsAndKeepsPrefixSiblingOpen() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Archive", isDirectory: true)
+        let sibling = root.appendingPathComponent("Archive2", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: false)
+        let child = folder.appendingPathComponent("Child.md")
+        let siblingNote = sibling.appendingPathComponent("Keep.md")
+        try "old".write(to: child, atomically: true, encoding: .utf8)
+        try "keep".write(to: siblingNote, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        var dependencies = AppModelDependencies.live
+        var savedBeforeTrash: String?
+        dependencies.moveToTrash = { url, vaultRoot, identity in
+            savedBeforeTrash = try FileService.read(child)
+            try FileService.moveToTrash(url, root: vaultRoot, expectedFolderIdentity: identity)
+        }
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.openTab(path: child.path)
+        await model.openTab(path: siblingNote.path)
+        model.updateContent(child.path, "latest edit")
+
+        await model.deletePath(folder.path)
+        await model.awaitPendingSaves()
+
+        XCTAssertEqual(savedBeforeTrash, "latest edit")
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.tabs.map(\.path), [siblingNote.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: siblingNote.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+    }
+
+    func testFolderTrashSaveFailureLeavesFolderAndDirtyTabOpen() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Archive", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let child = folder.appendingPathComponent("Child.md")
+        try "old".write(to: child, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.openTab(path: child.path)
+        model.updateContent(child.path, "latest edit")
+        try FileManager.default.removeItem(at: child)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+
+        await model.deletePath(folder.path)
+
+        XCTAssertTrue(FileService.directoryExists(at: folder.path))
+        XCTAssertEqual(model.tabs.map(\.path), [child.path])
+        XCTAssertTrue(try XCTUnwrap(model.tabs.first).dirty)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testFolderTrashMoveFailureLeavesTabsOpenAndReportsError() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Archive", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let child = folder.appendingPathComponent("Child.md")
+        try "old".write(to: child, atomically: true, encoding: .utf8)
+        var dependencies = AppModelDependencies.live
+        dependencies.moveToTrash = { _, _, _ in throw FileServiceError.folderChanged("Archive") }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.openTab(path: child.path)
+
+        await model.deletePath(folder.path)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: child.path))
+        XCTAssertEqual(model.tabs.map(\.path), [child.path])
+        XCTAssertNotNil(model.errorMessage)
     }
 
     func testRenameFolderRetargetsOpenTabsAndSavesPendingEdits() async throws {

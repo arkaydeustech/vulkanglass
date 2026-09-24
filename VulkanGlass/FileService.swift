@@ -8,6 +8,7 @@ enum FileServiceError: LocalizedError, Equatable {
     case missingVault(String)
     case missingFile(String)
     case missingFolder(String)
+    case folderChanged(String)
     case nameTaken(String)
     case symbolicLinkRenameUnsupported(String)
 
@@ -25,6 +26,8 @@ enum FileServiceError: LocalizedError, Equatable {
             return "The file “\(name)” doesn’t exist."
         case .missingFolder(let name):
             return "The folder “\(name)” doesn’t exist."
+        case .folderChanged(let name):
+            return "The folder “\(name)” changed. Choose it again before moving it to the Trash."
         case .nameTaken(let name):
             return "A file named \(name) already exists."
         case .symbolicLinkRenameUnsupported(let path):
@@ -34,6 +37,16 @@ enum FileServiceError: LocalizedError, Equatable {
 }
 
 enum FileService {
+    struct FolderIdentity: Equatable, Sendable {
+        let device: UInt64
+        let inode: UInt64
+    }
+
+    struct FolderContents: Equatable, Sendable {
+        var files = 0
+        var directories = 0
+    }
+
     struct WikiNoteResolution: Sendable {
         let url: URL
         let wasCreated: Bool
@@ -100,24 +113,50 @@ enum FileService {
         return canonical
     }
 
-    /// Counts every file (not folder) beneath `folder`, including hidden and non-Markdown files,
-    /// so a confirmation can say how much moving the folder to the Trash takes with it.
-    static func fileCount(inFolder folder: URL) -> Int {
+    /// Counts all contents that will move, including hidden and tree-excluded subdirectories.
+    /// Call off the main actor: a vault may contain large ignored trees.
+    static func folderContents(in folder: URL) throws -> FolderContents {
+        var enumerationError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: folder,
-            includingPropertiesForKeys: [.isDirectoryKey]
-        ) else { return 0 }
-        var count = 0
-        for case let url as URL in enumerator
-            where (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory != true
-        {
-            count += 1
+            includingPropertiesForKeys: [.isDirectoryKey],
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
+        ) else { throw FileServiceError.missingFolder(folder.lastPathComponent) }
+        var contents = FolderContents()
+        for case let url as URL in enumerator {
+            try Task.checkCancellation()
+            if (try url.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
+                contents.directories += 1
+            } else {
+                contents.files += 1
+            }
         }
-        return count
+        if let enumerationError { throw enumerationError }
+        return contents
     }
 
-    static func moveToTrash(_ url: URL, root: URL) throws {
+    static func folderIdentity(at url: URL) throws -> FolderIdentity {
+        var info = stat()
+        guard lstat(url.path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+            throw FileServiceError.missingFolder(url.lastPathComponent)
+        }
+        return FolderIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
+    }
+
+    static func verifyFolderIdentity(_ expected: FolderIdentity, at url: URL) throws {
+        guard try folderIdentity(at: url) == expected else {
+            throw FileServiceError.folderChanged(url.lastPathComponent)
+        }
+    }
+
+    static func moveToTrash(_ url: URL, root: URL, expectedFolderIdentity: FolderIdentity? = nil) throws {
         let canonical = try validateExisting(url, inside: root)
+        if let expectedFolderIdentity {
+            try verifyFolderIdentity(expectedFolderIdentity, at: canonical)
+        }
         try FileManager.default.trashItem(at: canonical, resultingItemURL: nil)
     }
 
