@@ -193,11 +193,12 @@ enum FileService {
         return destination
     }
 
-    /// Validates a user-entered folder name, rejecting path separators and hidden names.
+    /// Validates a user-entered folder name, rejecting names the vault cannot show.
     static func folderName(from raw: String) throws -> String {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw FileServiceError.emptyName }
         guard !name.hasPrefix("."),
+              !skipped.contains(name),
               name.rangeOfCharacter(from: .newlines) == nil,
               !name.contains("/"),
               !name.contains("\\"),

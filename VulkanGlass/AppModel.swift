@@ -1015,6 +1015,7 @@ final class AppModel {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != source.lastPathComponent else { return true }
         guard await commitTitleEditing() else { return false }
+        guard self.vault?.path == vault.path else { return false }
 
         let prefix = source.path + "/"
         let canonicalTabPaths = tabs.map { ($0.path, FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path) }
@@ -1026,6 +1027,7 @@ final class AppModel {
                 guard await save(id: tab.id, sync: false) else { return false }
             }
         }
+        guard self.vault?.path == vault.path else { return false }
 
         do {
             let dest = try FileService.renameFolder(
@@ -1038,6 +1040,7 @@ final class AppModel {
                 retargetOpenItems(from: tabPath, to: destPath + "/" + canonical.dropFirst(prefix.count))
             }
             await refreshVault(reconcileTabs: true)
+            guard self.vault?.path == vault.path else { return true }
             if settings.autoSync {
                 await syncNow(message: "Rename folder \(source.lastPathComponent) to \(dest.lastPathComponent)")
             }

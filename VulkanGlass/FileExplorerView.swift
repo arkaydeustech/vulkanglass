@@ -27,17 +27,20 @@ final class FolderCreationDraft {
 @Observable
 final class FolderRenameDraft {
     var name = ""
+    var isPresented = false
     private(set) var path: String?
 
     /// Starts renaming `folder`, pre-filling its current name.
     func begin(_ folder: FileNode) {
         path = folder.path
         name = folder.name
+        isPresented = true
     }
 
     func cancel() {
         path = nil
         name = ""
+        isPresented = false
     }
 
     @discardableResult
@@ -55,8 +58,15 @@ struct FileExplorerView: View {
     @State private var filter = ""
     @State private var folderDraft = FolderCreationDraft()
     @State private var askingFolder = false
-    @State private var renameDraft = FolderRenameDraft()
-    @State private var renamingFolder = false
+    @State private var renameDraft: FolderRenameDraft
+
+    init() {
+        _renameDraft = State(initialValue: FolderRenameDraft())
+    }
+
+    init(renameDraft: FolderRenameDraft) {
+        _renameDraft = State(initialValue: renameDraft)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -97,7 +107,7 @@ struct FileExplorerView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(filtered(model.fileTree)) { node in
-                            TreeRow(node: node, depth: 0, onRenameFolder: beginRenaming)
+                            TreeRow(node: node, depth: 0, onRenameFolder: renameDraft.begin)
                         }
                     }
                     .padding(.bottom, 12)
@@ -113,7 +123,7 @@ struct FileExplorerView: View {
                 folderDraft.cancel()
             }
         }
-        .alert("Rename folder", isPresented: $renamingFolder) {
+        .alert("Rename folder", isPresented: $renameDraft.isPresented) {
             TextField("Name", text: $renameDraft.name)
             Button("Rename") {
                 renameDraft.submit(into: model)
@@ -124,11 +134,6 @@ struct FileExplorerView: View {
         } message: {
             Text("Enter a new name for this folder.")
         }
-    }
-
-    private func beginRenaming(_ folder: FileNode) {
-        renameDraft.begin(folder)
-        renamingFolder = true
     }
 
     private func filtered(_ nodes: [FileNode]) -> [FileNode] {
@@ -150,7 +155,7 @@ struct FileExplorerView: View {
     }
 }
 
-private struct TreeRow: View {
+struct TreeRow: View {
     @Environment(AppModel.self) private var model
     let node: FileNode
     let depth: Int

@@ -220,6 +220,38 @@ final class FileServiceTests: XCTestCase {
         XCTAssertEqual(try FileService.read(note), "note")
     }
 
+    func testRenameFolderRejectsNamesExcludedFromTheVault() throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let note = folder.appendingPathComponent("Keep.md")
+        try "keep".write(to: note, atomically: true, encoding: .utf8)
+
+        for name in ["dist", "out", "node_modules"] {
+            XCTAssertThrowsError(try FileService.renameFolder(folder, to: name, root: root)) { error in
+                XCTAssertEqual(error as? FileServiceError, .invalidRelativePath(name))
+            }
+            XCTAssertEqual(try FileService.read(note), "keep")
+            XCTAssertEqual(FileService.tree(at: root).map(\.name), ["Notes"])
+            XCTAssertEqual(FileService.index(at: root).map(\.path), [FileService.canonicalURL(note).path])
+        }
+    }
+
+    func testRenameFolderRejectsSymbolicLinkWithoutMovingItsTarget() throws {
+        let root = try temporaryDirectory()
+        let target = root.appendingPathComponent("Target", isDirectory: true)
+        let link = root.appendingPathComponent("Linked", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        XCTAssertThrowsError(try FileService.renameFolder(link, to: "Moved", root: root)) { error in
+            XCTAssertEqual(error as? FileServiceError, .invalidRelativePath(link.path))
+        }
+        XCTAssertTrue(FileService.directoryExists(at: target.path))
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), target.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Moved").path))
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
