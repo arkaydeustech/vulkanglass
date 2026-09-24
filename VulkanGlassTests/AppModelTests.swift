@@ -950,7 +950,7 @@ final class AppModelTests: XCTestCase {
         let folder = FileNode(name: "Drafts", path: root.appendingPathComponent("Drafts").path, isDirectory: true, children: [])
         let draft = FolderRenameDraft()
         let hostingView = NSHostingView(
-            rootView: TreeRow(node: folder, depth: 0, onRenameFolder: draft.begin)
+            rootView: TreeRow(node: folder, depth: 0, tree: FileTreeState(), onRenameFolder: draft.begin)
                 .environment(modelWithVault(at: root))
                 .frame(width: 240, height: 30)
         )

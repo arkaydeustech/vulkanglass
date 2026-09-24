@@ -570,8 +570,14 @@ final class AppModel {
         SettingsStore.save(settings)
     }
 
-    /// Opens or focuses a tab for a note path.
-    func openTab(path: String, standalone: Bool = false, content: String? = nil) async {
+    /// Opens or focuses a tab for a note path. With `focusEditor` false the note shows without
+    /// taking keyboard focus, as when it is clicked in the file explorer.
+    func openTab(
+        path: String,
+        standalone: Bool = false,
+        content: String? = nil,
+        focusEditor: Bool = true
+    ) async {
         if activeTabID != path {
             guard await commitTitleEditing() else { return }
         }
@@ -581,7 +587,7 @@ final class AppModel {
             titleEditingDraft = ""
             activeTabID = existing.id
             centerView = .editor
-            requestFocusedEditorFocus()
+            if focusEditor { requestFocusedEditorFocus() }
             if existing.isStandalone { rememberFile(path: path) }
             return
         }
@@ -607,7 +613,7 @@ final class AppModel {
             titleEditingDraft = ""
             activeTabID = tab.id
             centerView = .editor
-            requestFocusedEditorFocus()
+            if focusEditor { requestFocusedEditorFocus() }
             if standalone { rememberFile(path: path) }
         } catch {
             errorMessage = error.localizedDescription

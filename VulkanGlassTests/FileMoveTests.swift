@@ -756,6 +756,55 @@ final class FileDragSourceTests: XCTestCase {
         XCTAssertEqual(invoked, ["Open", "Open", "Rename", "Trash"])
     }
 
+    func testArrowKeysMoveTheSelectionAndReturnActivatesTheNote() throws {
+        let (window, source) = hostedSource()
+        defer { window.orderOut(nil) }
+        var invoked: [String] = []
+        source.onClick = { invoked.append("Open") }
+        source.onActivate = { invoked.append("Edit") }
+        source.onMoveSelection = { invoked.append("Move \($0)") }
+        func key(_ characters: String, _ keyCode: UInt16, _ flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: flags,
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                isARepeat: false,
+                keyCode: keyCode
+            ))
+        }
+        let up = String(UnicodeScalar(NSUpArrowFunctionKey)!)
+        let down = String(UnicodeScalar(NSDownArrowFunctionKey)!)
+
+        source.keyDown(with: try key(down, 125, [.function, .numericPad]))
+        source.keyDown(with: try key(up, 126, [.function, .numericPad]))
+        source.keyDown(with: try key(down, 125, [.function, .numericPad, .command]))
+        source.keyDown(with: try key("\r", 36))
+        source.keyDown(with: try key(" ", 49))
+        XCTAssertEqual(invoked, ["Move 1", "Move -1", "Edit", "Open"])
+    }
+
+    func testRowFocusIsReportedAndTakenOnRequest() async throws {
+        let (window, source) = hostedSource()
+        defer { window.orderOut(nil) }
+        let other = FileDragSourceView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        source.addSubview(other)
+        var changes: [Bool] = []
+        source.onFocusChange = { changes.append($0) }
+
+        source.focusRequested = true
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertTrue(window.firstResponder === source)
+        window.makeFirstResponder(other)
+        XCTAssertEqual(changes, [true, false])
+    }
+
     private func hostedSource() -> (NSWindow, FileDragSourceView) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 200, height: 24),

@@ -5,6 +5,28 @@ pass when their owning test file is rerun in isolation. Entries remain here when
 resolved so the failure history and verification are preserved. Do not skip or
 delete a failing test to hide a flake.
 
+## PaletteSearchFieldTests.testFocusRetryStopsAfterEightAttempts (VulkanGlassTests/PaletteSearchFieldTests.swift)
+
+- **Status:** open
+- **Date observed:** 2026-09-24
+- **Original command:** `mise run test`
+- **Worker configuration:** Xcode default `xcodebuild test`
+- **Failure:** Xcode reported, “The test runner exited with code 0 before finishing running tests,” while this test was running. No assertion failure was reported.
+- **Suite counts:** 540 total, 539 passed, 1 failed.
+- **Isolated rerun:** `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' -only-testing:VulkanGlassTests/PaletteSearchFieldTests test` → passed, 10/10.
+- **Hypothesis:** The test host exited during this test in the aggregate run and Xcode restarted it. The cause of the exit is not established. The explorer focus changes in this commit do not touch the palette test or its implementation.
+
+## FileMoveModelTests.testNativeExplorerDragRoutesFolderOwnRowRootHeaderAndBackground (VulkanGlassTests/FileMoveTests.swift)
+
+- **Status:** open
+- **Date observed:** 2026-09-24
+- **Original command:** `mise run test`
+- **Worker configuration:** Xcode default `xcodebuild test`
+- **Failure:** In the `header` scenario, `FileMoveTests.swift:560-561` found the destination absent and source still present after the native drag. The test finished in 3.555s.
+- **Suite counts:** 541 total, 539 passed, 2 failed assertions in one test.
+- **Isolated rerun:** `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' -only-testing:VulkanGlassTests/FileMoveModelTests test` → passed, 16/16.
+- **Hypothesis:** The header drop uses native drag travel and release events posted after fixed 50ms and 100ms delays; the failed aggregate run did not deliver a successful header drop. No root cause is established. The same test passed in the earlier 540-test aggregate rerun before the final focus-removal test was added.
+
 ## TabGroupInteractionTests.testNativeTabDragReachesPaneAndStripWithoutMovingTheWindow (VulkanGlassTests/TabGroupTests.swift)
 
 - **Status:** open
@@ -15,6 +37,7 @@ delete a failing test to hide a flake.
 - **Suite counts:** The direct `xcodebuild` run had 440 total, 435 passed, 5 failed (4 failures from this test and 1 unrelated assertion that was fixed); an earlier aggregate run also failed only this test, while two further runs passed 440/440. With `mise run test`, two aggregate runs each had 451 total, 450 passed, 1 failed; an earlier run passed 451/451.
 - **Isolated reruns:** `-only-testing:VulkanGlassTests/TabGroupInteractionTests/testNativeTabDragReachesPaneAndStripWithoutMovingTheWindow` passed 3/3 on the reading code block branch and 3/3 on unmodified `449e1eb`. Later alternating isolated runs failed 2/3 on unmodified `449e1eb` and 1/3 on the branch. The broader tab group rerun (`-only-testing` for `TabGroupLayoutTests`, `TabGroupModelTests`, `TabGroupCommandTests`, and `TabGroupInteractionTests`) passed 47/47; the affected drag test passed in 0.919s.
 - **Hypothesis:** No evidence-backed root cause yet. The test posts native drag travel and release events after fixed 50ms and 100ms delays, then waits up to 2 seconds for the model move. Window-server timing, focus, or pointer activity may affect delivery. The failure reproduces on unmodified `449e1eb`, so it predates the Markdown rendering changes during which it was observed.
+- **2026-09-24 recurrence:** `mise run test` with 541 tests failed all four pane/strip destination assertions at `TabGroupTests.swift:1038-1039` while the other 540 tests passed. An isolated `TabGroupInteractionTests` rerun failed the pane scenario (13 tests, 2 assertions), and a single-test rerun also failed the pane scenario (2 assertions). This recurrence was observed during explorer focus work; the tab drag code was unchanged.
 
 ## MarkdownResourceTests.testRedirectDelegateRejectsPrivateDestination (VulkanGlassTests/ParserAndMarkdownTests.swift)
 
