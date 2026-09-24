@@ -11,6 +11,8 @@ struct SourceEditor: NSViewRepresentable {
     var focusRequestID: UUID?
     var focusPlacement: EditorFocusRequest.Placement = .end
     var onFocusRequestFulfilled: (UUID) -> Void = { _ in }
+    var headingScrollRequest: HeadingScrollRequest?
+    var onHeadingScrollRequestFulfilled: (UUID) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onChange: { text = $0 })
@@ -63,6 +65,8 @@ struct SourceEditor: NSViewRepresentable {
         context.coordinator.restyle()
         context.coordinator.onFocusRequestFulfilled = onFocusRequestFulfilled
         context.coordinator.updateFocusRequest(focusRequestID, placement: focusPlacement)
+        context.coordinator.onHeadingScrollRequestFulfilled = onHeadingScrollRequestFulfilled
+        context.coordinator.reveal(headingScrollRequest)
         return scroll
     }
 
@@ -85,6 +89,8 @@ struct SourceEditor: NSViewRepresentable {
         applyChrome(textView)
         context.coordinator.refreshWikiPopup()
         context.coordinator.updateFocusRequest(focusRequestID, placement: focusPlacement)
+        context.coordinator.onHeadingScrollRequestFulfilled = onHeadingScrollRequestFulfilled
+        context.coordinator.reveal(headingScrollRequest)
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
@@ -114,6 +120,8 @@ struct SourceEditor: NSViewRepresentable {
         var baseURL: URL?
         var loadRemoteImages = false
         var onFocusRequestFulfilled: (UUID) -> Void = { _ in }
+        var onHeadingScrollRequestFulfilled: (UUID) -> Void = { _ in }
+        private var revealedHeadingID: UUID?
         private var cachedText: String?
         private var cachedTokens: [LivePreview.Token] = []
         private let popup = WikiLinkPopupController()
@@ -195,6 +203,30 @@ struct SourceEditor: NSViewRepresentable {
                     self.requestFocus(id: id, remainingAttempts: remainingAttempts - 1)
                 }
             }
+        }
+
+        /// Scrolls a heading's line to the top once per request.
+        func reveal(_ request: HeadingScrollRequest?) {
+            guard let request, revealedHeadingID != request.id else { return }
+            revealedHeadingID = request.id
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let textView = self.textView, !self.dismantling else { return }
+                let location = Self.location(ofLine: request.heading.line, in: textView.string)
+                textView.scrollLineToTop(containingCharacterAt: location)
+                self.onHeadingScrollRequestFulfilled(request.id)
+            }
+        }
+
+        /// The UTF-16 offset where a one-based line starts, clamped to the text.
+        static func location(ofLine line: Int, in text: String) -> Int {
+            let ns = text as NSString
+            var location = 0
+            for _ in 1..<max(line, 1) {
+                let next = ns.range(of: "\n", range: NSRange(location: location, length: ns.length - location))
+                guard next.location != NSNotFound else { return ns.length }
+                location = next.location + 1
+            }
+            return location
         }
 
         func prepareForDismantle() {
@@ -1870,6 +1902,15 @@ struct NoteEditorView: View {
                         dark: model.dark,
                         loadRemoteImages: model.settings.loadRemoteImages,
                         layoutCoordinateSpace: "NoteEditorLayout",
+                        headingTarget: headingScrollRequest(for: tab).map {
+                            ReadingHeadingTarget(
+                                id: $0.id,
+                                level: $0.heading.level,
+                                text: $0.heading.text,
+                                occurrence: $0.occurrence
+                            )
+                        },
+                        onHeadingTargetFulfilled: { model.fulfillHeadingScrollRequest($0) },
                         onLayout: onDocumentLeading == nil ? nil : { metrics in
                             if let leading = metrics.contentLeading {
                                 onDocumentLeading?(.previewBody, leading)
@@ -1889,7 +1930,9 @@ struct NoteEditorView: View {
                             ? model.editorFocusRequest?.id
                             : nil,
                         focusPlacement: model.editorFocusRequest?.placement ?? .end,
-                        onFocusRequestFulfilled: { model.fulfillEditorFocusRequest($0) }
+                        onFocusRequestFulfilled: { model.fulfillEditorFocusRequest($0) },
+                        headingScrollRequest: headingScrollRequest(for: tab),
+                        onHeadingScrollRequestFulfilled: { model.fulfillHeadingScrollRequest($0) }
                     )
                         .background {
                             if onDocumentLeading != nil {
@@ -1934,6 +1977,14 @@ struct NoteEditorView: View {
                 .foregroundStyle(VGTheme.textFaint(dark: model.dark))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// The outline's scroll request, for the focused group's view of its tab only.
+    private func headingScrollRequest(for tab: NoteTab) -> HeadingScrollRequest? {
+        guard let request = model.headingScrollRequest, request.tabID == tab.id,
+              groupID == nil || groupID == model.tabGroupLayout.focusedGroupID
+        else { return nil }
+        return request
     }
 
     private func titleRow(_ tab: NoteTab) -> some View {

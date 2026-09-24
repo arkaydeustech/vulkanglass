@@ -30,9 +30,13 @@ struct MarkdownPreviewView: View {
     var loadRemoteImages = false
     var hidesLeadingTitle = true
     var layoutCoordinateSpace: String? = nil
+    var headingTarget: ReadingHeadingTarget? = nil
+    var onHeadingTargetFulfilled: (UUID) -> Void = { _ in }
     var onLayout: ((MarkdownPreviewLayoutMetrics) -> Void)? = nil
     var onWiki: (String) -> Void
     let displayBlocks: [MDBlock]
+    /// The leading title heading that the note's title row replaces, if hidden.
+    private let hiddenTitleKey: String?
 
     init(
         text: String,
@@ -44,6 +48,8 @@ struct MarkdownPreviewView: View {
         hidesLeadingTitle: Bool = true,
         parsedBlocks: [MDBlock]? = nil,
         layoutCoordinateSpace: String? = nil,
+        headingTarget: ReadingHeadingTarget? = nil,
+        onHeadingTargetFulfilled: @escaping (UUID) -> Void = { _ in },
         onLayout: ((MarkdownPreviewLayoutMetrics) -> Void)? = nil,
         onWiki: @escaping (String) -> Void
     ) {
@@ -55,14 +61,31 @@ struct MarkdownPreviewView: View {
         self.loadRemoteImages = loadRemoteImages
         self.hidesLeadingTitle = hidesLeadingTitle
         self.layoutCoordinateSpace = layoutCoordinateSpace
+        self.headingTarget = headingTarget
+        self.onHeadingTargetFulfilled = onHeadingTargetFulfilled
         self.onLayout = onLayout
         self.onWiki = onWiki
 
         var blocks = parsedBlocks ?? MDBlock.parse(text)
-        if hidesLeadingTitle, case .heading(1, _) = blocks.first {
+        if hidesLeadingTitle, case .heading(1, let title) = blocks.first {
             blocks.removeFirst()
+            hiddenTitleKey = ReadingHeadingTarget.key(level: 1, text: title)
+        } else {
+            hiddenTitleKey = nil
         }
         displayBlocks = blocks
+    }
+
+    /// The target within the displayed blocks. The hidden title resolves to no heading,
+    /// which scrolls to the top where the title row stands in for it.
+    var displayedHeadingTarget: ReadingHeadingTarget? {
+        guard let headingTarget, headingTarget.key == hiddenTitleKey else { return headingTarget }
+        return ReadingHeadingTarget(
+            id: headingTarget.id,
+            level: headingTarget.level,
+            text: headingTarget.text,
+            occurrence: headingTarget.occurrence - 1
+        )
     }
 
     var body: some View {
@@ -79,6 +102,8 @@ struct MarkdownPreviewView: View {
                 dark: dark,
                 loadLocalImages: loadLocalImages,
                 loadRemoteImages: loadRemoteImages,
+                headingTarget: displayedHeadingTarget,
+                onHeadingTargetFulfilled: onHeadingTargetFulfilled,
                 onWiki: onWiki
             )
             // The scroll view spans the pane so its scroller sits at the trailing edge;
@@ -131,6 +156,22 @@ final class DocumentScrollView: NSScrollView {
     }
 }
 
+/// A heading the reading view should scroll to the top.
+struct ReadingHeadingTarget: Equatable {
+    let id: UUID
+    let level: Int
+    let text: String
+    /// How many earlier headings with the same level and text to skip.
+    let occurrence: Int
+
+    /// Identifies a heading by level and trimmed source text.
+    static func key(level: Int, text: String) -> String {
+        "\(level):\(text.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    var key: String { Self.key(level: level, text: text) }
+}
+
 /// One native text system owns a prose document's selection. That lets a drag cross
 /// paragraphs and inline styles, and keeps contextual actions scoped to this note.
 struct ReadingRenderConfiguration: Equatable {
@@ -149,6 +190,8 @@ struct UnifiedReadingTextView: NSViewRepresentable {
     let dark: Bool
     let loadLocalImages: Bool
     let loadRemoteImages: Bool
+    var headingTarget: ReadingHeadingTarget? = nil
+    var onHeadingTargetFulfilled: (UUID) -> Void = { _ in }
     let onWiki: (String) -> Void
 
     private var configuration: ReadingRenderConfiguration {
@@ -215,6 +258,8 @@ struct UnifiedReadingTextView: NSViewRepresentable {
 
     private func update(_ textView: ReadingNSTextView, coordinator: Coordinator) {
         coordinator.render(configuration, in: textView)
+        coordinator.onHeadingTargetFulfilled = onHeadingTargetFulfilled
+        coordinator.reveal(headingTarget, in: textView)
     }
 
     @MainActor
@@ -222,8 +267,12 @@ struct UnifiedReadingTextView: NSViewRepresentable {
         typealias ImageLoader = @Sendable (URL) async -> ReadingDecodedImage?
 
         var onWiki: (String) -> Void
+        var onHeadingTargetFulfilled: (UUID) -> Void = { _ in }
         weak var textView: ReadingNSTextView?
         private(set) var documentSetCount = 0
+        private var revealedHeadingID: UUID?
+        private var pendingHeadingID: UUID?
+        private var revealedHeadingTarget: ReadingHeadingTarget?
         private var lastConfiguration: ReadingRenderConfiguration?
         private var detailsStates: [String: Bool] = [:]
         private var generation = 0
@@ -254,6 +303,7 @@ struct UnifiedReadingTextView: NSViewRepresentable {
             }
             lastConfiguration = configuration
             generation += 1
+            revealedHeadingTarget = nil
             let currentGeneration = generation
             imageTasks.forEach { $0.cancel() }
             imageTasks.removeAll(keepingCapacity: true)
@@ -274,6 +324,45 @@ struct UnifiedReadingTextView: NSViewRepresentable {
             let boundedLength = min(selection.length, attributedText.length - boundedLocation)
             textView.setSelectedRange(NSRange(location: boundedLocation, length: boundedLength))
             scheduleImageLoads(in: attributedText, generation: currentGeneration)
+        }
+
+        /// Scrolls a heading to the top once per target, after the pending render lays out.
+        func reveal(_ target: ReadingHeadingTarget?, in textView: ReadingNSTextView) {
+            guard let target, revealedHeadingID != target.id,
+                  pendingHeadingID != target.id else { return }
+            pendingHeadingID = target.id
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView, self.textView === textView,
+                      self.pendingHeadingID == target.id else { return }
+                self.pendingHeadingID = nil
+                guard let location = target.occurrence < 0 ? 0 : Self.location(
+                    of: target, in: textView.attributedString()
+                ) else { return }
+                textView.scrollLineToTop(containingCharacterAt: location)
+                self.revealedHeadingID = target.id
+                self.revealedHeadingTarget = target
+                self.onHeadingTargetFulfilled(target.id)
+            }
+        }
+
+        /// Where the target heading starts in a rendered document, if it is present.
+        nonisolated static func location(of target: ReadingHeadingTarget, in text: NSAttributedString) -> Int? {
+            guard target.occurrence >= 0 else { return nil }
+            var remaining = target.occurrence
+            var found: Int?
+            text.enumerateAttribute(
+                .readingHeading,
+                in: NSRange(location: 0, length: text.length)
+            ) { value, range, stop in
+                guard value as? String == target.key else { return }
+                if remaining == 0 {
+                    found = range.location
+                    stop.pointee = true
+                } else {
+                    remaining -= 1
+                }
+            }
+            return found
         }
 
         func stop() {
@@ -345,6 +434,16 @@ struct UnifiedReadingTextView: NSViewRepresentable {
                 textStorage.addAttribute(.attachment, value: attachment, range: range)
             }
             textStorage.endEditing()
+            if let target = revealedHeadingTarget {
+                DispatchQueue.main.async { [weak self, weak textView] in
+                    guard let self, let textView, self.generation == expectedGeneration,
+                          self.revealedHeadingTarget?.id == target.id,
+                          let location = target.occurrence < 0 ? 0 : Self.location(
+                            of: target, in: textView.attributedString()
+                          ) else { return }
+                    textView.scrollLineToTop(containingCharacterAt: location)
+                }
+            }
         }
 
         func textView(
@@ -472,6 +571,29 @@ extension NSAttributedString.Key {
     static let readingDetailsInitiallyOpen = NSAttributedString.Key(
         "VulkanGlassReadingDetailsInitiallyOpen"
     )
+    /// A heading's `ReadingHeadingTarget.key`, so the outline can find it.
+    static let readingHeading = NSAttributedString.Key("VulkanGlassReadingHeading")
+}
+
+extension NSTextView {
+    /// Scrolls the enclosing scroll view so the line holding `location` sits at the top.
+    func scrollLineToTop(containingCharacterAt location: Int, margin: CGFloat = 8) {
+        let length = (string as NSString).length
+        guard length > 0, let layoutManager, textContainer != nil else { return }
+        let character = min(max(0, location), length - 1)
+        layoutManager.ensureLayout(forCharacterRange: NSRange(location: 0, length: character + 1))
+        let glyph = layoutManager.glyphIndexForCharacter(at: character)
+        let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        // A viewport-tall rect starting at the line can only be made visible by putting
+        // the line at the top, unless the document ends first.
+        let visible = visibleRect
+        scrollToVisible(NSRect(
+            x: visible.minX,
+            y: max(0, line.minY + textContainerOrigin.y - margin),
+            width: visible.width,
+            height: visible.height
+        ))
+    }
 }
 
 struct ReadingDecodedImage: @unchecked Sendable {
@@ -676,7 +798,13 @@ enum ReadingAttributedDocument {
                 }
                 result.append(styled)
             case .heading(let level, let source):
+                let start = result.length
                 appendInline(source, font: headingFont(level))
+                result.addAttribute(
+                    .readingHeading,
+                    value: ReadingHeadingTarget.key(level: level, text: source),
+                    range: NSRange(location: start, length: result.length - start)
+                )
             case .alert(let kind, let lines):
                 let color = alertColor(kind)
                 result.append(NSAttributedString(string: "\(kind.title)\n", attributes: [
@@ -783,7 +911,7 @@ enum ReadingAttributedDocument {
                         .font: bodyFont,
                         .foregroundColor: textColor,
                     ]))
-                    result.append(make(
+                    let nested = NSMutableAttributedString(attributedString: make(
                         blocks: MDBlock.parse(body),
                         noteTitles: noteTitles,
                         baseURL: baseURL,
@@ -794,6 +922,8 @@ enum ReadingAttributedDocument {
                         expandedDetails: expandedDetails,
                         pathPrefix: "\(detailsID)."
                     ))
+                    nested.removeAttribute(.readingHeading, range: NSRange(location: 0, length: nested.length))
+                    result.append(nested)
                 }
             case .definitionList(let items):
                 for (itemIndex, item) in items.enumerated() {
@@ -1072,6 +1202,46 @@ private extension NSFont {
     }
 }
 
+/// Block syntax shared by outline extraction and the reading renderer.
+enum MarkdownBlockSyntax {
+    struct Fence {
+        let marker: Character
+        let length: Int
+        let info: String
+        let indent: Int
+    }
+
+    static func fenceOpening(_ line: String) -> Fence? {
+        let indent = line.prefix(while: { $0 == " " }).count
+        guard indent <= 3 else { return nil }
+        let content = line.dropFirst(indent)
+        guard let marker = content.first, marker == "`" || marker == "~" else { return nil }
+        let length = content.prefix(while: { $0 == marker }).count
+        guard length >= 3 else { return nil }
+        if marker == "`", content.dropFirst(length).contains("`") { return nil }
+        return Fence(marker: marker, length: length,
+                     info: String(content.dropFirst(length)).trimmingCharacters(in: .whitespaces),
+                     indent: indent)
+    }
+
+    static func isFenceClosing(_ line: String, opening: Fence) -> Bool {
+        let indent = line.prefix(while: { $0 == " " }).count
+        guard indent <= opening.indent + 3 else { return false }
+        let content = line.dropFirst(indent)
+        let length = content.prefix(while: { $0 == opening.marker }).count
+        return length >= opening.length && content.dropFirst(length).allSatisfy(\.isWhitespace)
+    }
+
+    static func heading(_ line: String) -> (level: Int, text: String)? {
+        let level = line.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(level) else { return nil }
+        let rest = line.dropFirst(level)
+        guard let separator = rest.first, separator == " " || separator == "\t" else { return nil }
+        let text = String(rest.drop(while: { $0 == " " || $0 == "\t" }))
+        return text.isEmpty ? nil : (level, text)
+    }
+}
+
 enum MDBlock: Equatable, Sendable {
     case code(language: String, code: String)
     case heading(Int, String)
@@ -1092,17 +1262,13 @@ enum MDBlock: Equatable, Sendable {
         var i = 0
         while i < raw.count {
             let line = raw[i]
-            if let openingFence = codeFenceOpening(line) {
+            if let openingFence = MarkdownBlockSyntax.fenceOpening(line) {
                 var buffer = [line]
                 var closed = false
                 i += 1
                 while i < raw.count {
                     buffer.append(raw[i])
-                    if isCodeFenceClosing(
-                        raw[i],
-                        minimumLength: openingFence.length,
-                        openingIndent: openingFence.indent
-                    ) {
+                    if MarkdownBlockSyntax.isFenceClosing(raw[i], opening: openingFence) {
                         closed = true
                         i += 1
                         break
@@ -1240,8 +1406,8 @@ enum MDBlock: Equatable, Sendable {
                 result.append(.table(rows, alignments, hasHeader: true))
                 continue
             }
-            if let heading = heading(line) {
-                result.append(.heading(heading.0, heading.1))
+            if let heading = MarkdownBlockSyntax.heading(line) {
+                result.append(.heading(heading.level, heading.text))
                 i += 1
                 continue
             }
@@ -1253,8 +1419,8 @@ enum MDBlock: Equatable, Sendable {
             while i < raw.count {
                 let current = raw[i]
                 if current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
-                if codeFenceOpening(current) != nil || current.hasPrefix("> ") || GFM.isHorizontalRule(current) { break }
-                if let _ = heading(current) { break }
+                if MarkdownBlockSyntax.fenceOpening(current) != nil || current.hasPrefix("> ") || GFM.isHorizontalRule(current) { break }
+                if MarkdownBlockSyntax.heading(current) != nil { break }
                 if i + 1 < raw.count, GFM.isTable(header: current, separator: raw[i + 1]) { break }
                 if !lines.isEmpty, isSemanticHTMLBlockStart(current) { break }
                 lines.append(current)
@@ -1339,30 +1505,6 @@ enum MDBlock: Equatable, Sendable {
         return false
     }
 
-    /// Fences may be indented, e.g. under a list item; `indent` counts the whitespace
-    /// before the backticks, which is stripped from the code lines that follow.
-    private static func codeFenceOpening(_ line: String) -> (length: Int, info: String, indent: Int)? {
-        let indent = line.prefix { $0 == " " }.count
-        guard indent <= 3 else { return nil }
-        let rest = line.dropFirst(indent)
-        let length = rest.prefix { $0 == "`" }.count
-        guard length >= 3, !rest.dropFirst(length).contains("`") else { return nil }
-        return (length, String(rest.dropFirst(length)).trimmingCharacters(in: .whitespaces), indent)
-    }
-
-    private static func isCodeFenceClosing(
-        _ line: String,
-        minimumLength: Int,
-        openingIndent: Int
-    ) -> Bool {
-        let indent = line.prefix { $0 == " " }.count
-        guard indent <= openingIndent + 3 else { return false }
-        let rest = line.dropFirst(indent)
-        let length = rest.prefix { $0 == "`" }.count
-        guard length >= minimumLength else { return false }
-        return rest.dropFirst(length).allSatisfy(\.isWhitespace)
-    }
-
     private static func dropIndent(upTo count: Int, from line: String) -> String {
         let leading = line.prefix { $0 == " " || $0 == "\t" }.count
         return String(line.dropFirst(min(count, leading)))
@@ -1387,16 +1529,6 @@ enum MDBlock: Equatable, Sendable {
             of: #"^<hr(?:\s[^>]*)?/?>$"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
-    }
-
-    private static func heading(_ block: String) -> (Int, String)? {
-        if block.hasPrefix("###### ") { return (6, String(block.dropFirst(7))) }
-        if block.hasPrefix("##### ") { return (5, String(block.dropFirst(6))) }
-        if block.hasPrefix("#### ") { return (4, String(block.dropFirst(5))) }
-        if block.hasPrefix("### ") { return (3, String(block.dropFirst(4))) }
-        if block.hasPrefix("## ") { return (2, String(block.dropFirst(3))) }
-        if block.hasPrefix("# ") { return (1, String(block.dropFirst(2))) }
-        return nil
     }
 }
 

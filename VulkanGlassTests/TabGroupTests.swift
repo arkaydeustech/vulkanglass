@@ -831,6 +831,46 @@ final class TabGroupInteractionTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === first)
     }
 
+    func testOutlineRevealScrollsOnlyTheFocusedSourcePane() async throws {
+        let model = try modelWithTabs()
+        let body = (1...80).map { "Body line \($0)" }.joined(separator: "\n")
+        let firstGroup = model.tabGroupLayout.focusedGroupID
+        model.dropTab(model.tabs[1].id, on: firstGroup, zone: .trailing)
+        await model.focusGroup(firstGroup)
+        await model.setActiveTab(model.tabs[0].id)
+        model.tabs[0].content = "# One\n\(body)\n## Target"
+        model.tabs[1].content = "# Two\n\(body)\n## Other"
+        model.tabs[0].editorMode = .source
+        model.tabs[1].editorMode = .source
+        let host = NSHostingView(rootView: TabGroupsView().environment(model).frame(width: 900, height: 400))
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        for _ in 0..<50 {
+            host.layoutSubtreeIfNeeded()
+            if descendants(of: host).compactMap({ $0 as? SourceTextView }).count == 2 { break }
+            await Task.yield()
+        }
+        let editors = descendants(of: host).compactMap { $0 as? SourceTextView }
+        let focused = try XCTUnwrap(
+            editors.first { $0.string.contains("## Target") },
+            "editors: \(editors.map { String($0.string.prefix(30)) }); tabs: \(model.tabs.map { String($0.content.prefix(30)) })"
+        )
+        let other = try XCTUnwrap(editors.first { $0.string.contains("## Other") })
+
+        model.revealHeading(at: 1)
+        for _ in 0..<100 where model.headingScrollRequest != nil {
+            host.layoutSubtreeIfNeeded()
+            await Task.yield()
+        }
+
+        XCTAssertNil(model.headingScrollRequest)
+        XCTAssertGreaterThan(focused.visibleRect.minY, 0)
+        XCTAssertEqual(other.visibleRect.minY, 0, accuracy: 1)
+    }
+
     func testMouseFocusPreservesTheClickedEditorsSelection() async throws {
         let model = try modelWithTabs()
         model.tabs[0].editorMode = .source
