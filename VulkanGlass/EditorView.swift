@@ -1126,10 +1126,7 @@ final class SourceTextView: NSTextView {
         for decoration in liveDecorations.codeBlocks {
             guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
                   rect.intersects(dirtyRect) else { continue }
-            let fill = decoration.dark
-                ? NSColor(red: 0.16, green: 0.16, blue: 0.17, alpha: 1)
-                : NSColor(red: 0.94, green: 0.94, blue: 0.95, alpha: 1)
-            fill.setFill()
+            CodeHighlight.blockFill(dark: decoration.dark).setFill()
             NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
         }
         for decoration in liveDecorations.tables {
@@ -1215,10 +1212,8 @@ final class SourceTextView: NSTextView {
             guard let rect = blockRect(for: decoration.range, layoutManager: layoutManager, textContainer: textContainer),
                   rect.intersects(dirtyRect) else { continue }
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-                .foregroundColor: decoration.dark
-                    ? NSColor(red: 0.52, green: 0.54, blue: 0.56, alpha: 1)
-                    : NSColor(red: 0.48, green: 0.50, blue: 0.52, alpha: 1)
+                .font: CodeHighlight.labelFont,
+                .foregroundColor: CodeHighlight.labelColor(dark: decoration.dark)
             ]
             let size = (label as NSString).size(withAttributes: attrs)
             (label as NSString).draw(at: NSPoint(x: rect.maxX - 12 - size.width, y: rect.minY + 6), withAttributes: attrs)

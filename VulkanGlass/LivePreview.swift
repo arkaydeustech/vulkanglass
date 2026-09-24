@@ -103,7 +103,7 @@ enum LivePreview {
     }
 
     private enum Regex {
-        static let fence = try! NSRegularExpression(pattern: "^(```+)[^\\n]*", options: .anchorsMatchLines)
+        static let fence = try! NSRegularExpression(pattern: "^[ \\t]*(```+)[^\\n]*", options: .anchorsMatchLines)
         static let heading = try! NSRegularExpression(pattern: "^(#{1,6})[ \\t]+")
         static let taskList = try! NSRegularExpression(pattern: #"^(\s*)([-*+])[ \t]+\[([ xX])\][ \t]+"#)
         static let list = try! NSRegularExpression(pattern: #"^(\s*)([-*+])[ \t]+"#)
@@ -355,9 +355,39 @@ enum LivePreview {
                 }
             }
         }
+        applyListHangingIndents(for: found, in: storage)
         styleTables(decorations.tables, in: storage)
         storage.endEditing()
         return decorations
+    }
+
+    /// Wrapped lines of a list item start under its text rather than under the marker.
+    private static func applyListHangingIndents(for tokens: [Token], in storage: NSTextStorage) {
+        let ns = storage.string as NSString
+        for token in tokens {
+            switch token.kind {
+            case .list, .taskList, .orderedList: break
+            default: continue
+            }
+            guard NSMaxRange(token.fullRange) <= storage.length else { continue }
+            let prefix = listPrefixLength(of: ns.substring(with: token.fullRange))
+            guard prefix > 0 else { continue }
+            let marker = storage.attributedSubstring(
+                from: NSRange(location: token.fullRange.location, length: prefix)
+            )
+            let paragraph = VGTheme.documentParagraphStyle.mutableCopy() as! NSMutableParagraphStyle
+            paragraph.headIndent = ceil(marker.size().width)
+            storage.addAttribute(.paragraphStyle, value: paragraph, range: token.fullRange)
+        }
+    }
+
+    /// Length of a list line's indent, marker, and following space (and `[ ] ` for tasks).
+    private static func listPrefixLength(of line: String) -> Int {
+        let range = NSRange(location: 0, length: (line as NSString).length)
+        for regex in [Regex.taskList, Regex.list, Regex.orderedList] {
+            if let match = regex.firstMatch(in: line, range: range) { return match.range.length }
+        }
+        return 0
     }
 
     private static func tableDecorations(
