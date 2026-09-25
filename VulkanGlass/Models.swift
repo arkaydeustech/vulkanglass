@@ -66,6 +66,9 @@ struct AppSettings: Codable, Sendable {
     var loadRemoteImages: Bool
     var leftSidebarWidth: CGFloat
     var rightSidebarWidth: CGFloat
+    /// Set once launch has checked whether Vulkan Glass opens Markdown files, so the offer to
+    /// become the default app is made only on the first run.
+    var checkedDefaultMarkdownEditor: Bool
 
     /// Recent vaults and standalone files together, most recently opened first.
     var recentItems: [RecentItem] {
@@ -104,7 +107,8 @@ struct AppSettings: Codable, Sendable {
         useGitHubCLI: Bool = true,
         loadRemoteImages: Bool = false,
         leftSidebarWidth: CGFloat = VGTheme.sidebarWidth,
-        rightSidebarWidth: CGFloat = VGTheme.sidebarWidth
+        rightSidebarWidth: CGFloat = VGTheme.sidebarWidth,
+        checkedDefaultMarkdownEditor: Bool = false
     ) {
         self.recentVaults = recentVaults
         self.recentFiles = recentFiles
@@ -115,6 +119,7 @@ struct AppSettings: Codable, Sendable {
         self.loadRemoteImages = loadRemoteImages
         self.leftSidebarWidth = leftSidebarWidth
         self.rightSidebarWidth = rightSidebarWidth
+        self.checkedDefaultMarkdownEditor = checkedDefaultMarkdownEditor
     }
 
     init(from decoder: Decoder) throws {
@@ -134,6 +139,10 @@ struct AppSettings: Codable, Sendable {
         loadRemoteImages = try container.decodeIfPresent(Bool.self, forKey: .loadRemoteImages) ?? false
         leftSidebarWidth = try container.decodeIfPresent(CGFloat.self, forKey: .leftSidebarWidth) ?? VGTheme.sidebarWidth
         rightSidebarWidth = try container.decodeIfPresent(CGFloat.self, forKey: .rightSidebarWidth) ?? VGTheme.sidebarWidth
+        checkedDefaultMarkdownEditor = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .checkedDefaultMarkdownEditor
+        ) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -150,6 +159,7 @@ struct AppSettings: Codable, Sendable {
         try container.encode(loadRemoteImages, forKey: .loadRemoteImages)
         try container.encode(leftSidebarWidth, forKey: .leftSidebarWidth)
         try container.encode(rightSidebarWidth, forKey: .rightSidebarWidth)
+        try container.encode(checkedDefaultMarkdownEditor, forKey: .checkedDefaultMarkdownEditor)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -163,6 +173,7 @@ struct AppSettings: Codable, Sendable {
         case loadRemoteImages
         case leftSidebarWidth
         case rightSidebarWidth
+        case checkedDefaultMarkdownEditor
     }
 }
 

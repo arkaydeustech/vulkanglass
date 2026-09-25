@@ -391,13 +391,14 @@ struct SettingsSheet: View {
                     SettingsStore.save(model.settings)
                 }
             }
+            DefaultMarkdownEditorSettingsView()
             Spacer()
             Divider()
             UpdateSettingsView(updater: updater)
             Button("Done") { model.settingsOpen = false }
         }
         .padding(24)
-        .frame(width: 520, height: 660)
+        .frame(width: 520, height: 720)
         .task { await model.connectGitHub() }
     }
 
@@ -437,6 +438,44 @@ struct SettingsSheet: View {
             return "Token saved as a fallback. Using GitHub CLI."
         }
         return "GitHub connected."
+    }
+}
+
+/// Shows whether Vulkan Glass opens Markdown files and offers to make it the default app.
+struct DefaultMarkdownEditorSettingsView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Default Markdown app")
+                Text(Self.statusText(for: model.markdownEditorStatus))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Set Default") { Task { await model.makeDefaultMarkdownEditor() } }
+                .disabled(Self.setDefaultDisabled(
+                    status: model.markdownEditorStatus,
+                    inProgress: model.settingDefaultMarkdownEditor
+                ))
+        }
+        .onAppear { model.refreshMarkdownEditorStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // The default can change in Finder's Get Info while the sheet is open.
+            model.refreshMarkdownEditorStatus()
+        }
+    }
+
+    static func statusText(for status: MarkdownEditorStatus?) -> String {
+        guard let status else { return "Checking…" }
+        if status.isVulkanGlass { return "Vulkan Glass opens Markdown files." }
+        if let name = status.currentAppName { return "Markdown files open in \(name)." }
+        return "No app is set to open Markdown files."
+    }
+
+    static func setDefaultDisabled(status: MarkdownEditorStatus?, inProgress: Bool) -> Bool {
+        inProgress || status?.isVulkanGlass == true
     }
 }
 

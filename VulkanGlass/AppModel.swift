@@ -53,6 +53,8 @@ struct AppModelDependencies {
     /// Asks before a history reset discards the commits after the viewed one. The flag says
     /// whether the vault has a remote the reset will also be pushed to.
     var confirmHistoryReset: @MainActor (GitCommit, Bool) -> Bool = { _, _ in false }
+    /// Reads and changes the app macOS opens Markdown files with.
+    var defaultMarkdownEditor: DefaultMarkdownEditor = .inert
     var gitExecutablePath: () async -> String? = {
         await Task.detached { GitExecutable.path() }.value
     }
@@ -119,7 +121,8 @@ struct AppModelDependencies {
         },
         confirmHistoryReset: { commit, hasRemote in
             HistoryResetAlert.make(commit: commit, hasRemote: hasRemote).runModal() == .alertFirstButtonReturn
-        }
+        },
+        defaultMarkdownEditor: .live
     )
 }
 
@@ -276,6 +279,9 @@ final class AppModel {
     var cloneOpen = false
     var createOpen = false
     var gitMissingWarningOpen = false
+    /// Which app opens Markdown files, as last read by `refreshMarkdownEditorStatus()`.
+    private(set) var markdownEditorStatus: MarkdownEditorStatus?
+    private(set) var settingDefaultMarkdownEditor = false
     var errorMessage: String?
     var busyMessage: String?
     var githubCLIStatus: GitHubCLIStatus {
@@ -364,13 +370,44 @@ final class AppModel {
         systemDarkMode = isDark
     }
 
-    /// Checks for git, loads GitHub identity from GitHub CLI or a saved PAT, then opens `--vault`.
+    /// Checks for git, loads GitHub identity from GitHub CLI or a saved PAT, opens `--vault`, and
+    /// on the first run offers to become the default Markdown app.
     /// Only the first window of a session does this; later windows share its results.
     func bootstrap() async {
         guard session.beginBootstrap() else { return }
         await checkGitInstalled()
         await connectGitHub()
         await session.finishBootstrap()
+        await offerDefaultMarkdownEditorIfNeeded()
+    }
+
+    /// On the first run only, asks to make Vulkan Glass the default app for Markdown files when
+    /// it is not already. The check is recorded whatever the answer, so later launches never ask.
+    func offerDefaultMarkdownEditorIfNeeded() async {
+        let editor = dependencies.defaultMarkdownEditor
+        guard editor.offersOnFirstLaunch, !settings.checkedDefaultMarkdownEditor else { return }
+        patchSettings { $0.checkedDefaultMarkdownEditor = true }
+        refreshMarkdownEditorStatus()
+        guard markdownEditorStatus?.isVulkanGlass != true, editor.confirmMakeDefault() else { return }
+        await makeDefaultMarkdownEditor()
+    }
+
+    /// Re-reads which app macOS opens Markdown files with.
+    func refreshMarkdownEditorStatus() {
+        markdownEditorStatus = dependencies.defaultMarkdownEditor.status()
+    }
+
+    /// Makes Vulkan Glass the app macOS opens Markdown files with.
+    func makeDefaultMarkdownEditor() async {
+        guard !settingDefaultMarkdownEditor else { return }
+        settingDefaultMarkdownEditor = true
+        defer { settingDefaultMarkdownEditor = false }
+        do {
+            try await dependencies.defaultMarkdownEditor.makeDefault()
+        } catch {
+            errorMessage = "Could not make Vulkan Glass the default Markdown app: \(error.localizedDescription)"
+        }
+        refreshMarkdownEditorStatus()
     }
 
     /// Raises the install warning when neither the developer tools nor Homebrew provide git.
