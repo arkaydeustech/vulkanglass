@@ -154,6 +154,50 @@ final class CommitHistoryGitServiceTests: XCTestCase {
         XCTAssertEqual(try Shell.git(["rev-parse", "HEAD"], cwd: pair.local), pair.hashes[0])
     }
 
+    func testResetWithoutUpstreamStillPublishesInsteadOfPullingOldCommits() throws {
+        let pair = try connectedRepositories(commits: ["First", "Second"])
+        _ = try Shell.git(["branch", "--unset-upstream", "main"], cwd: pair.local)
+        _ = try GitService.checkoutHistory(path: pair.local.path, commit: pair.hashes[0], message: "Save")
+
+        try GitService.resetToHistory(path: pair.local.path)
+        XCTAssertTrue(GitService.hasPendingForcePush(at: pair.local))
+        _ = try GitService.sync(path: pair.local.path, message: "Reset", credential: nil)
+
+        XCTAssertEqual(try Shell.git(["rev-parse", "main"], cwd: pair.remote), pair.hashes[0])
+        XCTAssertFalse(GitService.hasPendingForcePush(at: pair.local))
+    }
+
+    func testPendingResetCannotForcePushAnotherBranch() throws {
+        let pair = try connectedRepositories(commits: ["First", "Second"])
+        _ = try Shell.git(["checkout", "-b", "other"], cwd: pair.local)
+        _ = try Shell.git(["push", "-u", "origin", "other"], cwd: pair.local)
+        let otherTip = try Shell.git(["rev-parse", "other"], cwd: pair.local)
+        _ = try Shell.git(["checkout", "main"], cwd: pair.local)
+        _ = try GitService.checkoutHistory(path: pair.local.path, commit: pair.hashes[0], message: "Save")
+        try GitService.resetToHistory(path: pair.local.path)
+        _ = try Shell.git(["checkout", "other"], cwd: pair.local)
+
+        XCTAssertThrowsError(try GitService.sync(path: pair.local.path, message: "Save", credential: nil)) { error in
+            XCTAssertEqual(error as? GitServiceError, .resetPendingOnOtherBranch("main"))
+        }
+        XCTAssertEqual(try Shell.git(["rev-parse", "other"], cwd: pair.remote), otherTip)
+        XCTAssertTrue(GitService.hasPendingForcePush(at: pair.local))
+        _ = try Shell.git(["checkout", "main"], cwd: pair.local)
+        _ = try GitService.sync(path: pair.local.path, message: "Reset", credential: nil)
+        XCTAssertEqual(try Shell.git(["rev-parse", "main"], cwd: pair.remote), pair.hashes[0])
+    }
+
+    func testLegacyBooleanResetMarkerNeverForcePushesCurrentBranch() throws {
+        let pair = try connectedRepositories(commits: ["First", "Second"])
+        _ = try Shell.git(["config", GitService.pendingForcePushKey, "true"], cwd: pair.local)
+
+        XCTAssertThrowsError(try GitService.sync(path: pair.local.path, message: "Save", credential: nil)) { error in
+            XCTAssertEqual(error as? GitServiceError, .legacyResetPending)
+        }
+        XCTAssertFalse(GitService.hasPendingForcePush(at: pair.local))
+        XCTAssertEqual(try Shell.git(["rev-parse", "main"], cwd: pair.remote), pair.hashes[1])
+    }
+
     func testForcePushRefusesWhenTheRemoteMovedSinceTheReset() throws {
         let pair = try connectedRepositories(commits: ["First", "Second"])
         _ = try GitService.checkoutHistory(path: pair.local.path, commit: pair.hashes[0], message: "Save")
@@ -166,7 +210,13 @@ final class CommitHistoryGitServiceTests: XCTestCase {
         _ = try Shell.git(["push", "origin", "main"], cwd: peer)
         let peerTip = try Shell.git(["rev-parse", "HEAD"], cwd: peer)
 
-        XCTAssertThrowsError(try GitService.sync(path: pair.local.path, message: "Reset", credential: nil))
+        XCTAssertThrowsError(try GitService.sync(path: pair.local.path, message: "Reset", credential: nil)) { error in
+            XCTAssertEqual(error as? GitServiceError, .resetRejected)
+        }
+        XCTAssertEqual(try Shell.git(["rev-parse", "main"], cwd: pair.remote), peerTip)
+        XCTAssertFalse(GitService.hasPendingForcePush(at: pair.local))
+        _ = try GitService.pull(path: pair.local.path, credential: nil)
+        _ = try GitService.sync(path: pair.local.path, message: "Save", credential: nil)
         XCTAssertEqual(try Shell.git(["rev-parse", "main"], cwd: pair.remote), peerTip)
     }
 
@@ -346,6 +396,178 @@ final class CommitHistoryModelTests: XCTestCase {
         XCTAssertTrue(model.commitHistory.isEmpty)
     }
 
+    func testHistoryModeRejectsFolderNoteDeleteAndSyncMutations() async throws {
+        let repo = try vaultRepository()
+        let folder = repo.url.appendingPathComponent("Folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let model = try await openedModel(at: repo.url)
+        await model.checkoutCommit(repo.hashes[0])
+        let status = model.gitStatus
+
+        await model.createFolder(name: "New Folder")
+        let renamedFolder = await model.renameFolder(path: folder.path, newName: "Moved")
+        let renamedNote = await model.renameNote(path: repo.url.appendingPathComponent("Welcome.md").path, newName: "Renamed")
+        XCTAssertFalse(renamedFolder)
+        XCTAssertFalse(renamedNote)
+        await model.deletePath(repo.url.appendingPathComponent("Welcome.md").path)
+        await model.syncNow()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent("New Folder").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent("Welcome.md").path))
+        XCTAssertEqual(model.gitStatus?.message, status?.message)
+    }
+
+    func testHistoryWikiLinkOpensExistingOnlyInRequestedGroup() async throws {
+        let repo = try vaultRepository()
+        let model = try await openedModel(at: repo.url)
+        await model.checkoutCommit(repo.hashes[0])
+        // Create a second pane using a standalone file, then request the existing note there.
+        let outside = try temporaryDirectory().appendingPathComponent("Outside.md")
+        try "outside".write(to: outside, atomically: true, encoding: .utf8)
+        await model.openExternalFiles([repo.url.appendingPathComponent("Welcome.md"), outside])
+        model.splitActiveTab(.trailing)
+        let destination = model.tabGroupLayout.focusedGroupID
+        await model.followWikiLink("Welcome", inGroup: destination)
+        let welcome = try XCTUnwrap(model.tabs.first { $0.title == "Welcome" })
+        XCTAssertEqual(model.tabGroupLayout.groupID(containing: welcome.id), destination)
+
+        await model.followWikiLink("Missing")
+        XCTAssertEqual(model.errorMessage, AppModel.readOnlyMessage)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent("Missing.md").path))
+    }
+
+    func testStandaloneTabCanEditWhileVaultShowsHistory() async throws {
+        let repo = try vaultRepository()
+        let model = try await openedModel(at: repo.url)
+        await model.checkoutCommit(repo.hashes[0])
+        let outside = try temporaryDirectory().appendingPathComponent("Outside.md")
+        try "outside".write(to: outside, atomically: true, encoding: .utf8)
+        await model.openExternalFiles([repo.url.appendingPathComponent("Welcome.md"), outside])
+
+        XCTAssertEqual(model.activeTab?.path, FileService.canonicalURL(outside).path)
+        model.editorMode = .source
+        XCTAssertEqual(model.editorMode, .source)
+        let tab = try XCTUnwrap(model.activeTab)
+        model.updateContent(tab.id, "edited")
+        await model.saveActive(sync: false)
+        XCTAssertEqual(try String(contentsOf: outside, encoding: .utf8), "edited")
+    }
+
+    func testVaultWritesStayLockedDuringCheckoutAndReturn() async throws {
+        let repo = try vaultRepository()
+        let gate = HistoryGate()
+        let checkoutStarted = expectation(description: "checkout started")
+        let model = try await modelWithDependencies(at: repo.url) { dependencies in
+            dependencies.checkoutHistory = { path, hash, message in
+                checkoutStarted.fulfill()
+                await gate.pause()
+                return try GitService.checkoutHistory(path: path, commit: hash, message: message)
+            }
+        }
+        let tab = try XCTUnwrap(model.activeTab)
+        let checkout = Task { await model.checkoutCommit(repo.hashes[0]) }
+        await fulfillment(of: [checkoutStarted], timeout: 5)
+        XCTAssertTrue(model.historyTransitionInProgress)
+        model.updateContent(tab.id, "bad edit")
+        let savedDuringCheckout = await model.save(id: tab.id, sync: false)
+        XCTAssertFalse(savedDuringCheckout)
+        await model.newNote()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent("Untitled.md").path))
+        gate.release()
+        await checkout.value
+        XCTAssertEqual(model.activeTab?.content, "# Welcome v1")
+
+        let returnGate = HistoryGate()
+        let returnStarted = expectation(description: "return started")
+        // A second model lets the return dependency be injected before it opens the vault.
+        let returning = try await modelWithDependencies(at: repo.url) { dependencies in
+            dependencies.returnToLatest = { path in
+                returnStarted.fulfill()
+                await returnGate.pause()
+                try GitService.returnToLatest(path: path)
+            }
+        }
+        let older = try XCTUnwrap(returning.activeTab)
+        let returnTask = Task { await returning.returnToLatestCommit() }
+        await fulfillment(of: [returnStarted], timeout: 5)
+        returning.updateContent(older.id, "bad edit")
+        let savedDuringReturn = await returning.save(id: older.id, sync: false)
+        XCTAssertFalse(savedDuringReturn)
+        returnGate.release()
+        await returnTask.value
+        XCTAssertEqual(returning.activeTab?.content, "# Welcome v2")
+    }
+
+    func testReopeningHistoryLocksVaultBeforeHistoryStateCompletes() async throws {
+        let repo = try vaultRepository()
+        _ = try GitService.checkoutHistory(path: repo.url.path, commit: repo.hashes[0], message: "Save")
+        let gate = HistoryGate()
+        let started = expectation(description: "history inspection started")
+        var dependencies = AppModelDependencies(
+            githubCLIStatus: { _ in GitHubCLIStatus() },
+            githubUser: { _ in throw GitHubError.noToken },
+            githubRepos: { _ in [] },
+            loadKeychainToken: { nil },
+            saveKeychainToken: { _ in },
+            authenticationDisabled: { true }
+        )
+        dependencies.historyState = { path in
+            started.fulfill()
+            await gate.pause()
+            return GitService.historyState(path: path)
+        }
+        let model = AppModel(bootstrapOnLaunch: false, dependencies: dependencies)
+        let opening = Task { await model.openVault(path: repo.url.path) }
+        await fulfillment(of: [started], timeout: 5)
+
+        XCTAssertTrue(model.isReadOnly)
+        await model.newNote()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent("Untitled.md").path))
+        gate.release()
+        await opening.value
+        XCTAssertEqual(model.historyCheckout?.commit.hash, repo.hashes[0])
+    }
+
+    func testConcurrentReturnAndResetRunsOnlyOneHistoryOperation() async throws {
+        let repo = try vaultRepository()
+        _ = try GitService.checkoutHistory(path: repo.url.path, commit: repo.hashes[0], message: "Save")
+        let gate = HistoryGate()
+        let started = expectation(description: "return started")
+        let model = try await modelWithDependencies(at: repo.url, confirmReset: { _, _ in true }) { dependencies in
+            dependencies.returnToLatest = { path in
+                started.fulfill()
+                await gate.pause()
+                try GitService.returnToLatest(path: path)
+            }
+        }
+        let returning = Task { await model.returnToLatestCommit() }
+        await fulfillment(of: [started], timeout: 5)
+        await model.resetToHistoryCommit()
+        gate.release()
+        await returning.value
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isReadOnly)
+        XCTAssertEqual(try Shell.git(["rev-parse", "main"], cwd: repo.url), repo.hashes[2])
+    }
+
+    func testConfirmedResetAutoSyncsThroughModel() async throws {
+        let repo = try vaultRepository()
+        let remote = try temporaryDirectory()
+        _ = try Shell.git(["init", "--bare", "-b", "main"], cwd: remote)
+        _ = try Shell.git(["remote", "add", "origin", remote.path], cwd: repo.url)
+        _ = try Shell.git(["push", "-u", "origin", "main"], cwd: repo.url)
+        let model = try await modelWithDependencies(
+            at: repo.url, confirmReset: { _, _ in true }, autoSync: true, authenticationDisabled: false
+        ) { _ in }
+        await model.checkoutCommit(repo.hashes[0])
+        await model.resetToHistoryCommit()
+
+        XCTAssertEqual(try Shell.git(["rev-parse", "main"], cwd: remote), repo.hashes[0])
+        XCTAssertFalse(GitService.hasPendingForcePush(at: repo.url))
+        XCTAssertEqual(model.gitStatus?.state, .synced)
+    }
+
     // MARK: Helpers
 
     /// Welcome.md at v1, then v2, then a second note added.
@@ -374,21 +596,48 @@ final class CommitHistoryModelTests: XCTestCase {
         at root: URL,
         confirmReset: @escaping @MainActor (GitCommit, Bool) -> Bool = { _, _ in false }
     ) async throws -> AppModel {
+        try await modelWithDependencies(at: root, confirmReset: confirmReset) { _ in }
+    }
+
+    private func modelWithDependencies(
+        at root: URL,
+        confirmReset: @escaping @MainActor (GitCommit, Bool) -> Bool = { _, _ in false },
+        autoSync: Bool = false,
+        authenticationDisabled: Bool = true,
+        configure: (inout AppModelDependencies) -> Void
+    ) async throws -> AppModel {
         var settings = AppSettings.default()
-        settings.autoSync = false
+        settings.autoSync = autoSync
         var dependencies = AppModelDependencies(
             githubCLIStatus: { _ in GitHubCLIStatus() },
             githubUser: { _ in throw GitHubError.noToken },
             githubRepos: { _ in [] },
             loadKeychainToken: { nil },
             saveKeychainToken: { _ in },
-            authenticationDisabled: { true }
+            authenticationDisabled: { authenticationDisabled }
         )
         dependencies.confirmHistoryReset = confirmReset
+        configure(&dependencies)
         let model = AppModel(settings: settings, bootstrapOnLaunch: false, dependencies: dependencies)
         await model.openVault(path: root.path)
         XCTAssertEqual(model.activeTab?.title, "Welcome")
         return model
+    }
+
+    @MainActor private final class HistoryGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var released = false
+
+        func pause() async {
+            if released { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func release() {
+            released = true
+            continuation?.resume()
+            continuation = nil
+        }
     }
 
     private func temporaryDirectory() throws -> URL {

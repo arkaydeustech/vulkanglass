@@ -10,8 +10,10 @@ Clicking the vault status at the bottom left lists the branch's 100 most recent 
 Sync now button). Choosing an earlier commit checks it out and puts the vault in read only
 history mode, with a banner at the bottom. Return to latest goes back to the newest commit;
 Reset to current commit, after a confirmation, resets the branch to the viewed commit and
-discards everything after it. On a vault with a remote, the next sync force-pushes the reset
-(with a lease, so it refuses if the remote has moved since).
+discards everything after it. On a vault with a remote, the next sync publishes the reset
+with a lease tied to that branch. If the remote has moved, the app reports the refusal and
+the next sync pulls the remote changes. Switch back to the reset branch before syncing if
+you checked out a different branch outside the app.
 
 Accent color is teal. Layout follows Obsidian (ribbon, file tree, editor, backlinks, graph).
 

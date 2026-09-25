@@ -22,6 +22,9 @@ enum GitServiceError: LocalizedError, Equatable {
     case historyCheckedOut
     case detachedHead
     case notViewingHistory
+    case resetPendingOnOtherBranch(String)
+    case resetRejected
+    case legacyResetPending
 
     var errorDescription: String? {
         switch self {
@@ -43,6 +46,12 @@ enum GitServiceError: LocalizedError, Equatable {
             return "This repository is not on a branch. Check out a branch before browsing its history."
         case .notViewingHistory:
             return "This vault is not showing an earlier commit."
+        case .resetPendingOnOtherBranch(let branch):
+            return "A reset of \(branch) is waiting to sync. Check out that branch before syncing."
+        case .resetRejected:
+            return "The remote changed after the reset, so the reset was not published. The next sync will pull the remote changes. The local branch still points to the reset commit."
+        case .legacyResetPending:
+            return "An unpublished reset from an older version has no recorded branch, so it was not pushed. The next sync will pull the remote changes."
         }
     }
 }
@@ -274,18 +283,44 @@ enum GitService {
             guard historyBranch(at: url) == nil else { throw GitServiceError.historyCheckedOut }
             let remote = try Shell.git(["remote", "get-url", "origin"], cwd: url)
             try prepareCredential(credential, remote: remote)
-            try commitAll(at: url, message: message)
             let branch = try Shell.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: url)
-            if hasPendingForcePush(at: url) {
+            if let pendingBranch = pendingResetBranch(at: url) {
+                // Older builds stored only a Boolean. It cannot identify the reset branch, so
+                // never turn it into a force push of whichever branch happens to be checked out.
+                if pendingBranch == "true",
+                   (try? Shell.git(["config", "--get", pendingForcePushExpectedKey], cwd: url)) == nil {
+                    clearPendingReset(at: url)
+                    throw GitServiceError.legacyResetPending
+                }
+                guard pendingBranch == branch else { throw GitServiceError.resetPendingOnOtherBranch(pendingBranch) }
+            }
+            try commitAll(at: url, message: message)
+            if let pendingBranch = pendingResetBranch(at: url) {
+                assert(pendingBranch == branch)
                 // A history reset dropped commits the remote still has. Pulling first would bring
                 // them straight back, so publish the reset instead, refusing if the remote moved.
-                _ = try networkGit(
-                    ["push", "--force-with-lease", "-u", "origin", branch],
-                    cwd: url,
-                    remote: remote,
-                    credential: credential
-                )
-                _ = try? Shell.git(["config", "--unset", pendingForcePushKey], cwd: url)
+                let stored = (try? Shell.git(["config", "--get", pendingForcePushExpectedKey], cwd: url)) ?? "none"
+                let expected = stored == "none" ? "" : stored
+                do {
+                    _ = try networkGit(
+                        ["push", "--force-with-lease=refs/heads/\(branch):\(expected)", "-u", "origin", branch],
+                        cwd: url,
+                        remote: remote,
+                        credential: credential
+                    )
+                } catch {
+                    // Network errors keep the reset pending. A moved remote is a deliberate
+                    // rejection: release the reset intent so a later pull can recover in-app.
+                    if let advertised = try? networkGit(
+                        ["ls-remote", "origin", "refs/heads/\(branch)"],
+                        cwd: url, remote: remote, credential: credential
+                    ), String(advertised.split(separator: "\t").first ?? "") != expected {
+                        clearPendingReset(at: url)
+                        throw GitServiceError.resetRejected
+                    }
+                    throw error
+                }
+                clearPendingReset(at: url)
                 return GitStatus(state: .synced, branch: branch, remote: remote, message: "Synced to GitHub")
             }
             _ = try networkGit(
@@ -316,7 +351,7 @@ enum GitService {
             try ensureNoRebase(at: url)
             // Neither a viewed commit nor an unpublished history reset may take remote commits.
             guard historyBranch(at: url) == nil else { throw GitServiceError.historyCheckedOut }
-            guard !hasPendingForcePush(at: url) else {
+            guard pendingResetBranch(at: url) == nil else {
                 var result = status(path: path)
                 result.state = .idle
                 result.message = "Reset not yet synced"
@@ -470,8 +505,9 @@ enum GitService {
 extension GitService {
     /// Git config key naming the branch a detached history checkout returns to.
     static let historyBranchKey = "vulkanglass.historyBranch"
-    /// Git config key set when a history reset dropped commits the remote still has.
+    /// Git config key naming the branch whose history reset awaits publication.
     static let pendingForcePushKey = "vulkanglass.pendingForcePush"
+    static let pendingForcePushExpectedKey = "vulkanglass.pendingForcePushExpected"
     static let commitHistoryLimit = 100
 
     private static let fieldSeparator: Character = "\u{1f}"
@@ -574,20 +610,29 @@ extension GitService {
             let target = try Shell.git(["rev-parse", "--verify", "HEAD^{commit}"], cwd: url)
             _ = try Shell.git(["checkout", "-f", "-B", branch, target], cwd: url)
             _ = try? Shell.git(["config", "--unset", historyBranchKey], cwd: url)
-            if let upstream = try? Shell.git(
-                ["rev-parse", "--verify", "--quiet", "\(branch)@{upstream}"],
-                cwd: url
-            ), !upstream.isEmpty,
-               let ahead = try? Shell.git(["rev-list", "--count", "\(target)..\(upstream)"], cwd: url),
-               (Int(ahead) ?? 0) > 0
-            {
-                _ = try Shell.git(["config", pendingForcePushKey, "true"], cwd: url)
+            // Use origin's branch ref directly: a remote-backed vault need not have upstream
+            // tracking configured. Store the expected tip for an explicit, stable lease.
+            if (try? Shell.git(["remote", "get-url", "origin"], cwd: url)) != nil {
+                let expected = (try? Shell.git(
+                    ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/\(branch)"], cwd: url
+                )) ?? ""
+                _ = try Shell.git(["config", pendingForcePushExpectedKey, expected.isEmpty ? "none" : expected], cwd: url)
+                _ = try Shell.git(["config", pendingForcePushKey, branch], cwd: url)
             }
         }
     }
 
     static func hasPendingForcePush(at url: URL) -> Bool {
-        (try? Shell.git(["config", "--get", pendingForcePushKey], cwd: url)) == "true"
+        pendingResetBranch(at: url) != nil
+    }
+
+    private static func pendingResetBranch(at url: URL) -> String? {
+        try? Shell.git(["config", "--get", pendingForcePushKey], cwd: url)
+    }
+
+    private static func clearPendingReset(at url: URL) {
+        _ = try? Shell.git(["config", "--unset", pendingForcePushKey], cwd: url)
+        _ = try? Shell.git(["config", "--unset", pendingForcePushExpectedKey], cwd: url)
     }
 
     /// The branch a history checkout returns to, or nil when HEAD is on a branch (a stale key

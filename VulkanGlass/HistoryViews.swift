@@ -190,11 +190,13 @@ struct HistoryModeBanner: View {
                 Task { await model.returnToLatestCommit() }
             }
             .controlSize(.small)
+            .disabled(model.historyTransitionInProgress)
             .help("Leave history mode on the newest commit of \(checkout.branch)")
             Button("Reset to current commit") {
                 Task { await model.resetToHistoryCommit() }
             }
             .controlSize(.small)
+            .disabled(model.historyTransitionInProgress)
             .help("Reset \(checkout.branch) to \(checkout.commit.shortHash), discarding later commits")
         }
         .padding(.horizontal, 12)
