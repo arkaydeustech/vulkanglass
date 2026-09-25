@@ -51,12 +51,15 @@ final class FolderRenameDraft {
     }
 
     @discardableResult
-    func submit(into model: AppModel) -> Task<Void, Never>? {
+    func submit(into model: AppModel, onCompletion: ((Bool) -> Void)? = nil) -> Task<Void, Never>? {
         let submittedName = name
         let submittedPath = path
         cancel()
         guard let submittedPath else { return nil }
-        return Task { await model.renameFolder(path: submittedPath, newName: submittedName) }
+        return Task {
+            let renamed = await model.renameFolder(path: submittedPath, newName: submittedName)
+            onCompletion?(renamed)
+        }
     }
 }
 
@@ -80,6 +83,10 @@ final class FileTreeState {
     /// The folder the user clicked or right-clicked, highlighted in place of any note until a
     /// note is selected again.
     private(set) var selectedFolderPath: String?
+    private var selectionRevision = 0
+    private var folderSelectionRevision = 0
+    private var pendingNoteOpens: [UUID: (path: String, revision: Int)] = [:]
+    private var pendingFolderRename: (oldPath: String, newPath: String)?
 
     func isOpen(_ folderPath: String) -> Bool {
         !collapsedFolders.contains(folderPath)
@@ -106,12 +113,51 @@ final class FileTreeState {
 
     /// Highlights `folderPath`, as when it is clicked or right-clicked, in place of any note.
     func selectFolder(_ folderPath: String) {
+        selectionRevision += 1
+        folderSelectionRevision = selectionRevision
         selectedFolderPath = folderPath
         focusRequestPath = nil
     }
 
     func clearFolderSelection() {
         selectedFolderPath = nil
+    }
+
+    /// Remaps a selected folder when its rename refresh replaces the old row.
+    func beginFolderRename(from oldPath: String, to newPath: String) {
+        guard selectedFolderPath == oldPath else { return }
+        pendingFolderRename = (oldPath, newPath)
+    }
+
+    func finishFolderRename(succeeded: Bool) {
+        if succeeded, let rename = pendingFolderRename, selectedFolderPath == rename.oldPath {
+            selectFolder(rename.newPath)
+        }
+        pendingFolderRename = nil
+    }
+
+    /// Remembers which interaction began a note open before its title commit can suspend it.
+    func beginNoteOpen(_ path: String) -> UUID {
+        let token = UUID()
+        pendingNoteOpens[token] = (path, selectionRevision)
+        return token
+    }
+
+    func finishNoteOpen(_ token: UUID, activeTabID: String?, previousActiveTabID: String?) {
+        guard let request = pendingNoteOpens[token] else { return }
+        if activeTabID != request.path || activeTabID == previousActiveTabID {
+            pendingNoteOpens[token] = nil
+        }
+    }
+
+    func activeTabChanged(to path: String?) {
+        let matching = pendingNoteOpens.filter { $0.value.path == path }
+        defer { for (token, _) in matching { pendingNoteOpens[token] = nil } }
+        if selectedFolderPath != nil {
+            if pendingFolderRename != nil { return }
+            if let latest = pendingNoteOpens.values.map(\.revision).max(), latest < folderSelectionRevision { return }
+        }
+        clearFolderSelection()
     }
 
     /// The rows on screen, in order: collapsed folders hide their descendants.
@@ -154,14 +200,20 @@ final class FileTreeState {
     /// a surviving note when the focused row was removed by a tree change.
     func reconcileVisibleRows(_ rows: [Row], activeTabID: String?) {
         if let selectedFolderPath, !rows.contains(where: { $0.node.isDirectory && $0.node.path == selectedFolderPath }) {
-            self.selectedFolderPath = nil
+            if let rename = pendingFolderRename, rename.oldPath == selectedFolderPath,
+               rows.contains(where: { $0.node.isDirectory && $0.node.path == rename.newPath }) {
+                self.selectedFolderPath = rename.newPath
+            } else {
+                self.selectedFolderPath = nil
+            }
         }
         let notes = rows.filter { !$0.node.isDirectory }.map(\.node.path)
         let lostFocusedRow = focusedPath.map { !notes.contains($0) } ?? false
         let lostRequestedRow = focusRequestPath.map { !notes.contains($0) } ?? false
         if lostFocusedRow { focusedPath = nil }
         if lostRequestedRow { focusRequestPath = nil }
-        if (lostFocusedRow || lostRequestedRow && focusedPath == nil), focusRequestPath == nil {
+        if (lostFocusedRow || lostRequestedRow && focusedPath == nil), focusRequestPath == nil,
+           selectedFolderPath == nil {
             focusRequestPath = activeTabID.flatMap { notes.contains($0) ? $0 : nil } ?? notes.first
         }
     }
@@ -176,8 +228,13 @@ final class FileTreeState {
     /// Records a note row gaining or losing keyboard focus.
     func focusChanged(_ path: String, focused: Bool) {
         if focused {
+            let wasFocused = focusedPath == path
             focusedPath = path
-            selectedFolderPath = nil
+            // Repeated focus notifications from the note that held first responder before a
+            // folder click do not undo that newer pointer selection.
+            if !wasFocused || focusRequestPath == path {
+                selectedFolderPath = nil
+            }
             if focusRequestPath == path { focusRequestPath = nil }
         } else if focusedPath == path {
             focusedPath = nil
@@ -296,6 +353,12 @@ struct FileExplorerView: View {
         _trashRequest = State(initialValue: FolderTrashRequest())
     }
 
+    init(tree: FileTreeState, renameDraft: FolderRenameDraft) {
+        _tree = State(initialValue: tree)
+        _renameDraft = State(initialValue: renameDraft)
+        _trashRequest = State(initialValue: FolderTrashRequest())
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -402,8 +465,8 @@ struct FileExplorerView: View {
                             tree.reconcileVisibleRows(treeRows, activeTabID: model.activeTabID)
                         }
                         // Opening a note moves the highlight from a picked folder to that note.
-                        .onChange(of: model.activeTabID) { _, _ in
-                            tree.clearFolderSelection()
+                        .onChange(of: model.activeTabID) { _, path in
+                            tree.activeTabChanged(to: path)
                         }
                     }
                 }
@@ -427,7 +490,15 @@ struct FileExplorerView: View {
         .alert("Rename folder", isPresented: $renameDraft.isPresented) {
             TextField("Name", text: $renameDraft.name)
             Button("Rename") {
-                renameDraft.submit(into: model)
+                if let path = renameDraft.path {
+                    let name = renameDraft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let destination = URL(fileURLWithPath: path).deletingLastPathComponent()
+                        .appendingPathComponent(name, isDirectory: true)
+                    tree.beginFolderRename(from: path, to: FileService.canonicalURL(destination).path)
+                }
+                renameDraft.submit(into: model) { succeeded in
+                    tree.finishFolderRename(succeeded: succeeded)
+                }
             }
             Button("Cancel", role: .cancel) {
                 renameDraft.cancel()
@@ -594,14 +665,16 @@ struct TreeRow: View {
                             },
                             // A click keeps keyboard focus on the row, so the arrow keys move on
                             // from it; Return takes the note into the editor.
-                            onClick: { Task { await model.openTab(path: node.path, focusEditor: false) } },
+                            onClick: { openNote(node.path, focusEditor: false) },
                             onActivate: {
+                                guard tree.selectedFolderPath == nil else { return }
                                 let selectedPath = tree.focusRequestPath ?? node.path
-                                Task { await model.openTab(path: selectedPath) }
+                                openNote(selectedPath, focusEditor: true)
                             },
                             onSpace: {
+                                guard tree.selectedFolderPath == nil else { return }
                                 let selectedPath = tree.focusRequestPath ?? node.path
-                                Task { await model.openTab(path: selectedPath, focusEditor: false) }
+                                openNote(selectedPath, focusEditor: false)
                             },
                             onMoveSelection: onMoveSelection,
                             focusRequested: tree.focusRequestPath == node.path,
@@ -625,7 +698,10 @@ struct TreeRow: View {
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-                    .accessibilityAction { Task { await model.openTab(path: node.path) } }
+                    .accessibilityAction {
+                        tree.notePressed()
+                        openNote(node.path, focusEditor: true)
+                    }
                     .accessibilityAction(named: "Rename") { renaming = true }
                     .accessibilityAction(named: "Move to Trash") { confirmingDelete = true }
                 }
@@ -642,6 +718,15 @@ struct TreeRow: View {
             } message: {
                 Text("You can recover it from the macOS Trash.")
             }
+        }
+    }
+
+    private func openNote(_ path: String, focusEditor: Bool) {
+        let previousActiveTabID = model.activeTabID
+        let token = tree.beginNoteOpen(path)
+        Task {
+            await model.openTab(path: path, focusEditor: focusEditor)
+            tree.finishNoteOpen(token, activeTabID: model.activeTabID, previousActiveTabID: previousActiveTabID)
         }
     }
 

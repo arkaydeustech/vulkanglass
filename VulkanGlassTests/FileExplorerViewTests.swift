@@ -433,6 +433,90 @@ final class FileExplorerViewTests: XCTestCase {
         XCTAssertNil(FileTreeState.note(1, from: "/v/Folder/B.md", in: rows))
     }
 
+    func testCollapsingPickedFolderKeepsItSelectedWhenFocusedNoteDisappears() {
+        let state = FileTreeState()
+        let nodes = [
+            FileNode(name: "A.md", path: "/v/A.md", isDirectory: false),
+            FileNode(name: "Folder", path: "/v/Folder", isDirectory: true, children: [
+                FileNode(name: "B.md", path: "/v/Folder/B.md", isDirectory: false),
+            ]),
+        ]
+        state.focusChanged("/v/Folder/B.md", focused: true)
+        state.selectFolder("/v/Folder")
+        state.setOpen(false, folder: "/v/Folder")
+        state.reconcileVisibleRows(FileTreeState.visibleRows(nodes, collapsed: state.collapsedFolders), activeTabID: "/v/Folder/B.md")
+
+        XCTAssertNil(state.focusRequestPath)
+        XCTAssertEqual(state.selectedFolderPath, "/v/Folder")
+        XCTAssertEqual(state.selection(activeTabID: "/v/Folder/B.md"), "/v/Folder")
+    }
+
+    func testOlderNoteOpenDoesNotClearANewerFolderSelection() {
+        let state = FileTreeState()
+        let olderOpen = state.beginNoteOpen("/v/A.md")
+        state.selectFolder("/v/Folder")
+        state.activeTabChanged(to: "/v/A.md")
+        state.finishNoteOpen(olderOpen, activeTabID: "/v/A.md", previousActiveTabID: nil)
+        XCTAssertEqual(state.selection(activeTabID: "/v/A.md"), "/v/Folder")
+
+        let newerOpen = state.beginNoteOpen("/v/B.md")
+        state.activeTabChanged(to: "/v/B.md")
+        state.finishNoteOpen(newerOpen, activeTabID: "/v/B.md", previousActiveTabID: "/v/A.md")
+        XCTAssertEqual(state.selection(activeTabID: "/v/B.md"), "/v/B.md")
+    }
+
+    func testRenamedFolderSelectionFollowsTheNewPath() {
+        let state = FileTreeState()
+        state.selectFolder("/v/Drafts")
+        state.beginFolderRename(from: "/v/Drafts", to: "/v/Published")
+        state.reconcileVisibleRows(FileTreeState.visibleRows([
+            FileNode(name: "Published", path: "/v/Published", isDirectory: true),
+        ], collapsed: []), activeTabID: "/v/Note.md")
+        state.activeTabChanged(to: "/v/Published/Note.md")
+        state.finishFolderRename(succeeded: true)
+        XCTAssertEqual(state.selection(activeTabID: "/v/Published/Note.md"), "/v/Published")
+    }
+
+    func testSelectedFolderFollowsASuccessfulModelRename() async throws {
+        let (model, folderPath, _) = try await vaultWithFolderAndNote()
+        let tree = FileTreeState()
+        let renamedPath = URL(fileURLWithPath: folderPath).deletingLastPathComponent()
+            .appendingPathComponent("Published", isDirectory: true).path
+        tree.selectFolder(folderPath)
+        tree.beginFolderRename(from: folderPath, to: renamedPath)
+
+        let renamed = await model.renameFolder(path: folderPath, newName: "Published")
+        tree.reconcileVisibleRows(FileTreeState.visibleRows(model.fileTree, collapsed: tree.collapsedFolders), activeTabID: model.activeTabID)
+        tree.finishFolderRename(succeeded: renamed)
+
+        XCTAssertTrue(renamed)
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), renamedPath)
+        XCTAssertTrue(FileService.directoryExists(at: renamedPath))
+    }
+
+    func testRenameAlertKeepsTheRenamedFolderHighlighted() async throws {
+        let (model, folderPath, _) = try await vaultWithFolderAndNote()
+        let folder = try XCTUnwrap(model.fileTree.first { $0.path == folderPath })
+        let tree = FileTreeState()
+        let draft = FolderRenameDraft()
+        tree.selectFolder(folderPath)
+        draft.begin(folder)
+        let (window, host) = hostExplorer(FileExplorerView(tree: tree, renameDraft: draft), model: model)
+        defer { window.orderOut(nil) }
+        for _ in 0..<50 where window.attachedSheet == nil { await settle(host) }
+
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        draft.name = "Published"
+        try XCTUnwrap(button(titled: "Rename", in: try XCTUnwrap(sheet.contentView))).performClick(nil)
+        let renamedPath = URL(fileURLWithPath: folderPath).deletingLastPathComponent()
+            .appendingPathComponent("Published", isDirectory: true).path
+        for _ in 0..<50 where !FileService.directoryExists(at: renamedPath) { await settle(host) }
+        await settle(host)
+
+        XCTAssertTrue(FileService.directoryExists(at: renamedPath))
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), renamedPath)
+    }
+
     func testClickingAFolderHighlightsItInsteadOfTheFocusedNote() async throws {
         let (model, folderPath, notePath) = try await vaultWithFolderAndNote()
         let tree = FileTreeState()
@@ -453,6 +537,47 @@ final class FileExplorerViewTests: XCTestCase {
         XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath)
         XCTAssertFalse(tree.isFocusedSelection(notePath))
         XCTAssertFalse(tree.isOpen(folderPath), "the click still toggles the folder")
+    }
+
+    func testClickingAFolderContainingTheFocusedNoteKeepsFolderHighlighted() async throws {
+        let (model, folderPath, notePath) = try await vaultWithFolderAndNote(noteInFolder: true)
+        let tree = FileTreeState()
+        let (window, host) = hostExplorer(FileExplorerView(tree: tree), model: model)
+        defer { window.orderOut(nil) }
+        await settle(host)
+        let note = try XCTUnwrap(descendants(of: host).compactMap { $0 as? FileDragSourceView }.first { $0.path == notePath })
+        XCTAssertTrue(window.makeFirstResponder(note))
+
+        let observer = try folderObserver(in: host)
+        let location = observer.convert(NSPoint(x: observer.bounds.midX, y: observer.bounds.midY), to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            window.sendEvent(try mouseEvent(type, at: location, in: window))
+        }
+        await settle(host)
+
+        XCTAssertFalse(tree.isOpen(folderPath))
+        XCTAssertEqual(tree.selectedFolderPath, folderPath)
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath)
+        XCTAssertNil(tree.focusRequestPath)
+    }
+
+    func testReturnAndSpaceDoNotOpenAnUnselectedFocusedNote() async throws {
+        let (model, folderPath, notePath) = try await vaultWithFolderAndNote()
+        let tree = FileTreeState()
+        let (window, host) = hostExplorer(FileExplorerView(tree: tree), model: model)
+        defer { window.orderOut(nil) }
+        await settle(host)
+        let note = try XCTUnwrap(descendants(of: host).compactMap { $0 as? FileDragSourceView }.first { $0.path == notePath })
+        XCTAssertTrue(window.makeFirstResponder(note))
+        tree.selectFolder(folderPath)
+
+        for (characters, code) in [("\r", UInt16(36)), (" ", UInt16(49))] {
+            note.keyDown(with: try keyEvent(characters, keyCode: code, in: window))
+        }
+        await settle(host)
+
+        XCTAssertNil(model.activeTabID)
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath)
     }
 
     func testRightClickingAFolderSelectsItAndKeepsItSelectedWhileTrashIsConfirmed() async throws {
@@ -492,6 +617,48 @@ final class FileExplorerViewTests: XCTestCase {
         XCTAssertTrue(FileService.directoryExists(at: folderPath))
     }
 
+    func testControlClickSelectsTheFolderBeforeItsMenuAndSelectsANoteWithoutOpeningIt() async throws {
+        let (model, folderPath, notePath) = try await vaultWithFolderAndNote()
+        let tree = FileTreeState()
+        let (window, host) = hostExplorer(FileExplorerView(tree: tree), model: model)
+        defer { window.orderOut(nil) }
+        await settle(host)
+        let observer = try folderObserver(in: host)
+        let folderLocation = observer.convert(NSPoint(x: observer.bounds.midX, y: observer.bounds.midY), to: nil)
+        let folderClick = try mouseEvent(.leftMouseDown, at: folderLocation, in: window, flags: .control)
+        XCTAssertTrue(observer.isMonitoring)
+        XCTAssertTrue(observer.observe(folderClick))
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath)
+
+        let note = try XCTUnwrap(descendants(of: host).compactMap { $0 as? FileDragSourceView }.first { $0.path == notePath })
+        var menuPresented = false
+        note.presentContextMenu = { _, _, _ in menuPresented = true }
+        let noteLocation = note.convert(NSPoint(x: note.bounds.midX, y: note.bounds.midY), to: nil)
+        note.mouseDown(with: try mouseEvent(.leftMouseDown, at: noteLocation, in: window, flags: .control))
+        note.mouseUp(with: try mouseEvent(.leftMouseUp, at: noteLocation, in: window, flags: .control))
+
+        XCTAssertTrue(menuPresented)
+        XCTAssertNil(tree.selectedFolderPath)
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), notePath)
+        XCTAssertNil(model.activeTabID)
+    }
+
+    func testLocalMonitorRoutesControlClickWithoutConsumingTheEvent() throws {
+        let observer = SecondaryClickObserverView(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        let window = NSWindow(contentRect: observer.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = observer
+        window.makeKeyAndOrderFront(nil)
+        var calls = 0
+        observer.onSecondaryClick = { calls += 1 }
+        XCTAssertTrue(observer.isMonitoring)
+
+        NSApp.sendEvent(try mouseEvent(.leftMouseDown, at: NSPoint(x: 100, y: 12), in: window, flags: .control))
+
+        XCTAssertEqual(calls, 1)
+        observer.stopMonitoring()
+    }
+
     func testOpeningANoteMovesTheHighlightFromAPickedFolder() async throws {
         let (model, folderPath, notePath) = try await vaultWithFolderAndNote()
         let tree = FileTreeState()
@@ -503,6 +670,51 @@ final class FileExplorerViewTests: XCTestCase {
         await model.openTab(path: notePath, focusEditor: false)
         for _ in 0..<50 where tree.selectedFolderPath != nil { await settle(host) }
         XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), notePath)
+    }
+
+    func testDelayedNoteOpenDoesNotClearANewerFolderClick() async throws {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let first = root.appendingPathComponent("First.md")
+        let second = root.appendingPathComponent("Second.md")
+        try "first".write(to: first, atomically: true, encoding: .utf8)
+        try "second".write(to: second, atomically: true, encoding: .utf8)
+        let gate = FileExplorerOpenGate()
+        let renameStarted = expectation(description: "Title commit started")
+        var dependencies = AppModelDependencies.live
+        dependencies.renameFile = { source, name, root in
+            renameStarted.fulfill()
+            await gate.wait()
+            return try FileService.rename(source, to: name, root: root)
+        }
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false, dependencies: dependencies)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.refreshVault()
+        await model.openTab(path: first.path, focusEditor: false)
+        model.beginEditingTitle(for: first.path)
+        model.updateTitleDraft(for: first.path, draft: "Renamed")
+        let tree = FileTreeState()
+        let (window, host) = hostExplorer(FileExplorerView(tree: tree), model: model)
+        defer { window.orderOut(nil) }
+        await settle(host)
+        let secondPath = FileService.canonicalURL(second).path
+        let row = try XCTUnwrap(descendants(of: host).compactMap { $0 as? FileDragSourceView }.first { $0.path == secondPath })
+        let location = row.convert(NSPoint(x: row.bounds.midX, y: row.bounds.midY), to: nil)
+        row.mouseDown(with: try mouseEvent(.leftMouseDown, at: location, in: window))
+        row.mouseUp(with: try mouseEvent(.leftMouseUp, at: location, in: window))
+        await fulfillment(of: [renameStarted], timeout: 2)
+
+        let folderPath = FileService.canonicalURL(folder).path
+        tree.selectFolder(folderPath)
+        gate.release()
+        for _ in 0..<50 where model.activeTabID != secondPath { await settle(host) }
+        await settle(host)
+
+        XCTAssertEqual(model.activeTabID, secondPath)
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath)
     }
 
     func testRightClickingANoteSelectsItWithoutOpeningIt() throws {
@@ -531,11 +743,11 @@ final class FileExplorerViewTests: XCTestCase {
         XCTAssertFalse(window.firstResponder === row)
     }
 
-    private func vaultWithFolderAndNote() async throws -> (AppModel, folderPath: String, notePath: String) {
+    private func vaultWithFolderAndNote(noteInFolder: Bool = false) async throws -> (AppModel, folderPath: String, notePath: String) {
         let root = try temporaryDirectory()
         let folder = root.appendingPathComponent("Drafts", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
-        let note = root.appendingPathComponent("Note.md")
+        let note = (noteInFolder ? folder : root).appendingPathComponent("Note.md")
         try "note".write(to: note, atomically: true, encoding: .utf8)
         var settings = AppSettings.default()
         settings.autoSync = false
@@ -568,17 +780,37 @@ final class FileExplorerViewTests: XCTestCase {
         return try XCTUnwrap(observers.first)
     }
 
-    private func mouseEvent(_ type: NSEvent.EventType, at location: NSPoint, in window: NSWindow) throws -> NSEvent {
+    private func mouseEvent(
+        _ type: NSEvent.EventType,
+        at location: NSPoint,
+        in window: NSWindow,
+        flags: NSEvent.ModifierFlags = []
+    ) throws -> NSEvent {
         try XCTUnwrap(NSEvent.mouseEvent(
             with: type,
             location: location,
-            modifierFlags: [],
+            modifierFlags: flags,
             timestamp: 0,
             windowNumber: window.windowNumber,
             context: nil,
             eventNumber: 1,
             clickCount: 1,
             pressure: 1
+        ))
+    }
+
+    private func keyEvent(_ characters: String, keyCode: UInt16, in window: NSWindow) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
         ))
     }
 
@@ -601,5 +833,22 @@ final class FileExplorerViewTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+}
+
+@MainActor
+private final class FileExplorerOpenGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }
