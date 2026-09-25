@@ -3420,7 +3420,8 @@ final class AppModelTests: XCTestCase {
         await model.openTab(path: existing.path)
         model.tabs[0].content = "unsaved"
         let delegate = VulkanGlassAppDelegate()
-        delegate.model = model
+        delegate.session = model.session
+        delegate.windowDidRegister(model)
 
         delegate.application(NSApplication.shared, open: [inside, outside])
         await delegate.externalOpenTask?.value
@@ -3483,23 +3484,27 @@ final class AppModelTests: XCTestCase {
         let second = root.appendingPathComponent("Warm.md")
         try "cold".write(to: first, atomically: true, encoding: .utf8)
         try "warm".write(to: second, atomically: true, encoding: .utf8)
+        let session = AppSession(settings: .default())
         let delegate = VulkanGlassAppDelegate()
+        delegate.session = session
         var windowRequests = 0
         delegate.openMainWindow = { windowRequests += 1 }
 
         delegate.application(NSApplication.shared, open: [first])
         XCTAssertNil(delegate.externalOpenTask)
+        XCTAssertEqual(windowRequests, 1)
 
-        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
-        delegate.model = model
+        let model = AppModel(session: session, bootstrapOnLaunch: false)
+        delegate.windowDidRegister(model)
         await delegate.externalOpenTask?.value
         XCTAssertEqual(model.activeTab?.content, "cold")
 
+        // With a window open the file joins it rather than opening another window.
         delegate.application(NSApplication.shared, open: [second])
         await delegate.externalOpenTask?.value
         XCTAssertEqual(model.tabs.map(\.title), ["Cold", "Warm"])
         XCTAssertEqual(model.activeTab?.content, "warm")
-        XCTAssertEqual(windowRequests, 2)
+        XCTAssertEqual(windowRequests, 1)
     }
 
     func testAppDelegateDefersTerminationAndRepliesAfterUnsavedDecision() async throws {
@@ -3509,7 +3514,8 @@ final class AppModelTests: XCTestCase {
         let model = manualSaveModel(prompts: prompts)
         model.tabs = [NoteTab(path: file.path, title: "Loose", content: "edited", originalContent: "old", isStandalone: true)]
         let delegate = VulkanGlassAppDelegate()
-        delegate.model = model
+        delegate.session = model.session
+        delegate.windowDidRegister(model)
         let app = NSApplication.shared
 
         let cancelledReply = expectation(description: "termination cancelled")
@@ -3543,9 +3549,11 @@ final class AppModelTests: XCTestCase {
         let second = root.appendingPathComponent("Reopen.md")
         try "cold".write(to: first, atomically: true, encoding: .utf8)
         try "reopen".write(to: second, atomically: true, encoding: .utf8)
+        let session = AppSession(settings: .default())
         let delegate = VulkanGlassAppDelegate()
+        delegate.session = session
         delegate.application(NSApplication.shared, open: [first])
-        let model = AppModel(settings: .default(), bootstrapOnLaunch: false)
+        let model = AppModel(session: session, bootstrapOnLaunch: false)
         var reopenRequests = 0
         let hostingView = NSHostingView(
             rootView: Text("Bridge")
@@ -3575,12 +3583,19 @@ final class AppModelTests: XCTestCase {
         await delegate.externalOpenTask?.value
         XCTAssertEqual(model.activeTab?.content, "cold")
 
+        // Closing a window drops its model; the next Finder open asks for a new window and
+        // waits for that window's model.
         window.close()
+        session.unregister(model)
         await drainMainQueue()
         delegate.application(NSApplication.shared, open: [second])
-        await delegate.externalOpenTask?.value
         XCTAssertEqual(reopenRequests, 1)
-        XCTAssertEqual(model.activeTab?.content, "reopen")
+        XCTAssertNil(delegate.model)
+        let reopened = AppModel(session: session, bootstrapOnLaunch: false)
+        delegate.windowDidRegister(reopened)
+        await delegate.externalOpenTask?.value
+        XCTAssertEqual(reopened.activeTab?.content, "reopen")
+        XCTAssertEqual(model.tabs.map(\.title), ["Cold"])
     }
 
     private func disabledAuthDependencies(
