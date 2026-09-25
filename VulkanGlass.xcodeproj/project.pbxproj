@@ -32,6 +32,7 @@
 		DC271D14F28A860A8AB93D33 /* GitHubService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E1F67874442B55D0C583834 /* GitHubService.swift */; };
 		6AEDEAA304D32442A2813C2F /* GitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A8FE378C36995E8B5194EC /* GitService.swift */; };
 		2F33E1A2E4D02D735E23674E /* GraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61AAAB7316018B1C2E97B10B /* GraphView.swift */; };
+		FA94FF36EE90217DEB42E528 /* HistoryViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E9163F35E63A8DF6310E6E1 /* HistoryViews.swift */; };
 		8222DFD638C76F0D441760FD /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 801D8F68F4C283DCBF0C6BA5 /* KeychainService.swift */; };
 		0886DA4F47FE771A9F0F25A8 /* LivePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7694B9A271E832EF18D0308D /* LivePreview.swift */; };
 		443485B6604A6BDE321D7CFE /* LogoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04B18F131CFE1EF03C5DDA94 /* LogoView.swift */; };
@@ -60,6 +61,7 @@
 		695433D745AD0EEE5284117D /* QuickLookPreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */; };
 		3C642F51BDE57C04ED72BD8F /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */; };
 		A52C614C326747059D221A90 /* AppUpdaterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87449A20B27E44E36980B8C7 /* AppUpdaterTests.swift */; };
+		38E5F76EE65993B84EF620E0 /* CommitHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3E17DD7BBDB7387745EA3EB /* CommitHistoryTests.swift */; };
 		0F234D0CD9337C3CD19DF8A0 /* FileExplorerViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6E49D8467D05D48D899AD97 /* FileExplorerViewTests.swift */; };
 		13119D7E17D6D8ED80ECF2B4 /* FileMoveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B162639B9E5303B37D25374 /* FileMoveTests.swift */; };
 		4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */; };
@@ -114,6 +116,7 @@
 				0E1F67874442B55D0C583834 /* GitHubService.swift */,
 				60A8FE378C36995E8B5194EC /* GitService.swift */,
 				61AAAB7316018B1C2E97B10B /* GraphView.swift */,
+				8E9163F35E63A8DF6310E6E1 /* HistoryViews.swift */,
 				801D8F68F4C283DCBF0C6BA5 /* KeychainService.swift */,
 				7694B9A271E832EF18D0308D /* LivePreview.swift */,
 				04B18F131CFE1EF03C5DDA94 /* LogoView.swift */,
@@ -156,6 +159,7 @@
 			children = (
 				88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */,
 				87449A20B27E44E36980B8C7 /* AppUpdaterTests.swift */,
+				C3E17DD7BBDB7387745EA3EB /* CommitHistoryTests.swift */,
 				A6E49D8467D05D48D899AD97 /* FileExplorerViewTests.swift */,
 				2B162639B9E5303B37D25374 /* FileMoveTests.swift */,
 				7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */,
@@ -205,6 +209,7 @@
 		0E1F67874442B55D0C583834 /* GitHubService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubService.swift; sourceTree = "<group>"; };
 		60A8FE378C36995E8B5194EC /* GitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitService.swift; sourceTree = "<group>"; };
 		61AAAB7316018B1C2E97B10B /* GraphView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphView.swift; sourceTree = "<group>"; };
+		8E9163F35E63A8DF6310E6E1 /* HistoryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryViews.swift; sourceTree = "<group>"; };
 		801D8F68F4C283DCBF0C6BA5 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
 		7694B9A271E832EF18D0308D /* LivePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePreview.swift; sourceTree = "<group>"; };
 		04B18F131CFE1EF03C5DDA94 /* LogoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogoView.swift; sourceTree = "<group>"; };
@@ -228,6 +233,7 @@
 		C26171FE0A5971464DE7DF89 /* QuickLookPreviewSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewSupport.swift; sourceTree = "<group>"; };
 		88E9EDC3AE2034E95A0B1466 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
 		87449A20B27E44E36980B8C7 /* AppUpdaterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdaterTests.swift; sourceTree = "<group>"; };
+		C3E17DD7BBDB7387745EA3EB /* CommitHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommitHistoryTests.swift; sourceTree = "<group>"; };
 		A6E49D8467D05D48D899AD97 /* FileExplorerViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerViewTests.swift; sourceTree = "<group>"; };
 		2B162639B9E5303B37D25374 /* FileMoveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileMoveTests.swift; sourceTree = "<group>"; };
 		7EAA3397F10958CA143F6C4D /* GitHubCLIServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCLIServiceTests.swift; sourceTree = "<group>"; };
@@ -265,6 +271,7 @@
 				DC271D14F28A860A8AB93D33 /* GitHubService.swift in Sources */,
 				6AEDEAA304D32442A2813C2F /* GitService.swift in Sources */,
 				2F33E1A2E4D02D735E23674E /* GraphView.swift in Sources */,
+				FA94FF36EE90217DEB42E528 /* HistoryViews.swift in Sources */,
 				8222DFD638C76F0D441760FD /* KeychainService.swift in Sources */,
 				0886DA4F47FE771A9F0F25A8 /* LivePreview.swift in Sources */,
 				443485B6604A6BDE321D7CFE /* LogoView.swift in Sources */,
@@ -293,6 +300,7 @@
 			files = (
 				3C642F51BDE57C04ED72BD8F /* AppModelTests.swift in Sources */,
 				A52C614C326747059D221A90 /* AppUpdaterTests.swift in Sources */,
+				38E5F76EE65993B84EF620E0 /* CommitHistoryTests.swift in Sources */,
 				0F234D0CD9337C3CD19DF8A0 /* FileExplorerViewTests.swift in Sources */,
 				13119D7E17D6D8ED80ECF2B4 /* FileMoveTests.swift in Sources */,
 				4C04B609F83DDA5C4EA746A0 /* GitHubCLIServiceTests.swift in Sources */,

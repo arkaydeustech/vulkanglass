@@ -50,6 +50,9 @@ struct AppModelDependencies {
     }
     /// Asks whether to save standalone files with unsaved edits before they are closed.
     var confirmUnsavedChanges: @MainActor ([String]) -> UnsavedChangesDecision = { _ in .cancel }
+    /// Asks before a history reset discards the commits after the viewed one. The flag says
+    /// whether the vault has a remote the reset will also be pushed to.
+    var confirmHistoryReset: @MainActor (GitCommit, Bool) -> Bool = { _, _ in false }
     var gitExecutablePath: () async -> String? = {
         await Task.detached { GitExecutable.path() }.value
     }
@@ -60,10 +63,24 @@ struct AppModelDependencies {
         try await GitHubService.createRepo(name: name, isPrivate: isPrivate, token: token)
     }
     var vaultGitStatus: @Sendable (String) -> GitStatus = { GitService.status(path: $0) }
+    var historyState: (String) async -> HistoryCheckout? = { path in
+        await Task.detached { GitService.historyState(path: path) }.value
+    }
     var syncGit: (String, String, GitCredential?) async throws -> GitStatus = { path, message, credential in
         try await Task.detached {
             try GitService.sync(path: path, message: message, credential: credential)
         }.value
+    }
+    var checkoutHistory: (String, String, String) async throws -> HistoryCheckout? = { path, hash, message in
+        try await Task.detached {
+            try GitService.checkoutHistory(path: path, commit: hash, message: message)
+        }.value
+    }
+    var returnToLatest: (String) async throws -> Void = { path in
+        try await Task.detached { try GitService.returnToLatest(path: path) }.value
+    }
+    var resetToHistory: (String) async throws -> Void = { path in
+        try await Task.detached { try GitService.resetToHistory(path: path) }.value
     }
     var renameFile: (URL, String, URL?) async throws -> URL = { source, name, root in
         try await Task.detached {
@@ -99,6 +116,9 @@ struct AppModelDependencies {
         },
         confirmUnsavedChanges: { titles in
             UnsavedChangesAlert.decision(for: UnsavedChangesAlert.make(titles: titles).runModal())
+        },
+        confirmHistoryReset: { commit, hasRemote in
+            HistoryResetAlert.make(commit: commit, hasRemote: hasRemote).runModal() == .alertFirstButtonReturn
         }
     )
 }
@@ -227,6 +247,8 @@ final class AppModel {
             return tabs[index].editorMode
         }
         set {
+            // History mode is read-only, so notes stay in reading view.
+            guard !(isReadOnly && newValue.isEditable && activeTab?.savesAutomatically != false) else { return }
             guard let activeTabID,
                   let index = tabs.firstIndex(where: { $0.id == activeTabID })
             else {
@@ -238,6 +260,16 @@ final class AppModel {
     }
     var searchQuery = ""
     var gitStatus: GitStatus?
+    /// Whether the status bar's commit history popover is showing.
+    var historyOpen = false
+    /// The newest commits of the vault's branch, as listed in the history popover.
+    private(set) var commitHistory: [GitCommit] = []
+    private(set) var loadingCommitHistory = false
+    /// Set while the vault shows an earlier commit. The vault is read-only until it returns to
+    /// the branch's newest commit or resets the branch to the viewed one.
+    private(set) var historyCheckout: HistoryCheckout?
+    var isReadOnly: Bool { historyCheckout != nil || historyTransitionInProgress }
+    private(set) var historyTransitionInProgress = false
     var commandOpen = false
     var switcherOpen = false
     var settingsOpen = false
@@ -434,6 +466,9 @@ final class AppModel {
             return
         }
         vault = info
+        historyTransitionInProgress = true
+        defer { historyTransitionInProgress = false }
+        clearHistoryState()
         remember(info)
         busyMessage = "Opening vault…"
         let path = info.path
@@ -441,7 +476,12 @@ final class AppModel {
         let credential = info.isGitHub ? gitCredential : nil
         let hasRemote = info.remote != nil
         let vaultGitStatus = dependencies.vaultGitStatus
+        // A vault closed while showing an earlier commit reopens read-only on that commit.
+        let history = await dependencies.historyState(path)
         let pulled: GitStatus = await Task.detached {
+            if let history {
+                return Self.historyStatus(history, remote: info.remote)
+            }
             do {
                 if hasRemote, !authenticationDisabled {
                     return try GitService.pull(path: path, credential: credential)
@@ -455,6 +495,8 @@ final class AppModel {
                 return GitStatus(state: .error, branch: info.branch, remote: info.remote, message: error.localizedDescription)
             }
         }.value
+        historyCheckout = history
+        if let history { vault?.branch = history.branch }
         gitStatus = pulled
         if pulled.state == .error, pulled.message != GitServiceError.gitNotInstalled.localizedDescription {
             errorMessage = pulled.message
@@ -509,6 +551,7 @@ final class AppModel {
         tabs = []
         activeTabID = nil
         gitStatus = nil
+        clearHistoryState()
         centerView = .editor
     }
 
@@ -836,7 +879,8 @@ final class AppModel {
     }
 
     func beginEditingTitle(for id: String) {
-        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        guard let tab = tabs.first(where: { $0.id == id }),
+              !(isReadOnly && tab.savesAutomatically) else { return }
         if let groupID = tabGroupLayout.groupID(containing: id) {
             updateTabGroupLayout { $0.focus(groupID) }
         }
@@ -949,6 +993,7 @@ final class AppModel {
     /// the edit in memory until the user saves them.
     func updateContent(_ id: String, _ content: String) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard !(isReadOnly && tabs[index].savesAutomatically) else { return }
         tabs[index].content = content
         guard tabs[index].savesAutomatically else { return }
         // The move completion writes the latest text at the destination. An autosave using
@@ -983,9 +1028,11 @@ final class AppModel {
     }
 
     @discardableResult
-    func save(id: String, sync: Bool, allowMovingNote: Bool = false) async -> Bool {
+    func save(id: String, sync: Bool, allowMovingNote: Bool = false,
+              allowHistoryTransition: Bool = false) async -> Bool {
         guard allowMovingNote || !movingNotePaths.contains(id) else { return false }
         guard let tab = tabs.first(where: { $0.id == id }) else { return false }
+        guard !tab.savesAutomatically || !isReadOnly || (allowHistoryTransition && historyCheckout == nil) else { return false }
         do {
             try FileService.write(URL(fileURLWithPath: tab.path), content: tab.content)
             if let index = tabs.firstIndex(where: { $0.id == tab.id }) {
@@ -1004,9 +1051,9 @@ final class AppModel {
 
     /// Writes every pending autosave. Standalone files keep their edits until the user saves them.
     @discardableResult
-    func flushDirtyTabs() async -> Bool {
+    func flushDirtyTabs(allowHistoryTransition: Bool = false) async -> Bool {
         for id in tabs.filter({ $0.dirty && $0.savesAutomatically }).map(\.id) {
-            guard await save(id: id, sync: false) else { return false }
+            guard await save(id: id, sync: false, allowHistoryTransition: allowHistoryTransition) else { return false }
         }
         return true
     }
@@ -1054,7 +1101,9 @@ final class AppModel {
     /// Creates an "Untitled" note and opens it with its title ready to rename. In a vault the note
     /// goes in `folderPath` when given (it must be the vault or a folder inside it), else the root.
     func newNote(inFolder folderPath: String? = nil, inGroup groupID: UUID? = nil) async {
+        guard !rejectedAsReadOnly() else { return }
         guard await commitTitleEditing() else { return }
+        guard !rejectedAsReadOnly() else { return }
         if let vault {
             do {
                 let root = URL(fileURLWithPath: vault.path)
@@ -1087,8 +1136,9 @@ final class AppModel {
     }
 
     func dailyNote() async {
-        guard let vault else { return }
+        guard let vault, !rejectedAsReadOnly() else { return }
         guard await commitTitleEditing() else { return }
+        guard !rejectedAsReadOnly() else { return }
         let dailyDir = URL(fileURLWithPath: vault.path).appendingPathComponent("Daily")
         let name = Markdown.dailyNoteName()
         let existing = dailyDir.appendingPathComponent(name)
@@ -1107,7 +1157,7 @@ final class AppModel {
     }
 
     func createFolder(name: String) async {
-        guard let vault else { return }
+        guard let vault, !rejectedAsReadOnly() else { return }
         do {
             _ = try FileService.createFolder(
                 in: URL(fileURLWithPath: vault.path),
@@ -1122,12 +1172,12 @@ final class AppModel {
     /// Renames a vault folder on disk and retargets every open tab for a note inside it.
     @discardableResult
     func renameFolder(path: String, newName: String) async -> Bool {
-        guard let vault else { return false }
+        guard let vault, !rejectedAsReadOnly() else { return false }
         let source = FileService.canonicalURL(URL(fileURLWithPath: path))
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != source.lastPathComponent else { return true }
         guard await commitTitleEditing() else { return false }
-        guard self.vault?.path == vault.path else { return false }
+        guard self.vault?.path == vault.path, !rejectedAsReadOnly() else { return false }
 
         let prefix = source.path + "/"
         let canonicalTabPaths = tabs.map { ($0.path, FileService.canonicalURL(URL(fileURLWithPath: $0.path)).path) }
@@ -1139,7 +1189,7 @@ final class AppModel {
                 guard await save(id: tab.id, sync: false) else { return false }
             }
         }
-        guard self.vault?.path == vault.path else { return false }
+        guard self.vault?.path == vault.path, !rejectedAsReadOnly() else { return false }
 
         do {
             let dest = try FileService.renameFolder(
@@ -1175,11 +1225,13 @@ final class AppModel {
             proposed = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard proposed != currentTitle else { return true }
+        guard tabs.first(where: { $0.path == path })?.isStandalone == true || !rejectedAsReadOnly() else { return false }
 
         // A standalone file moves with its unsaved edits still pending in the tab.
         if let tab = tabs.first(where: { $0.path == path }), tab.dirty, tab.savesAutomatically {
             guard await save(id: tab.id, sync: false) else { return false }
         }
+        guard tabs.first(where: { $0.path == path })?.isStandalone == true || !rejectedAsReadOnly() else { return false }
 
         let root = vault.map { URL(fileURLWithPath: $0.path) }
         do {
@@ -1201,7 +1253,7 @@ final class AppModel {
     /// Whether the explorer should accept a note dragged onto `folderPath` (a vault folder or
     /// the vault root): the note must be in the vault and not already in that folder.
     func canMoveNote(_ path: String, toFolder folderPath: String) -> Bool {
-        guard let vault, vaultTransitions == 0, !movingNotePaths.contains(path) else { return false }
+        guard let vault, !isReadOnly, vaultTransitions == 0, !movingNotePaths.contains(path) else { return false }
         let root = FileService.canonicalURL(URL(fileURLWithPath: vault.path)).path
         let note = FileService.canonicalURL(URL(fileURLWithPath: path))
         let folder = FileService.canonicalURL(URL(fileURLWithPath: folderPath)).path
@@ -1292,7 +1344,7 @@ final class AppModel {
     /// Moves a vault note, or a folder and everything in it, to the macOS Trash and closes the
     /// tabs of every note that went with it.
     func deletePath(_ path: String, expectedFolderIdentity: FileService.FolderIdentity? = nil) async {
-        guard let vault else { return }
+        guard let vault, !rejectedAsReadOnly() else { return }
         do {
             let url = URL(fileURLWithPath: path)
             let folderIdentity: FileService.FolderIdentity?
@@ -1324,6 +1376,7 @@ final class AppModel {
                     guard self.vault?.path == vault.path else { return }
                 }
             }
+            guard self.vault?.path == vault.path, !rejectedAsReadOnly() else { return }
             try dependencies.moveToTrash(url, URL(fileURLWithPath: vault.path), folderIdentity)
             removedIDs.forEach { saveTasks[$0]?.cancel(); saveTasks[$0] = nil }
             if let titleEditingTabID, removedIDs.contains(titleEditingTabID) {
@@ -1344,9 +1397,26 @@ final class AppModel {
 
     func followWikiLink(_ target: String, inGroup groupID: UUID? = nil) async {
         guard let vault else { return }
+        guard !historyTransitionInProgress else { errorMessage = Self.readOnlyMessage; return }
         guard await commitTitleEditing() else { return }
+        guard !historyTransitionInProgress else { errorMessage = Self.readOnlyMessage; return }
         do {
             let root = URL(fileURLWithPath: vault.path)
+            if isReadOnly {
+                // An earlier commit can be read, not added to: open only notes that exist in it.
+                let existing = await Task.detached {
+                    FileService.resolveWiki(root: root, target: target)
+                }.value
+                guard let existing else {
+                    errorMessage = Self.readOnlyMessage
+                    return
+                }
+                await openTab(path: existing.path)
+                if let groupID, tabGroupLayout.group(groupID) != nil {
+                    moveTab(existing.path, toGroup: groupID)
+                }
+                return
+            }
             let resolution = try await Task.detached {
                 try FileService.createFromWiki(root: root, target: target)
             }.value
@@ -1365,7 +1435,8 @@ final class AppModel {
     }
 
     func syncNow(message: String? = nil) async {
-        guard let vault else { return }
+        // Nothing is synced while the vault shows an earlier commit.
+        guard let vault, !isReadOnly else { return }
         guard !authenticationDisabled else {
             gitStatus = GitStatus(
                 state: .idle,
@@ -1389,6 +1460,192 @@ final class AppModel {
             gitStatus = GitStatus(state: .error, message: error.localizedDescription)
             errorMessage = error.localizedDescription
         }
+    }
+
+    // MARK: Commit history
+
+    static let readOnlyMessage = "This vault is in read-only history mode. "
+        + "Return to the latest commit, or reset to the one you are viewing, to make changes."
+
+    /// The commit whose notes are on disk: the one being viewed, else the branch's newest.
+    var checkedOutCommitHash: String? {
+        historyCheckout?.commit.hash ?? commitHistory.first?.hash
+    }
+
+    /// Reads the newest commits of the vault's branch for the history popover.
+    func loadCommitHistory() async {
+        guard let vault else {
+            commitHistory = []
+            return
+        }
+        let path = vault.path
+        loadingCommitHistory = true
+        defer { loadingCommitHistory = false }
+        do {
+            let commits = try await Task.detached { try GitService.commitHistory(path: path) }.value
+            guard self.vault?.path == path else { return }
+            commitHistory = commits
+        } catch {
+            guard self.vault?.path == path else { return }
+            commitHistory = []
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Checks out an earlier commit and makes the vault read-only while it is shown. Choosing the
+    /// branch's newest commit from history mode returns to it instead.
+    func checkoutCommit(_ hash: String) async {
+        guard let vault, !historyTransitionInProgress else { return }
+        guard hash != checkedOutCommitHash else { return }
+        guard await commitTitleEditing() else { return }
+        guard !historyTransitionInProgress else { return }
+        vaultTransitions += 1
+        defer { vaultTransitions -= 1 }
+        await awaitPendingMoves()
+        guard !historyTransitionInProgress else { return }
+        historyTransitionInProgress = true
+        defer { historyTransitionInProgress = false }
+        // Edits must reach disk so the checkout commits them to the branch rather than losing them.
+        guard await flushDirtyTabs(allowHistoryTransition: true) else { return }
+        saveTasks.values.forEach { $0.cancel() }
+        saveTasks = [:]
+        syncTask?.cancel()
+        syncTask = nil
+        let path = vault.path
+        busyMessage = "Checking out commit…"
+        defer { busyMessage = nil }
+        do {
+            let checkout = try await dependencies.checkoutHistory(
+                path, hash, "Save changes before viewing history"
+            )
+            guard self.vault?.path == path else { return }
+            await applyHistoryCheckout(checkout, vaultPath: path)
+        } catch {
+            guard self.vault?.path == path else { return }
+            errorMessage = error.localizedDescription
+            await loadCommitHistory()
+        }
+    }
+
+    /// Leaves history mode on the branch's newest commit without discarding anything.
+    func returnToLatestCommit() async {
+        guard let vault, historyCheckout != nil, !historyTransitionInProgress else { return }
+        historyTransitionInProgress = true
+        defer { historyTransitionInProgress = false }
+        let path = vault.path
+        busyMessage = "Returning to the latest commit…"
+        defer { busyMessage = nil }
+        do {
+            try await dependencies.returnToLatest(path)
+            guard self.vault?.path == path else { return }
+            await applyHistoryCheckout(nil, vaultPath: path)
+        } catch {
+            guard self.vault?.path == path else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// After confirmation, resets the branch to the viewed commit, discarding every later commit,
+    /// and makes the vault editable again from there. With auto-sync on, the reset is pushed.
+    func resetToHistoryCommit() async {
+        guard let vault, let checkout = historyCheckout, !historyTransitionInProgress else { return }
+        guard dependencies.confirmHistoryReset(checkout.commit, vault.remote != nil) else { return }
+        guard self.vault?.path == vault.path, historyCheckout == checkout,
+              !historyTransitionInProgress else { return }
+        historyTransitionInProgress = true
+        defer { historyTransitionInProgress = false }
+        let path = vault.path
+        busyMessage = "Resetting to \(checkout.commit.shortHash)…"
+        do {
+            try await dependencies.resetToHistory(path)
+            guard self.vault?.path == path else {
+                busyMessage = nil
+                return
+            }
+            await applyHistoryCheckout(nil, vaultPath: path)
+            busyMessage = nil
+            historyTransitionInProgress = false
+            if settings.autoSync, vault.remote != nil {
+                await syncNow(message: "Reset to \(checkout.commit.shortHash)")
+            }
+        } catch {
+            busyMessage = nil
+            guard self.vault?.path == path else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Enters (`checkout` set) or leaves history mode after git has changed the files on disk.
+    private func applyHistoryCheckout(_ checkout: HistoryCheckout?, vaultPath: String) async {
+        historyCheckout = checkout
+        if let checkout {
+            vault?.branch = checkout.branch
+            titleEditingTabID = nil
+            titleEditingDraft = ""
+            editorFocusRequest = nil
+            defaultEditorMode = .preview
+            for index in tabs.indices {
+                tabs[index].editorMode = .preview
+            }
+            gitStatus = Self.historyStatus(checkout, remote: vault?.remote)
+        } else {
+            let vaultGitStatus = dependencies.vaultGitStatus
+            let status = await Task.detached { vaultGitStatus(vaultPath) }.value
+            guard vault?.path == vaultPath else { return }
+            vault?.branch = status.branch ?? vault?.branch
+            gitStatus = status
+        }
+        reloadVaultTabsFromDisk(vaultPath: vaultPath)
+        await refreshVault()
+        await loadCommitHistory()
+    }
+
+    /// Shows the checked-out files in open vault tabs, closing tabs whose note does not exist in
+    /// this commit.
+    private func reloadVaultTabsFromDisk(vaultPath: String) {
+        let root = FileService.canonicalURL(URL(fileURLWithPath: vaultPath)).path + "/"
+        var missing: Set<String> = []
+        for index in tabs.indices where !tabs[index].isStandalone {
+            let url = URL(fileURLWithPath: tabs[index].path)
+            guard FileService.canonicalURL(url).path.hasPrefix(root) else { continue }
+            if let text = try? FileService.read(url) {
+                tabs[index].content = text
+                tabs[index].originalContent = text
+            } else {
+                missing.insert(tabs[index].id)
+            }
+        }
+        guard !missing.isEmpty else { return }
+        if let editing = titleEditingTabID, missing.contains(editing) {
+            titleEditingTabID = nil
+            titleEditingDraft = ""
+        }
+        if let requested = editorFocusRequest?.tabID, missing.contains(requested) {
+            editorFocusRequest = nil
+        }
+        tabs.removeAll { missing.contains($0.id) }
+    }
+
+    nonisolated static func historyStatus(_ checkout: HistoryCheckout, remote: String?) -> GitStatus {
+        GitStatus(
+            state: .idle,
+            branch: checkout.branch,
+            remote: remote,
+            message: "Viewing \(checkout.commit.shortHash)"
+        )
+    }
+
+    private func clearHistoryState() {
+        historyCheckout = nil
+        historyOpen = false
+        commitHistory = []
+    }
+
+    /// Refuses a change while the vault shows an earlier commit, telling the user why.
+    private func rejectedAsReadOnly() -> Bool {
+        guard isReadOnly else { return false }
+        errorMessage = Self.readOnlyMessage
+        return true
     }
 
     func saveToken(_ raw: String) async {
@@ -1594,6 +1851,7 @@ final class AppModel {
             tabs = []
             activeTabID = nil
             gitStatus = nil
+            clearHistoryState()
             centerView = .editor
         }
     }
@@ -1731,6 +1989,7 @@ final class AppModel {
             fileTree = []
             notes = []
             editorFocusRequest = nil
+            clearHistoryState()
             gitStatus = GitStatus(state: .idle, message: "Standalone file — not a GitHub vault")
             titleEditingTabID = nil
             titleEditingDraft = ""

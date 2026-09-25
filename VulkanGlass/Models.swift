@@ -290,6 +290,22 @@ struct GitStatus: Sendable {
     var message: String?
 }
 
+/// One entry of a vault's commit history.
+struct GitCommit: Identifiable, Hashable, Sendable {
+    var id: String { hash }
+    var hash: String
+    var shortHash: String
+    var author: String
+    var date: Date
+    var subject: String
+}
+
+/// An earlier commit checked out (detached) for read-only viewing, and the branch to return to.
+struct HistoryCheckout: Equatable, Sendable {
+    var branch: String
+    var commit: GitCommit
+}
+
 enum LeftPanel: String, Sendable {
     case files
     case search
