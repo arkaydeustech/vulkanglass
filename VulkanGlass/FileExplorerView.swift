@@ -60,7 +60,7 @@ final class FolderRenameDraft {
     }
 }
 
-/// Folder expansion and keyboard selection for the file explorer's tree.
+/// Folder expansion and the pointer and keyboard selection for the file explorer's tree.
 @MainActor
 @Observable
 final class FileTreeState {
@@ -77,6 +77,9 @@ final class FileTreeState {
     private(set) var focusedPath: String?
     /// A note row the arrow keys moved to, which takes keyboard focus once it is on screen.
     private(set) var focusRequestPath: String?
+    /// The folder the user clicked or right-clicked, highlighted in place of any note until a
+    /// note is selected again.
+    private(set) var selectedFolderPath: String?
 
     func isOpen(_ folderPath: String) -> Bool {
         !collapsedFolders.contains(folderPath)
@@ -90,9 +93,25 @@ final class FileTreeState {
         }
     }
 
-    /// The highlighted note: the one the keyboard is on, otherwise the active tab's note.
+    /// The highlighted row: a folder the user picked, otherwise the note the keyboard is on,
+    /// otherwise the active tab's note.
     func selection(activeTabID: String?) -> String? {
-        focusRequestPath ?? focusedPath ?? activeTabID
+        focusRequestPath ?? selectedFolderPath ?? focusedPath ?? activeTabID
+    }
+
+    /// Whether `path` is the note with keyboard focus and no folder has been picked since.
+    func isFocusedSelection(_ path: String) -> Bool {
+        selectedFolderPath == nil && focusedPath == path
+    }
+
+    /// Highlights `folderPath`, as when it is clicked or right-clicked, in place of any note.
+    func selectFolder(_ folderPath: String) {
+        selectedFolderPath = folderPath
+        focusRequestPath = nil
+    }
+
+    func clearFolderSelection() {
+        selectedFolderPath = nil
     }
 
     /// The rows on screen, in order: collapsed folders hide their descendants.
@@ -110,18 +129,23 @@ final class FileTreeState {
         return rows
     }
 
-    /// The note `offset` notes above (negative) or below `path` among `rows`, skipping folders;
-    /// nil past either end of the list.
+    /// The note `offset` notes above (negative) or below the note or folder at `path` among
+    /// `rows`, skipping folders; nil past either end of the list.
     static func note(_ offset: Int, from path: String, in rows: [Row]) -> String? {
-        let notes = rows.filter { !$0.node.isDirectory }.map(\.node.path)
-        guard let index = notes.firstIndex(of: path), notes.indices.contains(index + offset) else { return nil }
-        return notes[index + offset]
+        guard let index = rows.firstIndex(where: { $0.node.path == path }) else { return nil }
+        if offset == 0 { return rows[index].node.isDirectory ? nil : path }
+        let candidates = offset > 0 ? rows[(index + 1)...].map(\.node) : rows[..<index].reversed().map(\.node)
+        let notes = candidates.filter { !$0.isDirectory }
+        return notes.indices.contains(abs(offset) - 1) ? notes[abs(offset) - 1].path : nil
     }
 
-    /// Moves from the pending selection when focus has not caught up with the arrow keys.
+    /// Moves from the pending selection when focus has not caught up with the arrow keys, or
+    /// from a picked folder.
     @discardableResult
     func moveSelection(_ offset: Int, from path: String, in rows: [Row]) -> String? {
-        guard let target = Self.note(offset, from: focusRequestPath ?? path, in: rows) else { return nil }
+        let origin = focusRequestPath ?? selectedFolderPath ?? path
+        guard let target = Self.note(offset, from: origin, in: rows) else { return nil }
+        selectedFolderPath = nil
         focusRequestPath = target
         return target
     }
@@ -129,6 +153,9 @@ final class FileTreeState {
     /// Drops paths that have disappeared from the visible tree and restores keyboard focus to
     /// a surviving note when the focused row was removed by a tree change.
     func reconcileVisibleRows(_ rows: [Row], activeTabID: String?) {
+        if let selectedFolderPath, !rows.contains(where: { $0.node.isDirectory && $0.node.path == selectedFolderPath }) {
+            self.selectedFolderPath = nil
+        }
         let notes = rows.filter { !$0.node.isDirectory }.map(\.node.path)
         let lostFocusedRow = focusedPath.map { !notes.contains($0) } ?? false
         let lostRequestedRow = focusRequestPath.map { !notes.contains($0) } ?? false
@@ -139,14 +166,18 @@ final class FileTreeState {
         }
     }
 
-    func cancelFocusRequest() {
+    /// A press on a note row: drops any pending arrow-key move and picked folder, as the
+    /// pressed note becomes the selection.
+    func notePressed() {
         focusRequestPath = nil
+        selectedFolderPath = nil
     }
 
     /// Records a note row gaining or losing keyboard focus.
     func focusChanged(_ path: String, focused: Bool) {
         if focused {
             focusedPath = path
+            selectedFolderPath = nil
             if focusRequestPath == path { focusRequestPath = nil }
         } else if focusedPath == path {
             focusedPath = nil
@@ -370,6 +401,10 @@ struct FileExplorerView: View {
                         .onChange(of: treeRows.map(\.id)) { _, _ in
                             tree.reconcileVisibleRows(treeRows, activeTabID: model.activeTabID)
                         }
+                        // Opening a note moves the highlight from a picked folder to that note.
+                        .onChange(of: model.activeTabID) { _, _ in
+                            tree.clearFolderSelection()
+                        }
                     }
                 }
             } else {
@@ -462,7 +497,9 @@ struct TreeRow: View {
 
     var body: some View {
         if node.isDirectory {
+            let selected = tree.selection(activeTabID: model.activeTabID) == node.path
             Button {
+                tree.selectFolder(node.path)
                 open.wrappedValue.toggle()
             } label: {
                 HStack(spacing: 4) {
@@ -475,7 +512,7 @@ struct TreeRow: View {
                 .foregroundStyle(VGTheme.textNormal(dark: model.dark))
                 .padding(.leading, 8 + CGFloat(depth) * 12)
                 .padding(.vertical, 3)
-                .background(dropTargeted ? VGTheme.dropTarget.opacity(0.18) : Color.clear)
+                .background(folderBackground(selected: selected))
                 .overlay {
                     if dropTargeted {
                         RoundedRectangle(cornerRadius: 3)
@@ -486,6 +523,12 @@ struct TreeRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            // A right-click selects the folder before its menu opens, so the row the menu (and
+            // any confirmation it leads to) acts on is the highlighted one.
+            .background {
+                SecondaryClickObserver { [tree, path = node.path] in tree.selectFolder(path) }
+            }
+            .accessibilityAddTraits(selected ? .isSelected : [])
             .onDrop(
                 of: [.vulkanGlassNote],
                 delegate: FolderDropDelegate(
@@ -497,14 +540,20 @@ struct TreeRow: View {
             )
             .contextMenu {
                 FolderContextMenu(path: node.path, open: open)
-                Button("Rename") { onRenameFolder(node) }
+                Button("Rename") {
+                    tree.selectFolder(node.path)
+                    onRenameFolder(node)
+                }
                 Divider()
-                Button("Move to Trash…") { onTrashFolder(node) }
+                Button("Move to Trash…") {
+                    tree.selectFolder(node.path)
+                    onTrashFolder(node)
+                }
             }
         } else {
             let active = model.activeTabID == node.path
             let selected = tree.selection(activeTabID: model.activeTabID) == node.path
-            let keyboardFocused = tree.focusedPath == node.path
+            let keyboardFocused = tree.isFocusedSelection(node.path)
             let displayName = node.name.replacingOccurrences(of: ".md", with: "", options: .caseInsensitive)
             Group {
                 if renaming {
@@ -557,7 +606,7 @@ struct TreeRow: View {
                             onMoveSelection: onMoveSelection,
                             focusRequested: tree.focusRequestPath == node.path,
                             isFocusStillRequested: { tree.focusRequestPath == node.path },
-                            onPointerFocus: { tree.cancelFocusRequest() },
+                            onPointerFocus: { tree.notePressed() },
                             onFocusChange: { [tree, path = node.path] focused in
                                 tree.focusChanged(path, focused: focused)
                             },
@@ -598,8 +647,18 @@ struct TreeRow: View {
 
     /// Tints the note the keyboard is on with the accent, and shades the selected note otherwise.
     private func rowBackground(selected: Bool, keyboardFocused: Bool) -> Color {
-        if keyboardFocused { return VGTheme.accent.opacity(model.dark ? 0.3 : 0.22) }
+        if keyboardFocused { return selectionTint }
         return selected ? VGTheme.hover(dark: model.dark) : Color.clear
+    }
+
+    /// Tints a folder the note is being dragged onto, otherwise the picked folder.
+    private func folderBackground(selected: Bool) -> Color {
+        if dropTargeted { return VGTheme.dropTarget.opacity(0.18) }
+        return selected ? selectionTint : Color.clear
+    }
+
+    private var selectionTint: Color {
+        VGTheme.accent.opacity(model.dark ? 0.3 : 0.22)
     }
 }
 
@@ -817,14 +876,10 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
 
     override func mouseDown(with event: NSEvent) {
         if event.modifierFlags.contains(.control) {
-            pressEvent = nil
-            if let menu = menu(for: event) {
-                presentContextMenu(menu, event, self)
-            }
+            showContextMenu(for: event)
             return
         }
-        onPointerFocus?()
-        window?.makeFirstResponder(self)
+        takePointerFocus()
         pressEvent = event
     }
 
@@ -843,10 +898,20 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     }
 
     override func rightMouseDown(with event: NSEvent) {
+        showContextMenu(for: event)
+    }
+
+    /// Selects the note, without opening it, so the row the menu acts on is highlighted.
+    private func showContextMenu(for event: NSEvent) {
         pressEvent = nil
-        if let menu = menu(for: event) {
-            presentContextMenu(menu, event, self)
-        }
+        guard let menu = menu(for: event) else { return }
+        takePointerFocus()
+        presentContextMenu(menu, event, self)
+    }
+
+    private func takePointerFocus() {
+        onPointerFocus?()
+        window?.makeFirstResponder(self)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -904,6 +969,69 @@ final class FileDragSourceView: NSControl, NSDraggingSource {
     /// without erasing a newer drag that has since started.
     func endFileDrag() {
         if model?.draggedFilePath == path { model?.draggedFilePath = nil }
+    }
+}
+
+/// Reports a right-click or Control-click on the area behind a SwiftUI view without consuming
+/// it, so the view's `contextMenu` still opens.
+struct SecondaryClickObserver: NSViewRepresentable {
+    var onSecondaryClick: () -> Void
+
+    func makeNSView(context: Context) -> SecondaryClickObserverView {
+        let view = SecondaryClickObserverView()
+        view.onSecondaryClick = onSecondaryClick
+        return view
+    }
+
+    func updateNSView(_ nsView: SecondaryClickObserverView, context: Context) {
+        nsView.onSecondaryClick = onSecondaryClick
+    }
+
+    static func dismantleNSView(_ nsView: SecondaryClickObserverView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+}
+
+final class SecondaryClickObserverView: NSView {
+    var onSecondaryClick: (() -> Void)?
+    private var monitor: Any?
+    var isMonitoring: Bool { monitor != nil }
+
+    /// Lets presses through to the SwiftUI content in front of it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func stopMonitoring() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        stopMonitoring()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        stopMonitoring()
+        guard window != nil else { return }
+        // A local monitor sees the press before SwiftUI turns it into the context menu.
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
+            _ = MainActor.assumeIsolated { self?.observe(event) }
+            return event
+        }
+    }
+
+    /// Reports `event` if it is a secondary click on the visible part of this view.
+    @discardableResult
+    func observe(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window else { return false }
+        let secondary = event.type == .rightMouseDown
+            || (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+        guard secondary, bounds.intersection(visibleRect).contains(convert(event.locationInWindow, from: nil)) else {
+            return false
+        }
+        onSecondaryClick?()
+        return true
     }
 }
 

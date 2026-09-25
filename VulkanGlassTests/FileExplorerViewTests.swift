@@ -377,6 +377,215 @@ final class FileExplorerViewTests: XCTestCase {
         XCTAssertEqual(model.editorFocusRequest?.tabID, note.path)
     }
 
+    func testPickedFolderTakesTheHighlightUntilANoteIsSelectedAgain() {
+        let state = FileTreeState()
+        let rows = FileTreeState.visibleRows([
+            FileNode(name: "A.md", path: "/v/A.md", isDirectory: false),
+            FileNode(name: "Folder", path: "/v/Folder", isDirectory: true, children: [
+                FileNode(name: "B.md", path: "/v/Folder/B.md", isDirectory: false),
+            ]),
+            FileNode(name: "C.md", path: "/v/C.md", isDirectory: false),
+        ], collapsed: [])
+        state.focusChanged("/v/C.md", focused: true)
+        XCTAssertTrue(state.isFocusedSelection("/v/C.md"))
+
+        state.selectFolder("/v/Folder")
+        XCTAssertEqual(state.selection(activeTabID: "/v/C.md"), "/v/Folder")
+        XCTAssertFalse(state.isFocusedSelection("/v/C.md"), "the focused note no longer looks selected")
+        XCTAssertEqual(state.moveSelection(1, from: "/v/C.md", in: rows), "/v/Folder/B.md", "arrows move on from the folder")
+        XCTAssertNil(state.selectedFolderPath)
+        XCTAssertEqual(state.selection(activeTabID: "/v/C.md"), "/v/Folder/B.md")
+
+        state.selectFolder("/v/Folder")
+        XCTAssertNil(state.focusRequestPath, "picking a folder drops a pending arrow move")
+        XCTAssertEqual(state.moveSelection(-1, from: "/v/C.md", in: rows), "/v/A.md")
+
+        state.selectFolder("/v/Folder")
+        state.notePressed()
+        XCTAssertNil(state.selectedFolderPath, "pressing a note selects it instead")
+
+        state.selectFolder("/v/Folder")
+        state.focusChanged("/v/A.md", focused: true)
+        XCTAssertNil(state.selectedFolderPath, "a note taking focus selects it instead")
+
+        state.selectFolder("/v/Folder")
+        state.reconcileVisibleRows(rows, activeTabID: nil)
+        XCTAssertEqual(state.selectedFolderPath, "/v/Folder", "a visible folder stays selected")
+        state.reconcileVisibleRows([rows[0], rows[3]], activeTabID: nil)
+        XCTAssertNil(state.selectedFolderPath, "a removed folder is no longer selected")
+
+        state.selectFolder("/v/Folder")
+        state.clearFolderSelection()
+        XCTAssertEqual(state.selection(activeTabID: "/v/C.md"), "/v/A.md")
+    }
+
+    func testArrowOriginCanBeAFolder() {
+        let rows = FileTreeState.visibleRows([
+            FileNode(name: "A.md", path: "/v/A.md", isDirectory: false),
+            FileNode(name: "Empty", path: "/v/Empty", isDirectory: true, children: []),
+            FileNode(name: "Folder", path: "/v/Folder", isDirectory: true, children: [
+                FileNode(name: "B.md", path: "/v/Folder/B.md", isDirectory: false),
+            ]),
+        ], collapsed: [])
+        XCTAssertEqual(FileTreeState.note(1, from: "/v/Empty", in: rows), "/v/Folder/B.md")
+        XCTAssertEqual(FileTreeState.note(-1, from: "/v/Folder", in: rows), "/v/A.md")
+        XCTAssertNil(FileTreeState.note(-1, from: "/v/A.md", in: rows))
+        XCTAssertNil(FileTreeState.note(1, from: "/v/Folder/B.md", in: rows))
+    }
+
+    func testClickingAFolderHighlightsItInsteadOfTheFocusedNote() async throws {
+        let (model, folderPath, notePath) = try await vaultWithFolderAndNote()
+        let tree = FileTreeState()
+        let (window, host) = hostExplorer(FileExplorerView(tree: tree), model: model)
+        defer { window.orderOut(nil) }
+        await settle(host)
+        let note = try XCTUnwrap(descendants(of: host).compactMap { $0 as? FileDragSourceView }.first { $0.path == notePath })
+        XCTAssertTrue(window.makeFirstResponder(note))
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), notePath)
+
+        let observer = try folderObserver(in: host)
+        let location = observer.convert(NSPoint(x: observer.bounds.midX, y: observer.bounds.midY), to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            window.sendEvent(try mouseEvent(type, at: location, in: window))
+        }
+        for _ in 0..<50 where tree.selectedFolderPath == nil { await settle(host) }
+
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath)
+        XCTAssertFalse(tree.isFocusedSelection(notePath))
+        XCTAssertFalse(tree.isOpen(folderPath), "the click still toggles the folder")
+    }
+
+    func testRightClickingAFolderSelectsItAndKeepsItSelectedWhileTrashIsConfirmed() async throws {
+        let (model, folderPath, notePath) = try await vaultWithFolderAndNote()
+        let tree = FileTreeState()
+        let (window, host) = hostExplorer(FileExplorerView(tree: tree), model: model)
+        defer { window.orderOut(nil) }
+        await settle(host)
+        let note = try XCTUnwrap(descendants(of: host).compactMap { $0 as? FileDragSourceView }.first { $0.path == notePath })
+        XCTAssertTrue(window.makeFirstResponder(note))
+
+        let observer = try folderObserver(in: host)
+        XCTAssertTrue(observer.isMonitoring)
+        let location = observer.convert(NSPoint(x: observer.bounds.midX, y: observer.bounds.midY), to: nil)
+        let rightClick = try mouseEvent(.rightMouseDown, at: location, in: window)
+        XCTAssertFalse(observer.observe(try mouseEvent(.leftMouseDown, at: location, in: window)), "a plain click is not secondary")
+        XCTAssertFalse(observer.observe(try mouseEvent(.rightMouseDown, at: NSPoint(x: location.x, y: 2), in: window)))
+        XCTAssertNil(tree.selectedFolderPath)
+        XCTAssertTrue(observer.observe(rightClick))
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath, "selected as the menu opens")
+
+        tree.clearFolderSelection()
+        let point = host.convert(location, from: nil)
+        // SwiftUI answers for the row's context menu from a view in the hit view's ancestry.
+        let menu = try XCTUnwrap(sequence(first: host.hitTest(point) ?? host, next: \.superview)
+            .lazy.compactMap { $0.menu(for: rightClick) }.first)
+        let trashIndex = try XCTUnwrap(menu.items.firstIndex { $0.title == "Move to Trash…" })
+        menu.performActionForItem(at: trashIndex)
+        for _ in 0..<50 where window.attachedSheet == nil { await settle(host) }
+
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath, "the folder is selected during the prompt")
+        XCTAssertFalse(tree.isFocusedSelection(notePath))
+        try XCTUnwrap(button(titled: "Cancel", in: try XCTUnwrap(sheet.contentView))).performClick(nil)
+        for _ in 0..<50 where window.attachedSheet != nil { await settle(host) }
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), folderPath, "cancelling keeps the folder selected")
+        XCTAssertTrue(FileService.directoryExists(at: folderPath))
+    }
+
+    func testOpeningANoteMovesTheHighlightFromAPickedFolder() async throws {
+        let (model, folderPath, notePath) = try await vaultWithFolderAndNote()
+        let tree = FileTreeState()
+        let (window, host) = hostExplorer(FileExplorerView(tree: tree), model: model)
+        defer { window.orderOut(nil) }
+        await settle(host)
+        tree.selectFolder(folderPath)
+
+        await model.openTab(path: notePath, focusEditor: false)
+        for _ in 0..<50 where tree.selectedFolderPath != nil { await settle(host) }
+        XCTAssertEqual(tree.selection(activeTabID: model.activeTabID), notePath)
+    }
+
+    func testRightClickingANoteSelectsItWithoutOpeningIt() throws {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        let row = FileDragSourceView(frame: container.bounds)
+        container.addSubview(row)
+        let window = NSWindow(contentRect: container.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        var events: [String] = []
+        row.onClick = { events.append("open") }
+        row.onPointerFocus = { events.append("press") }
+        row.menuItems = [FileDragSourceView.MenuItem(title: "Move to Trash…") {}]
+        row.presentContextMenu = { _, _, _ in events.append("menu") }
+
+        row.rightMouseDown(with: try mouseEvent(.rightMouseDown, at: NSPoint(x: 50, y: 12), in: window))
+        XCTAssertEqual(events, ["press", "menu"])
+        XCTAssertTrue(window.firstResponder === row, "the right-clicked note takes the selection")
+
+        row.menuItems = []
+        events = []
+        window.makeFirstResponder(nil)
+        row.rightMouseDown(with: try mouseEvent(.rightMouseDown, at: NSPoint(x: 50, y: 12), in: window))
+        XCTAssertEqual(events, [], "no menu, no selection change")
+        XCTAssertFalse(window.firstResponder === row)
+    }
+
+    private func vaultWithFolderAndNote() async throws -> (AppModel, folderPath: String, notePath: String) {
+        let root = try temporaryDirectory()
+        let folder = root.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let note = root.appendingPathComponent("Note.md")
+        try "note".write(to: note, atomically: true, encoding: .utf8)
+        var settings = AppSettings.default()
+        settings.autoSync = false
+        let model = AppModel(settings: settings, bootstrapOnLaunch: false)
+        model.vault = VaultInfo(name: "vault", path: root.path, remote: nil, branch: nil, isGitHub: false)
+        await model.refreshVault()
+        return (model, FileService.canonicalURL(folder).path, FileService.canonicalURL(note).path)
+    }
+
+    private func hostExplorer(_ explorer: FileExplorerView, model: AppModel) -> (NSWindow, NSView) {
+        let host = NSHostingView(rootView: explorer.environment(model).frame(width: 260, height: 360))
+        host.frame = NSRect(x: 0, y: 0, width: 260, height: 360)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        return (window, host)
+    }
+
+    private func settle(_ host: NSView) async {
+        for _ in 0..<10 {
+            host.layoutSubtreeIfNeeded()
+            await Task.yield()
+            await drainMainQueue()
+        }
+    }
+
+    private func folderObserver(in host: NSView) throws -> SecondaryClickObserverView {
+        let observers = descendants(of: host).compactMap { $0 as? SecondaryClickObserverView }
+        XCTAssertEqual(observers.count, 1, "one folder row")
+        return try XCTUnwrap(observers.first)
+    }
+
+    private func mouseEvent(_ type: NSEvent.EventType, at location: NSPoint, in window: NSWindow) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.mouseEvent(
+            with: type,
+            location: location,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+    }
+
+    private func button(titled title: String, in view: NSView) -> NSButton? {
+        descendants(of: view).compactMap { $0 as? NSButton }.first { $0.title == title }
+    }
+
     private func descendants(of view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap { descendants(of: $0) }
     }
