@@ -19,6 +19,9 @@ enum GitServiceError: LocalizedError, Equatable {
     case rebaseInProgress
     case unmergedPaths([String])
     case gitNotInstalled
+    case historyCheckedOut
+    case detachedHead
+    case notViewingHistory
 
     var errorDescription: String? {
         switch self {
@@ -34,6 +37,12 @@ enum GitServiceError: LocalizedError, Equatable {
             return "Git could not reapply local changes cleanly. Resolve the conflicts before syncing: \(paths.joined(separator: ", "))."
         case .gitNotInstalled:
             return "Git is not installed. Install the Command Line Tools (xcode-select --install) or Homebrew Git (brew install git), then try again."
+        case .historyCheckedOut:
+            return "This vault is showing an earlier commit in read-only history mode. Return to the latest commit or reset to this one before syncing."
+        case .detachedHead:
+            return "This repository is not on a branch. Check out a branch before browsing its history."
+        case .notViewingHistory:
+            return "This vault is not showing an earlier commit."
         }
     }
 }
@@ -262,10 +271,23 @@ enum GitService {
             guard executable() != nil else { throw GitServiceError.gitNotInstalled }
             let url = URL(fileURLWithPath: path)
             try ensureNoRebase(at: url)
+            guard historyBranch(at: url) == nil else { throw GitServiceError.historyCheckedOut }
             let remote = try Shell.git(["remote", "get-url", "origin"], cwd: url)
             try prepareCredential(credential, remote: remote)
             try commitAll(at: url, message: message)
             let branch = try Shell.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: url)
+            if hasPendingForcePush(at: url) {
+                // A history reset dropped commits the remote still has. Pulling first would bring
+                // them straight back, so publish the reset instead, refusing if the remote moved.
+                _ = try networkGit(
+                    ["push", "--force-with-lease", "-u", "origin", branch],
+                    cwd: url,
+                    remote: remote,
+                    credential: credential
+                )
+                _ = try? Shell.git(["config", "--unset", pendingForcePushKey], cwd: url)
+                return GitStatus(state: .synced, branch: branch, remote: remote, message: "Synced to GitHub")
+            }
             _ = try networkGit(
                 ["pull", "--rebase", "--autostash", "origin", branch],
                 cwd: url,
@@ -292,6 +314,14 @@ enum GitService {
         try withMutationLock {
             let url = URL(fileURLWithPath: path)
             try ensureNoRebase(at: url)
+            // Neither a viewed commit nor an unpublished history reset may take remote commits.
+            guard historyBranch(at: url) == nil else { throw GitServiceError.historyCheckedOut }
+            guard !hasPendingForcePush(at: url) else {
+                var result = status(path: path)
+                result.state = .idle
+                result.message = "Reset not yet synced"
+                return result
+            }
             let remote = try Shell.git(["remote", "get-url", "origin"], cwd: url)
             try prepareCredential(credential, remote: remote)
             let branch = try Shell.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: url)
@@ -432,5 +462,159 @@ enum GitService {
         mutationLock.lock()
         defer { mutationLock.unlock() }
         return try operation()
+    }
+}
+
+// MARK: - Commit history
+
+extension GitService {
+    /// Git config key naming the branch a detached history checkout returns to.
+    static let historyBranchKey = "vulkanglass.historyBranch"
+    /// Git config key set when a history reset dropped commits the remote still has.
+    static let pendingForcePushKey = "vulkanglass.pendingForcePush"
+    static let commitHistoryLimit = 100
+
+    private static let fieldSeparator: Character = "\u{1f}"
+    private static let recordSeparator: Character = "\u{1e}"
+    private static let logFormat = "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s%x1e"
+
+    /// The newest commits of the vault's branch, newest first. While an earlier commit is checked
+    /// out this still lists the branch, so the commits after the viewed one stay reachable.
+    static func commitHistory(
+        path: String,
+        limit: Int = commitHistoryLimit,
+        executable: () -> String? = GitExecutable.path
+    ) throws -> [GitCommit] {
+        guard executable() != nil else { throw GitServiceError.gitNotInstalled }
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) else { return [] }
+        let ref = historyBranch(at: url).map { "refs/heads/\($0)" } ?? "HEAD"
+        // A repository without commits has nothing to list.
+        guard (try? Shell.git(["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"], cwd: url)) != nil else {
+            return []
+        }
+        let output = try Shell.git(["log", "-n", "\(max(1, limit))", logFormat, ref, "--"], cwd: url)
+        return parseLog(output)
+    }
+
+    static func parseLog(_ output: String) -> [GitCommit] {
+        output.split(separator: recordSeparator).compactMap { record in
+            let fields = record
+                .trimmingCharacters(in: .newlines)
+                .split(separator: fieldSeparator, omittingEmptySubsequences: false)
+                .map(String.init)
+            guard fields.count >= 5, !fields[0].isEmpty, let seconds = TimeInterval(fields[3]) else { return nil }
+            return GitCommit(
+                hash: fields[0],
+                shortHash: fields[1],
+                author: fields[2],
+                date: Date(timeIntervalSince1970: seconds),
+                // A subject may itself contain the separator; keep everything after the date.
+                subject: fields[4...].joined(separator: String(fieldSeparator))
+            )
+        }
+    }
+
+    /// The earlier commit the vault shows, when it was left in history mode.
+    static func historyState(path: String) -> HistoryCheckout? {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path),
+              let branch = historyBranch(at: url),
+              let commit = try? commitInfo("HEAD", at: url)
+        else { return nil }
+        return HistoryCheckout(branch: branch, commit: commit)
+    }
+
+    /// Checks out `commit` detached so its notes can be read without moving the branch. Edits not
+    /// yet committed are committed to the branch first, so viewing history never loses them.
+    /// Choosing the branch's newest commit returns to the branch instead and yields nil.
+    static func checkoutHistory(
+        path: String,
+        commit: String,
+        message: String,
+        executable: () -> String? = GitExecutable.path
+    ) throws -> HistoryCheckout? {
+        try withMutationLock {
+            guard executable() != nil else { throw GitServiceError.gitNotInstalled }
+            let url = URL(fileURLWithPath: path)
+            try ensureNoRebase(at: url)
+            let current = currentBranch(at: url)
+            guard let branch = current ?? historyBranch(at: url) else { throw GitServiceError.detachedHead }
+            let target = try Shell.git(["rev-parse", "--verify", "\(commit)^{commit}"], cwd: url)
+            if current != nil { try commitAll(at: url, message: message) }
+            let tip = try Shell.git(["rev-parse", "--verify", "refs/heads/\(branch)^{commit}"], cwd: url)
+            if target == tip {
+                if current == nil { try leaveHistory(at: url, branch: branch) }
+                return nil
+            }
+            _ = try Shell.git(["checkout", "--detach", target], cwd: url)
+            _ = try Shell.git(["config", historyBranchKey, branch], cwd: url)
+            return HistoryCheckout(branch: branch, commit: try commitInfo(target, at: url))
+        }
+    }
+
+    /// Leaves history mode on the branch's newest commit, keeping every commit.
+    static func returnToLatest(path: String, executable: () -> String? = GitExecutable.path) throws {
+        try withMutationLock {
+            guard executable() != nil else { throw GitServiceError.gitNotInstalled }
+            let url = URL(fileURLWithPath: path)
+            guard let branch = historyBranch(at: url) else { return }
+            try leaveHistory(at: url, branch: branch)
+        }
+    }
+
+    /// Moves the branch back to the viewed commit and checks it out, discarding every later
+    /// commit. When the remote still has those commits, the next sync force-pushes the reset.
+    static func resetToHistory(path: String, executable: () -> String? = GitExecutable.path) throws {
+        try withMutationLock {
+            guard executable() != nil else { throw GitServiceError.gitNotInstalled }
+            let url = URL(fileURLWithPath: path)
+            try ensureNoRebase(at: url)
+            guard let branch = historyBranch(at: url) else { throw GitServiceError.notViewingHistory }
+            let target = try Shell.git(["rev-parse", "--verify", "HEAD^{commit}"], cwd: url)
+            _ = try Shell.git(["checkout", "-f", "-B", branch, target], cwd: url)
+            _ = try? Shell.git(["config", "--unset", historyBranchKey], cwd: url)
+            if let upstream = try? Shell.git(
+                ["rev-parse", "--verify", "--quiet", "\(branch)@{upstream}"],
+                cwd: url
+            ), !upstream.isEmpty,
+               let ahead = try? Shell.git(["rev-list", "--count", "\(target)..\(upstream)"], cwd: url),
+               (Int(ahead) ?? 0) > 0
+            {
+                _ = try Shell.git(["config", pendingForcePushKey, "true"], cwd: url)
+            }
+        }
+    }
+
+    static func hasPendingForcePush(at url: URL) -> Bool {
+        (try? Shell.git(["config", "--get", pendingForcePushKey], cwd: url)) == "true"
+    }
+
+    /// The branch a history checkout returns to, or nil when HEAD is on a branch (a stale key
+    /// left behind by a branch switched outside the app is ignored).
+    static func historyBranch(at url: URL) -> String? {
+        guard currentBranch(at: url) == nil,
+              let branch = try? Shell.git(["config", "--get", historyBranchKey], cwd: url),
+              !branch.isEmpty
+        else { return nil }
+        return branch
+    }
+
+    private static func currentBranch(at url: URL) -> String? {
+        guard let branch = try? Shell.git(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd: url),
+              !branch.isEmpty
+        else { return nil }
+        return branch
+    }
+
+    private static func leaveHistory(at url: URL, branch: String) throws {
+        _ = try Shell.git(["checkout", branch], cwd: url)
+        _ = try? Shell.git(["config", "--unset", historyBranchKey], cwd: url)
+    }
+
+    private static func commitInfo(_ revision: String, at url: URL) throws -> GitCommit {
+        let output = try Shell.git(["log", "-n", "1", logFormat, revision, "--"], cwd: url)
+        guard let commit = parseLog(output).first else { throw GitServiceError.notViewingHistory }
+        return commit
     }
 }

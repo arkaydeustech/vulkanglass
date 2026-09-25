@@ -69,6 +69,9 @@ struct WorkspaceView: View {
                     }
                 }
             }
+            if let checkout = model.historyCheckout {
+                HistoryModeBanner(checkout: checkout)
+            }
             StatusBarView()
         }
         .background(VGTheme.backgroundPrimary(dark: model.dark))

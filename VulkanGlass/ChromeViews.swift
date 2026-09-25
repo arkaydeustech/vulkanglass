@@ -327,13 +327,20 @@ struct StatusBarView: View {
         return model.notes.filter { $0.wikiLinks.contains { $0.caseInsensitiveCompare(tab.title) == .orderedSame } }.count
     }
 
+    private var statusSymbol: String {
+        if model.vault == nil { return "lock" }
+        if model.isReadOnly { return "clock.arrow.circlepath" }
+        return model.gitStatus?.state == .syncing ? "arrow.triangle.2.circlepath" : "icloud"
+    }
+
     var body: some View {
         HStack {
             Button {
-                Task { await model.syncNow() }
+                guard model.vault != nil else { return }
+                model.historyOpen.toggle()
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: model.vault == nil ? "lock" : (model.gitStatus?.state == .syncing ? "arrow.triangle.2.circlepath" : "icloud"))
+                    Image(systemName: statusSymbol)
                     Text(model.gitStatus?.message ?? (model.vault == nil ? "Standalone" : "GitHub vault"))
                         .lineLimit(1)
                     if let branch = model.vault?.branch {
@@ -341,9 +348,14 @@ struct StatusBarView: View {
                     }
                 }
                 .font(.system(size: 11))
-                .foregroundStyle(VGTheme.textMuted(dark: model.dark))
+                .foregroundStyle(model.isReadOnly ? VGTheme.textAccent : VGTheme.textMuted(dark: model.dark))
             }
             .buttonStyle(.plain)
+            .help(model.vault == nil ? "Not a vault" : "Show commit history")
+            .popover(isPresented: Bindable(model).historyOpen, arrowEdge: .top) {
+                CommitHistoryPopover()
+                    .environment(model)
+            }
             Spacer()
             if let tab = model.activeTab, tab.dirty, !tab.savesAutomatically {
                 Text("Unsaved — ⌘S to save")
