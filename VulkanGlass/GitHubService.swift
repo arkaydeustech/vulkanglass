@@ -138,7 +138,7 @@ enum GitHubService {
         request.httpMethod = method
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("VulkanGlass/0.4.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("VulkanGlass/0.4.1", forHTTPHeaderField: "User-Agent")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         if let body {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
