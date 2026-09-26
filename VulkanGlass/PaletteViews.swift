@@ -446,19 +446,27 @@ struct DefaultMarkdownEditorSettingsView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Default Markdown app")
-                Text(Self.statusText(for: model.markdownEditorStatus))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Default Markdown app")
+                    Text(Self.statusText(for: model.markdownEditorStatus))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Set Default") { Task { await model.makeDefaultMarkdownEditor() } }
+                    .disabled(Self.setDefaultDisabled(
+                        status: model.markdownEditorStatus,
+                        inProgress: model.settingDefaultMarkdownEditor
+                    ))
             }
-            Spacer()
-            Button("Set Default") { Task { await model.makeDefaultMarkdownEditor() } }
-                .disabled(Self.setDefaultDisabled(
-                    status: model.markdownEditorStatus,
-                    inProgress: model.settingDefaultMarkdownEditor
-                ))
+            if let error = model.markdownEditorError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("markdown-default-error")
+            }
         }
         .onAppear { model.refreshMarkdownEditorStatus() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in

@@ -283,6 +283,7 @@ final class AppModel {
     private(set) var markdownEditorStatus: MarkdownEditorStatus?
     private(set) var settingDefaultMarkdownEditor = false
     var errorMessage: String?
+    var markdownEditorError: String?
     var busyMessage: String?
     var githubCLIStatus: GitHubCLIStatus {
         get { session.githubCLIStatus }
@@ -378,7 +379,11 @@ final class AppModel {
         await checkGitInstalled()
         await connectGitHub()
         await session.finishBootstrap()
-        await offerDefaultMarkdownEditorIfNeeded()
+        // The Git install warning is already presented by RootView. Leave the offer unchecked
+        // so it can run on a later launch after Git is available.
+        if !gitMissingWarningOpen {
+            await offerDefaultMarkdownEditorIfNeeded()
+        }
     }
 
     /// On the first run only, asks to make Vulkan Glass the default app for Markdown files when
@@ -402,10 +407,13 @@ final class AppModel {
         guard !settingDefaultMarkdownEditor else { return }
         settingDefaultMarkdownEditor = true
         defer { settingDefaultMarkdownEditor = false }
+        markdownEditorError = nil
         do {
             try await dependencies.defaultMarkdownEditor.makeDefault()
         } catch {
-            errorMessage = "Could not make Vulkan Glass the default Markdown app: \(error.localizedDescription)"
+            let message = "Could not make Vulkan Glass the default Markdown app: \(error.localizedDescription)"
+            markdownEditorError = message
+            errorMessage = message
         }
         refreshMarkdownEditorStatus()
     }

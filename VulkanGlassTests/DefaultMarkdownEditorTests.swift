@@ -1,10 +1,28 @@
 import XCTest
 import AppKit
+import SwiftUI
+import Vision
 import UniformTypeIdentifiers
 @testable import VulkanGlass
 
 @MainActor
 final class DefaultMarkdownEditorTests: XCTestCase {
+    private final class FakeWorkspace: MarkdownAssociationWorkspace {
+        var handlers: [String: URL] = [:]
+        var failures: Set<String> = []
+        var calls: [String] = []
+
+        func urlForApplication(toOpen contentType: UTType) -> URL? {
+            handlers[contentType.identifier]
+        }
+
+        func setDefaultApplication(at applicationURL: URL, toOpen contentType: UTType) async throws {
+            calls.append(contentType.identifier)
+            if failures.contains(contentType.identifier) { throw SetDefaultFailed() }
+            handlers[contentType.identifier] = applicationURL
+        }
+    }
+
     private final class FakeEditor {
         var status = MarkdownEditorStatus(isVulkanGlass: false, currentAppName: "TextEdit")
         var answer = true
@@ -49,6 +67,29 @@ final class DefaultMarkdownEditorTests: XCTestCase {
         dependencies.gitExecutablePath = { "/usr/bin/git" }
         dependencies.defaultMarkdownEditor = fake.editor
         return dependencies
+    }
+
+    private func hostSettings(for model: AppModel) -> (NSWindow, NSHostingView<some View>) {
+        let host = NSHostingView(
+            rootView: DefaultMarkdownEditorSettingsView().environment(model).frame(width: 520, height: 100)
+        )
+        host.frame = NSRect(x: 0, y: 0, width: 520, height: 100)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFront(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        return (window, host)
+    }
+
+    private func renderedText<Content: View>(in host: NSHostingView<Content>) -> String {
+        host.layoutSubtreeIfNeeded()
+        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return "" }
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        guard let image = bitmap.cgImage else { return "" }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        try? VNImageRequestHandler(cgImage: image).perform([request])
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
     }
 
     func testFirstLaunchOffersAndSetsDefaultWhenAccepted() async {
@@ -165,6 +206,7 @@ final class DefaultMarkdownEditorTests: XCTestCase {
         await model.makeDefaultMarkdownEditor()
 
         XCTAssertEqual(model.errorMessage?.contains("Launch Services refused"), true)
+        XCTAssertEqual(model.markdownEditorError, model.errorMessage)
         XCTAssertEqual(model.markdownEditorStatus?.isVulkanGlass, false)
         XCTAssertFalse(model.settingDefaultMarkdownEditor)
     }
@@ -224,9 +266,151 @@ final class DefaultMarkdownEditorTests: XCTestCase {
 
     func testMarkdownTypesCoverDotMdWithoutDuplicates() {
         let types = MarkdownFileAssociation.markdownTypes
-        XCTAssertEqual(types.first, UTType(filenameExtension: "md"))
+        XCTAssertEqual(types.first?.identifier, "net.daringfireball.markdown")
         XCTAssertTrue(types.contains { $0.identifier == "net.daringfireball.markdown" })
         XCTAssertEqual(Set(types).count, types.count)
+    }
+
+    func testMarkdownTypeIsImportedWithBothExtensions() throws {
+        let declarations = try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "UTImportedTypeDeclarations") as? [[String: Any]])
+        let markdown = try XCTUnwrap(declarations.first { $0["UTTypeIdentifier"] as? String == "net.daringfireball.markdown" })
+        let tags = try XCTUnwrap(markdown["UTTypeTagSpecification"] as? [String: [String]])
+        XCTAssertEqual(tags["public.filename-extension"], ["md", "markdown"])
+    }
+
+    func testStatusReportsMissingHandlerAndReadableAppName() {
+        let workspace = FakeWorkspace()
+        let type = UTType.plainText
+        XCTAssertEqual(
+            MarkdownFileAssociation.status(workspace: workspace, contentType: type),
+            MarkdownEditorStatus(isVulkanGlass: false, currentAppName: nil)
+        )
+
+        workspace.handlers[type.identifier] = URL(fileURLWithPath: "/System/Applications/TextEdit.app")
+        let other = MarkdownFileAssociation.status(workspace: workspace, contentType: type)
+        XCTAssertFalse(other.isVulkanGlass)
+        XCTAssertEqual(other.currentAppName, "TextEdit")
+
+        workspace.handlers[type.identifier] = Bundle.main.bundleURL
+        let ours = MarkdownFileAssociation.status(workspace: workspace, contentType: type)
+        XCTAssertTrue(ours.isVulkanGlass)
+        XCTAssertEqual(ours.currentAppName, "VulkanGlass")
+    }
+
+    func testHandlerFallsBackToBundleURLWhenIdentifierIsMissing() throws {
+        let appURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("Unidentified.app")
+        let contents = appURL.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: appURL.deletingLastPathComponent()) }
+        let plist: [String: Any] = ["CFBundlePackageType": "APPL", "CFBundleName": "Unidentified"]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: contents.appendingPathComponent("Info.plist"))
+        let bundle = try XCTUnwrap(Bundle(url: appURL))
+        XCTAssertNil(bundle.bundleIdentifier)
+        XCTAssertTrue(MarkdownFileAssociation.isSameApp(appURL, as: bundle))
+        XCTAssertFalse(MarkdownFileAssociation.isSameApp(appURL.deletingLastPathComponent(), as: bundle))
+    }
+
+    func testMakeDefaultContinuesAfterOneTypeFailsAndVerifiesDotMdHandler() async throws {
+        let workspace = FakeWorkspace()
+        let declared = UTType.plainText
+        let resolved = UTType.json
+        workspace.failures = [declared.identifier]
+
+        try await MarkdownFileAssociation.makeDefault(
+            workspace: workspace, types: [declared, resolved], statusType: resolved
+        )
+
+        XCTAssertEqual(workspace.calls, [declared.identifier, resolved.identifier])
+        XCTAssertEqual(workspace.handlers[resolved.identifier], Bundle.main.bundleURL)
+    }
+
+    func testMakeDefaultThrowsWhenDotMdHandlerDidNotChange() async {
+        let workspace = FakeWorkspace()
+        let declared = UTType.plainText
+        let resolved = UTType.json
+        workspace.failures = [resolved.identifier]
+
+        do {
+            try await MarkdownFileAssociation.makeDefault(
+                workspace: workspace, types: [declared, resolved], statusType: resolved
+            )
+            XCTFail("Expected the unresolved .md handler to fail")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Launch Services refused")
+        }
+        XCTAssertEqual(workspace.calls, [declared.identifier, resolved.identifier])
+    }
+
+    func testGitWarningDefersTheFirstRunOfferUntilAQuietLaunch() async {
+        let fake = FakeEditor()
+        fake.answer = false
+        var dependencies = self.dependencies(fake)
+        dependencies.gitExecutablePath = { nil }
+        let session = AppSession(settings: .default())
+        let first = AppModel(session: session, bootstrapOnLaunch: false, dependencies: dependencies)
+        await first.bootstrap()
+
+        XCTAssertTrue(first.gitMissingWarningOpen)
+        XCTAssertEqual(fake.prompts, 0)
+        XCTAssertFalse(first.settings.checkedDefaultMarkdownEditor)
+
+        dependencies.gitExecutablePath = { "/usr/bin/git" }
+        let next = AppModel(settings: session.settings, bootstrapOnLaunch: false, dependencies: dependencies)
+        await next.bootstrap()
+        XCTAssertEqual(fake.prompts, 1)
+        XCTAssertTrue(next.settings.checkedDefaultMarkdownEditor)
+    }
+
+    func testSettingsShowsSetDefaultErrorAndRefreshesOnActivation() async {
+        let fake = FakeEditor()
+        fake.failure = SetDefaultFailed()
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies(fake))
+        let (window, host) = hostSettings(for: model)
+        defer { window.orderOut(nil) }
+
+        XCTAssertGreaterThan(fake.statusReads, 0)
+        await model.makeDefaultMarkdownEditor()
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(renderedText(in: host).contains("Launch Services refused"))
+
+        fake.status = MarkdownEditorStatus(isVulkanGlass: true, currentAppName: "Vulkan Glass")
+        let readsBeforeActivation = fake.statusReads
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertGreaterThan(fake.statusReads, readsBeforeActivation)
+        XCTAssertTrue(renderedText(in: host).contains("Vulkan Glass opens Markdown files."))
+    }
+
+    func testSetDefaultIsDisabledWhileChangeIsInProgress() async {
+        var dependencies = self.dependencies(FakeEditor())
+        var resume: CheckedContinuation<Void, Never>?
+        var calls = 0
+        let started = expectation(description: "default association started")
+        dependencies.defaultMarkdownEditor.makeDefault = {
+            calls += 1
+            await withCheckedContinuation { continuation in
+                resume = continuation
+                started.fulfill()
+            }
+        }
+        let model = AppModel(settings: .default(), bootstrapOnLaunch: false, dependencies: dependencies)
+        let change = Task { await model.makeDefaultMarkdownEditor() }
+        await fulfillment(of: [started], timeout: 1)
+
+        XCTAssertTrue(model.settingDefaultMarkdownEditor)
+        XCTAssertTrue(DefaultMarkdownEditorSettingsView.setDefaultDisabled(
+            status: model.markdownEditorStatus,
+            inProgress: model.settingDefaultMarkdownEditor
+        ))
+        await model.makeDefaultMarkdownEditor()
+        XCTAssertEqual(calls, 1)
+
+        resume?.resume()
+        await change.value
+        XCTAssertFalse(model.settingDefaultMarkdownEditor)
     }
 
     func testHandlerMatchesByBundleIdentifier() {

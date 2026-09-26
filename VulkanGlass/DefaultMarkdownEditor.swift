@@ -41,18 +41,37 @@ struct DefaultMarkdownEditor {
 
 /// The Launch Services calls behind `DefaultMarkdownEditor.live`.
 @MainActor
+protocol MarkdownAssociationWorkspace {
+    func urlForApplication(toOpen contentType: UTType) -> URL?
+    func setDefaultApplication(at applicationURL: URL, toOpen contentType: UTType) async throws
+}
+
+extension NSWorkspace: MarkdownAssociationWorkspace {}
+
+enum MarkdownAssociationError: LocalizedError {
+    case handlerDidNotChange
+
+    var errorDescription: String? {
+        "macOS did not change the app that opens .md files."
+    }
+}
+
+@MainActor
 enum MarkdownFileAssociation {
+    static let declaredMarkdownType = UTType(importedAs: "net.daringfireball.markdown")
+
     /// The content type Finder assigns to `.md` files; the one whose handler is reported.
     static var markdownType: UTType {
-        UTType(filenameExtension: "md") ?? UTType(importedAs: "net.daringfireball.markdown")
+        UTType(filenameExtension: "md") ?? declaredMarkdownType
     }
 
-    /// Every Markdown content type to claim: `.md` and `.markdown` normally share one.
+    /// Claim the declared type first. Other resolved types may differ on Macs with competing
+    /// importers; failure for one must not prevent trying the others.
     static var markdownTypes: [UTType] {
         var types: [UTType] = []
         let candidates = [
+            declaredMarkdownType,
             markdownType,
-            UTType("net.daringfireball.markdown"),
             UTType(filenameExtension: "markdown")
         ]
         for case let type? in candidates where !types.contains(type) {
@@ -62,10 +81,11 @@ enum MarkdownFileAssociation {
     }
 
     static func status(
-        workspace: NSWorkspace = .shared,
-        bundle: Bundle = .main
+        workspace: any MarkdownAssociationWorkspace = NSWorkspace.shared,
+        bundle: Bundle = .main,
+        contentType: UTType? = nil
     ) -> MarkdownEditorStatus {
-        guard let handler = workspace.urlForApplication(toOpen: markdownType) else {
+        guard let handler = workspace.urlForApplication(toOpen: contentType ?? markdownType) else {
             return MarkdownEditorStatus(isVulkanGlass: false, currentAppName: nil)
         }
         return MarkdownEditorStatus(
@@ -75,10 +95,22 @@ enum MarkdownFileAssociation {
         )
     }
 
-    static func makeDefault(workspace: NSWorkspace = .shared, bundle: Bundle = .main) async throws {
-        for type in markdownTypes {
-            try await workspace.setDefaultApplication(at: bundle.bundleURL, toOpen: type)
+    static func makeDefault(
+        workspace: any MarkdownAssociationWorkspace = NSWorkspace.shared,
+        bundle: Bundle = .main,
+        types: [UTType]? = nil,
+        statusType: UTType? = nil
+    ) async throws {
+        var firstError: Error?
+        for type in types ?? markdownTypes {
+            do {
+                try await workspace.setDefaultApplication(at: bundle.bundleURL, toOpen: type)
+            } catch {
+                if firstError == nil { firstError = error }
+            }
         }
+        if status(workspace: workspace, bundle: bundle, contentType: statusType).isVulkanGlass { return }
+        throw firstError ?? MarkdownAssociationError.handlerDidNotChange
     }
 
     /// A handler is this app when it has the same bundle identifier, so an installed copy and a
