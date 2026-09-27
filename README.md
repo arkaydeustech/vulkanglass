@@ -44,7 +44,9 @@ mise install
 | `mise run release:build` | Build, notarize, and package a release without publishing |
 | `mise run release:check` | Verify the release prerequisites without building |
 | `mise run release:setup` | One-time Sparkle signing key setup |
-| `mise run test` | Run the `VulkanGlassTests` XCTest suite |
+| `mise run test` | Run the `VulkanGlassTests` XCTest suite and unregister its test build afterward |
+| `mise run clean:registrations` | Unregister this checkout's development builds (`--all` sweeps other build directories; `--dry-run` previews) |
+| `mise run test:clean-registrations` | Run the registration cleanup and XCTest wrapper unit tests |
 | `mise run test:install` | Run the installer unit tests |
 | `mise run test:release` | Run the release script unit tests |
 | `mise run test:lint` | Verify the oxlint rules actually apply |
