@@ -67,17 +67,17 @@ env = { DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer" }
 # Build inside the checkout (not ~/Library/Developer/Xcode/DerivedData) and drop the
 # test host's Launch Services registration afterwards, so worktrees don't leave a
 # stray "VulkanGlass — Quick Look" extension behind in System Settings.
-run = "t() { xcodebuild -project VulkanGlass.xcodeproj -scheme VulkanGlass -destination 'platform=macOS' -derivedDataPath build/test test \"$@\"; s=$?; python3 ./scripts/clean_registrations.py --quiet; return $s; }; t"
+run = "python3 -m scripts.run_xctests"
 raw_args = true
 
 [tasks."clean:registrations"]
-description = "Unregister this checkout's VulkanGlass builds from Launch Services (--all for every stray copy)"
+description = "Unregister this checkout's VulkanGlass builds from Launch Services (--all for Xcode builds elsewhere)"
 run = "python3 ./scripts/clean_registrations.py"
 raw_args = true
 
 [tasks."test:clean-registrations"]
-description = "Run the registration cleanup unit tests with the system Python"
-run = "python3 -m unittest scripts.test_clean_registrations"
+description = "Run registration cleanup and XCTest wrapper unit tests with the system Python"
+run = "python3 -m unittest scripts.test_clean_registrations scripts.test_run_xctests"
 
 [tasks."test:install"]
 description = "Run the installer unit tests with the system Python"

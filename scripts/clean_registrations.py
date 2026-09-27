@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Unregister development copies of Vulkan Glass from Launch Services.
+"""Unregister development builds of Vulkan Glass from Launch Services.
 
-Every VulkanGlass.app that Xcode builds is registered with Launch Services and
-PlugInKit, so each build directory adds another "VulkanGlass — Quick Look" row to
-System Settings › General › Login Items & Extensions. The registrations outlive
-the worktree that produced them. Run this before deleting a worktree (or with
---all to sweep every stray copy on the machine); the installed app in
-/Applications is always kept.
+Xcode registers each built app and its Quick Look extension. Use this before
+deleting a worktree, or --all to sweep development builds across the machine.
+Installed copies outside build directories are kept.
 """
 
 from __future__ import annotations
@@ -14,6 +11,7 @@ from __future__ import annotations
 import argparse
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,53 +31,109 @@ def registered_apps(dump: str) -> list[Path]:
     return sorted(paths)
 
 
+def is_development_copy(app: Path) -> bool:
+    """Recognize Xcode products, including products in deleted worktrees."""
+    parts = app.parts
+    return any(
+        parts[index : index + 2] == ("Build", "Products")
+        for index in range(len(parts) - 1)
+    )
+
+
 def select(apps: list[Path], scope: Path | None) -> list[Path]:
-    """Pick the copies to unregister: never the installed app, and only under
-    `scope` when one is given."""
-    chosen = []
-    for app in apps:
-        if app == INSTALLED:
-            continue
-        if scope is not None and not app.is_relative_to(scope):
-            continue
-        chosen.append(app)
-    return chosen
+    """Select registered development builds, optionally limited to a directory."""
+    return [
+        app
+        for app in apps
+        if is_development_copy(app) and (scope is None or app.resolve().is_relative_to(scope.resolve()))
+    ]
 
 
-def unregister(app: Path) -> None:
-    subprocess.run(["pluginkit", "-r", str(app / APPEX)], check=False, capture_output=True)
-    subprocess.run([str(LSREGISTER), "-u", str(app)], check=False, capture_output=True)
+def run_command(command: list[str]) -> bool:
+    """Run a registration command and report errors even in quiet mode."""
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+    except OSError as error:
+        print(f"Registration command failed: {' '.join(command)}: {error}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        print(f"Registration command failed: {' '.join(command)}: {detail}", file=sys.stderr)
+        return False
+    return True
 
 
-def parse_args() -> argparse.Namespace:
+def unregister(app: Path) -> bool:
+    plugin_removed = run_command(["pluginkit", "-r", str(app / APPEX)])
+    app_removed = run_command([str(LSREGISTER), "-u", str(app)])
+    return plugin_removed and app_removed
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
         "--all",
         action="store_true",
-        help=f"unregister every copy on this Mac except {INSTALLED}, not just this checkout's",
+        help="unregister development builds across this Mac, not just this checkout's",
+    )
+    scope.add_argument(
+        "--scope",
+        type=Path,
+        metavar="DIR",
+        help="unregister only development builds inside this directory",
     )
     parser.add_argument("--dry-run", action="store_true", help="list the copies without unregistering them")
-    parser.add_argument("--quiet", action="store_true", help="only print when something was unregistered")
-    return parser.parse_args()
+    parser.add_argument("--quiet", action="store_true", help="suppress the no-matches message")
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
-    dump = subprocess.run([str(LSREGISTER), "-dump"], check=True, capture_output=True, text=True).stdout
-    scope = None if args.all else ROOT.resolve()
-    apps = select(registered_apps(dump), scope)
+def registration_dump() -> str:
+    return subprocess.run([str(LSREGISTER), "-dump"], check=True, capture_output=True, text=True).stdout
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        registered = registered_apps(registration_dump())
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"Could not read Launch Services registrations: {error}", file=sys.stderr)
+        return 1
+
+    scope = None if args.all else (args.scope or ROOT).expanduser().resolve()
+    apps = select(registered, scope)
     if not apps:
         if not args.quiet:
             print("No development copies of Vulkan Glass are registered.")
-        return
+        return 0
+
+    if args.dry_run:
+        for app in apps:
+            print(f"Would unregister {app}")
+        return 0
+
+    success = True
     for app in apps:
-        print(("Would unregister " if args.dry_run else "Unregistering ") + str(app))
-        if not args.dry_run:
-            unregister(app)
-    if INSTALLED.exists() and not args.dry_run:
-        # Re-register the installed copy so its Quick Look extension stays active.
-        subprocess.run([str(LSREGISTER), "-f", str(INSTALLED)], check=False, capture_output=True)
+        print(f"Unregistering {app}")
+        success = unregister(app) and success
+
+    # Refresh installed copies after removing builds. Include the standard path
+    # even if Launch Services had not listed it in the original dump.
+    installed = {app for app in registered if not is_development_copy(app)}
+    installed.add(INSTALLED)
+    for app in sorted(installed):
+        if app.exists():
+            success = run_command([str(LSREGISTER), "-f", str(app)]) and success
+
+    try:
+        remaining = set(registered_apps(registration_dump())).intersection(apps)
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"Could not verify Launch Services registrations: {error}", file=sys.stderr)
+        return 1
+    for app in sorted(remaining):
+        print(f"Registration remains: {app}", file=sys.stderr)
+    return 0 if success and not remaining else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

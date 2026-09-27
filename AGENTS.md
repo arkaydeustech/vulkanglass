@@ -68,7 +68,7 @@
   outside the worktree survive its deletion as duplicate "VulkanGlass — Quick Look"
   rows in System Settings. After a manual build, run `mise run clean:registrations`
   (`mise run test` does this for you); `mise run clean:registrations --all` sweeps
-  every stray copy except `/Applications/VulkanGlass.app`.
+  Xcode build products across the machine while keeping installed copies.
 
 - Keep authentication dependencies mocked in unit tests; tests must not read real
   credentials or make live GitHub requests.
