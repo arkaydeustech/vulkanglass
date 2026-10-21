@@ -618,11 +618,12 @@ def make_update_feed(app: Path, release: Release) -> tuple[Path, Path]:
 
 
 def discard_app_copies(release: Release) -> None:
-    """Unregister and delete the staged app bundles once they are packaged.
+    """Unregister and delete all release build products once they are packaged.
 
     Launch Services registers every app bundle it finds, so leftover copies show
-    up as extra versions in Finder's Open With menu. The disk image, zip, and
-    archive keep the shipped app.
+    up as extra versions in Finder's Open With menu. Remove the entire build
+    directory, including DerivedData and the xcarchive; the disk image and zip
+    outside it keep the shipped app.
     """
     step("Removing staged app copies")
     build_dir = release.directory / "build"
@@ -640,8 +641,7 @@ def discard_app_copies(release: Release) -> None:
     if cleanup.returncode != 0:
         detail = (cleanup.stderr or cleanup.stdout).strip()
         print(f"Warning: registration cleanup was incomplete: {detail}", file=sys.stderr)
-    for staging in ("export", "dmg"):
-        shutil.rmtree(build_dir / staging, ignore_errors=True)
+    shutil.rmtree(build_dir)
 
 
 def build(release: Release) -> list[Path]:

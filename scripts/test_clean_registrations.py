@@ -75,6 +75,18 @@ class SelectTests(unittest.TestCase):
             ],
         )
 
+    def test_release_scope_includes_derived_data_and_archive_apps(self) -> None:
+        scope = Path("/Users/me/work/vg/output/release/v0.4.1/build")
+        apps = [
+            scope / "DerivedData/Build/Products/Release" / cr.APP_NAME,
+            scope / "VulkanGlass.xcarchive/Products/Applications" / cr.APP_NAME,
+        ]
+        self.assertEqual(cr.select(self.apps + apps, scope), [
+            scope / "dmg" / cr.APP_NAME,
+            scope / "export" / cr.APP_NAME,
+            *apps,
+        ])
+
 
 class CommandTests(unittest.TestCase):
     def test_registration_dump_uses_lsregister(self) -> None:
