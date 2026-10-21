@@ -617,6 +617,33 @@ def make_update_feed(app: Path, release: Release) -> tuple[Path, Path]:
     return archive, appcast
 
 
+def discard_app_copies(release: Release) -> None:
+    """Unregister and delete the staged app bundles once they are packaged.
+
+    Launch Services registers every app bundle it finds, so leftover copies show
+    up as extra versions in Finder's Open With menu. The disk image, zip, and
+    archive keep the shipped app.
+    """
+    step("Removing staged app copies")
+    build_dir = release.directory / "build"
+    cleanup = output(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "clean_registrations.py"),
+            "--quiet",
+            "--scope",
+            str(build_dir),
+        ],
+        check=False,
+    )
+    print(cleanup.stdout, end="")
+    if cleanup.returncode != 0:
+        detail = (cleanup.stderr or cleanup.stdout).strip()
+        print(f"Warning: registration cleanup was incomplete: {detail}", file=sys.stderr)
+    for staging in ("export", "dmg"):
+        shutil.rmtree(build_dir / staging, ignore_errors=True)
+
+
 def build(release: Release) -> list[Path]:
     if release.directory.exists():
         shutil.rmtree(release.directory)
@@ -626,6 +653,7 @@ def build(release: Release) -> list[Path]:
     notarize_app(app, release)
     dmg = make_dmg(app, release)
     archive, appcast = make_update_feed(app, release)
+    discard_app_copies(release)
     notes = release.directory / "release-notes.md"
     notes.write_text(release.notes)
     print(f"\nRelease files are in {release.directory}")

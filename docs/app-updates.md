@@ -35,7 +35,9 @@ stay in that Mac's login Keychain; no release secrets are stored in GitHub.
 5. Creates, signs, notarizes, and staples `VulkanGlass.dmg` for the website.
 6. Zips the app for Sparkle and runs Sparkle's `generate_appcast`, which signs the
    zip with the Keychain key and writes `appcast.xml` with embedded release notes.
-7. Rechecks the commit and clean tree, tags the exact commit that was built,
+7. Unregisters and deletes the staged copies in `build/export` and `build/dmg`, so
+   each release doesn't add another VulkanGlass entry to Finder's Open With menu.
+8. Rechecks the commit and clean tree, tags the exact commit that was built,
    pushes the tag, uploads the disk image, zip, and appcast to a draft GitHub
    release, and publishes it as the latest release once all assets are present.
 

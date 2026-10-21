@@ -387,11 +387,49 @@ class PipelineTests(unittest.TestCase):
                 release, "verify_app", side_effect=record("verify")
             ), mock.patch.object(release, "notarize_app", side_effect=record("notarize")), mock.patch.object(
                 release, "make_dmg", side_effect=record("dmg", dmg)
-            ), mock.patch.object(release, "make_update_feed", side_effect=record("feed", (archive, feed))):
+            ), mock.patch.object(release, "make_update_feed", side_effect=record("feed", (archive, feed))), mock.patch.object(
+                release, "discard_app_copies", side_effect=record("discard")
+            ):
                 assets = release.build(prepared)
-            self.assertEqual(calls, ["archive", "verify", "notarize", "dmg", "feed"])
+            self.assertEqual(calls, ["archive", "verify", "notarize", "dmg", "feed", "discard"])
             self.assertEqual(assets, [dmg, archive, feed])
             self.assertEqual((prepared.directory / "release-notes.md").read_text(), prepared.notes)
+
+    def test_discard_app_copies_unregisters_then_deletes_staged_apps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(release, "WORK", Path(temporary)):
+            prepared = sample_release()
+            build_dir = prepared.directory / "build"
+            for staging in ("export", "dmg"):
+                (build_dir / staging / release.APP_NAME).mkdir(parents=True)
+            archive = build_dir / "VulkanGlass.xcarchive"
+            archive.mkdir()
+            seen = []
+
+            def cleanup(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+                seen.append((command, check, (build_dir / "export" / release.APP_NAME).exists()))
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(release, "output", side_effect=cleanup), contextlib.redirect_stdout(io.StringIO()):
+                release.discard_app_copies(prepared)
+            [(command, check, existed)] = seen
+            self.assertEqual(command[1:], [str(release.ROOT / "scripts" / "clean_registrations.py"), "--quiet", "--scope", str(build_dir)])
+            self.assertFalse(check)
+            self.assertTrue(existed)
+            self.assertFalse((build_dir / "export").exists())
+            self.assertFalse((build_dir / "dmg").exists())
+            self.assertTrue(archive.is_dir())
+
+    def test_discard_app_copies_warns_without_failing_when_cleanup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(release, "WORK", Path(temporary)):
+            prepared = sample_release()
+            (prepared.directory / "build" / "export" / release.APP_NAME).mkdir(parents=True)
+            failed = subprocess.CompletedProcess([], 1, "", "lsregister failed")
+            with mock.patch.object(release, "output", return_value=failed), contextlib.redirect_stdout(
+                io.StringIO()
+            ), contextlib.redirect_stderr(io.StringIO()) as stderr:
+                release.discard_app_copies(prepared)
+            self.assertIn("lsregister failed", stderr.getvalue())
+            self.assertFalse((prepared.directory / "build" / "export").exists())
 
     def test_notarization_requires_accepted_status(self) -> None:
         accepted = subprocess.CompletedProcess([], 0, '{"status":"Accepted"}', "")

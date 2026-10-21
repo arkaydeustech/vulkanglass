@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Unregister development builds of Vulkan Glass from Launch Services.
 
-Xcode registers each built app and its Quick Look extension. Use this before
-deleting a worktree, or --all to sweep development builds across the machine.
-Installed copies outside build directories are kept.
+Xcode registers each built app and its Quick Look extension, and Launch Services
+also registers the copies a release build stages in output/release/<tag>/build.
+Use this before deleting a worktree, or --all to sweep development builds across
+the machine. Installed copies outside build directories are kept.
 """
 
 from __future__ import annotations
@@ -32,10 +33,11 @@ def registered_apps(dump: str) -> list[Path]:
 
 
 def is_development_copy(app: Path) -> bool:
-    """Recognize Xcode products, including products in deleted worktrees."""
+    """Recognize Xcode products and release staging copies, including ones in deleted worktrees."""
     parts = app.parts
     return any(
         parts[index : index + 2] == ("Build", "Products")
+        or (parts[index : index + 2] == ("output", "release") and parts[index + 3 : index + 4] == ("build",))
         for index in range(len(parts) - 1)
     )
 
