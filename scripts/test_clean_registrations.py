@@ -20,6 +20,9 @@ path:                       /Users/me/build/VulkanGlass.app (0x1a2e)
 path:                       /Users/me/work/vg/build/test/Build/Products/Debug/VulkanGlass.app (0x3c4d)
 path:                       /Users/me/work/vg/build/test/Build/Products/Debug/VulkanGlass.app (0x3c4e)
 path:                       /private/tmp/vg-dd/Build/Products/Debug/VulkanGlass.app (0x5e6f)
+path:                       /Users/me/work/vg/output/release/v0.4.1/build/export/VulkanGlass.app (0x6a1b)
+path:                       /Users/me/work/vg/output/release/v0.4.1/build/dmg/VulkanGlass.app (0x6a1c)
+path:                       /Users/me/work/vg/output/release/v0.4.1/VulkanGlass.app (0x6a1d)
 path:                       /Applications/Other.app (0x7a8b)
 """
 
@@ -34,6 +37,9 @@ class RegisteredAppsTests(unittest.TestCase):
                 Path("/Users/me/build/VulkanGlass.app"),
                 Path("/Users/me/custom-apps/VulkanGlass.app"),
                 Path("/Users/me/work/vg/build/test/Build/Products/Debug/VulkanGlass.app"),
+                Path("/Users/me/work/vg/output/release/v0.4.1/VulkanGlass.app"),
+                Path("/Users/me/work/vg/output/release/v0.4.1/build/dmg/VulkanGlass.app"),
+                Path("/Users/me/work/vg/output/release/v0.4.1/build/export/VulkanGlass.app"),
                 Path("/private/tmp/vg-dd/Build/Products/Debug/VulkanGlass.app"),
             ],
         )
@@ -49,14 +55,37 @@ class SelectTests(unittest.TestCase):
             [Path("/Users/me/work/vg/build/test/Build/Products/Debug/VulkanGlass.app")],
         )
 
+    def test_scope_limits_to_release_staging(self) -> None:
+        self.assertEqual(
+            cr.select(self.apps, Path("/Users/me/work/vg/output/release/v0.4.1/build")),
+            [
+                Path("/Users/me/work/vg/output/release/v0.4.1/build/dmg/VulkanGlass.app"),
+                Path("/Users/me/work/vg/output/release/v0.4.1/build/export/VulkanGlass.app"),
+            ],
+        )
+
     def test_all_keeps_standard_and_custom_installs(self) -> None:
         self.assertEqual(
             cr.select(self.apps, None),
             [
                 Path("/Users/me/work/vg/build/test/Build/Products/Debug/VulkanGlass.app"),
+                Path("/Users/me/work/vg/output/release/v0.4.1/build/dmg/VulkanGlass.app"),
+                Path("/Users/me/work/vg/output/release/v0.4.1/build/export/VulkanGlass.app"),
                 Path("/private/tmp/vg-dd/Build/Products/Debug/VulkanGlass.app"),
             ],
         )
+
+    def test_release_scope_includes_derived_data_and_archive_apps(self) -> None:
+        scope = Path("/Users/me/work/vg/output/release/v0.4.1/build")
+        apps = [
+            scope / "DerivedData/Build/Products/Release" / cr.APP_NAME,
+            scope / "VulkanGlass.xcarchive/Products/Applications" / cr.APP_NAME,
+        ]
+        self.assertEqual(cr.select(self.apps + apps, scope), [
+            scope / "dmg" / cr.APP_NAME,
+            scope / "export" / cr.APP_NAME,
+            *apps,
+        ])
 
 
 class CommandTests(unittest.TestCase):
