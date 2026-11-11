@@ -1,0 +1,544 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-11T14:16:38Z",
+  "title": "Design System: Vulkan Glass",
+  "extensions": {
+    "colorMeta": {
+      "lagoon-teal": {
+        "role": "primary",
+        "displayName": "Lagoon Teal",
+        "canonical": "oklch(70.4% 0.123 182.5)",
+        "tonalRamp": [
+          "#00100C",
+          "#002B24",
+          "#00483E",
+          "#007263",
+          "#009786",
+          "#2FBCAB",
+          "#8BE1D2",
+          "#C1FDF2"
+        ]
+      },
+      "lagoon-teal-bright": {
+        "role": "primary",
+        "displayName": "Lagoon Teal Bright",
+        "canonical": "oklch(78.5% 0.132 181.9)",
+        "tonalRamp": [
+          "#00100C",
+          "#002B24",
+          "#00493E",
+          "#007363",
+          "#009986",
+          "#11BEAA",
+          "#84E2D2",
+          "#BEFEF2"
+        ]
+      },
+      "lagoon-teal-deep": {
+        "role": "primary",
+        "displayName": "Lagoon Teal Deep",
+        "canonical": "oklch(60.0% 0.104 183.9)",
+        "tonalRamp": [
+          "#000F0D",
+          "#002924",
+          "#00463F",
+          "#006F64",
+          "#0D9487",
+          "#4EB9AB",
+          "#97DED3",
+          "#C9FBF2"
+        ]
+      },
+      "drop-target-blue": {
+        "role": "secondary",
+        "displayName": "Drop Target Blue",
+        "canonical": "oklch(62.2% 0.187 259.7)",
+        "tonalRamp": [
+          "#000922",
+          "#021E4D",
+          "#06357D",
+          "#0F56C0",
+          "#347BED",
+          "#5DA2FF",
+          "#9BCFFF",
+          "#CAF0FF"
+        ]
+      },
+      "editor-ground-dark": {
+        "role": "neutral",
+        "displayName": "Editor Ground (Dark)",
+        "canonical": "oklch(23.5% 0.000 89.9)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "ink-dark": {
+        "role": "neutral",
+        "displayName": "Ink (Dark)",
+        "canonical": "oklch(89.7% 0.002 247.8)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#212222",
+          "#3A3A3B",
+          "#5D5E5E",
+          "#7F8081",
+          "#A4A5A5",
+          "#CDCECE",
+          "#EEEEEF"
+        ]
+      },
+      "callout-note": {
+        "role": "functional",
+        "displayName": "Callout Note",
+        "canonical": "oklch(69.1% 0.143 254.5)",
+        "tonalRamp": [
+          "#010B1D",
+          "#052143",
+          "#0C3A6D",
+          "#195DA8",
+          "#3D81D3",
+          "#65A7F8",
+          "#A1D1FF",
+          "#CEF2FF"
+        ]
+      },
+      "callout-important": {
+        "role": "functional",
+        "displayName": "Callout Important",
+        "canonical": "oklch(69.3% 0.178 306.1)",
+        "tonalRamp": [
+          "#11041C",
+          "#2C1242",
+          "#4B236C",
+          "#763AA8",
+          "#9B5DD3",
+          "#C084F8",
+          "#E2B8FF",
+          "#FDE0FF"
+        ]
+      },
+      "callout-warning": {
+        "role": "functional",
+        "displayName": "Callout Warning",
+        "canonical": "oklch(79.4% 0.149 76.0)",
+        "tonalRamp": [
+          "#150800",
+          "#351B00",
+          "#583000",
+          "#8A4E00",
+          "#B27000",
+          "#D79621",
+          "#F5C57E",
+          "#FFE8B7"
+        ]
+      },
+      "callout-caution": {
+        "role": "functional",
+        "displayName": "Callout Caution",
+        "canonical": "oklch(63.9% 0.184 23.9)",
+        "tonalRamp": [
+          "#1D0102",
+          "#440509",
+          "#6F0E16",
+          "#AB1C27",
+          "#D84547",
+          "#FF706D",
+          "#FFABA5",
+          "#FFD7D1"
+        ]
+      },
+      "graph-linked": {
+        "role": "functional",
+        "displayName": "Graph Linked",
+        "canonical": "oklch(75.8% 0.181 149.5)",
+        "tonalRamp": [
+          "#001101",
+          "#002C05",
+          "#004B0D",
+          "#00761A",
+          "#009C3D",
+          "#3EC165",
+          "#8FE5A1",
+          "#C4FFCE"
+        ]
+      },
+      "chrome-ground-dark": {
+        "role": "neutral",
+        "displayName": "Chrome Ground (Dark)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "ribbon-ground-dark": {
+        "role": "neutral",
+        "displayName": "Ribbon Ground (Dark)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "editor-ground-light": {
+        "role": "neutral",
+        "displayName": "Editor Ground (Light)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "chrome-ground-light": {
+        "role": "neutral",
+        "displayName": "Chrome Ground (Light)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "ribbon-ground-light": {
+        "role": "neutral",
+        "displayName": "Ribbon Ground (Light)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "ink-light": {
+        "role": "neutral",
+        "displayName": "Ink (Light)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "ink-muted-dark": {
+        "role": "neutral",
+        "displayName": "Muted Ink (Dark)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "ink-muted-light": {
+        "role": "neutral",
+        "displayName": "Muted Ink (Light)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "ink-faint-dark": {
+        "role": "neutral",
+        "displayName": "Faint Ink (Dark)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "ink-faint-light": {
+        "role": "neutral",
+        "displayName": "Faint Ink (Light)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "divider-dark": {
+        "role": "neutral",
+        "displayName": "Divider (Dark)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "divider-light": {
+        "role": "neutral",
+        "displayName": "Divider (Light)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "code-ground-dark": {
+        "role": "neutral",
+        "displayName": "Code Ground (Dark)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      },
+      "code-ground-light": {
+        "role": "neutral",
+        "displayName": "Code Ground (Light)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#222222",
+          "#3A3A3A",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CECECE",
+          "#EEEEEE"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Note title and H1 in the editor."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "H2 in the editor."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "H3 in the editor; deeper headings are 18pt bold."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Note text in a centred column of up to 780pt, +3pt line spacing."
+      },
+      "ui": {
+        "displayName": "UI",
+        "purpose": "Tab titles, sidebar and palette rows."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Uppercase section labels (FILES, RECENT, GITHUB)."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Inline code, fenced code and Raw mode."
+      }
+    },
+    "shadows": [
+      {
+        "name": "error-toast",
+        "value": "0 4px 10px rgba(0,0,0,0.25)",
+        "purpose": "Error toast over .ultraThinMaterial; the only shadow on a container."
+      },
+      {
+        "name": "split-glow",
+        "value": "0 0 5px #14B8A6",
+        "purpose": "Pane divider while being dragged; fades in over 0.18s."
+      }
+    ],
+    "motion": [
+      {
+        "name": "split-glow",
+        "value": "ease-in-out 0.18s",
+        "purpose": "Pane divider glow on drag."
+      },
+      {
+        "name": "toast",
+        "value": "ease-in-out 0.2s",
+        "purpose": "Error toast moves in from the top edge with a fade."
+      },
+      {
+        "name": "drop-zone",
+        "value": "ease-out 0.12s",
+        "purpose": "Pane drop-zone preview while a tab is dragged."
+      }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Ribbon Icon Button",
+      "kind": "nav",
+      "refersTo": "ribbon-button",
+      "description": "32pt icon button in the 44pt ribbon; quiet at rest, teal tint when active.",
+      "html": "<nav class=\"ds-ribbon\"><button class=\"ds-ribbon-btn ds-is-active\" aria-label=\"Files\" aria-pressed=\"true\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z\"/></svg></button><button class=\"ds-ribbon-btn\" aria-label=\"Search\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"7\"/><path d=\"m20 20-3.5-3.5\"/></svg></button></nav>",
+      "css": ".ds-ribbon { display: flex; flex-direction: column; gap: 4px; width: 44px; padding: 6px 0 8px; align-items: center; background: #111111; } .ds-ribbon-btn { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: #999999; cursor: default; } .ds-ribbon-btn:hover { background: rgba(255,255,255,0.08); } .ds-ribbon-btn:focus-visible { outline: 2px solid #14B8A6; outline-offset: 1px; } .ds-ribbon-btn.ds-is-active { background: rgba(20,184,166,0.22); color: #2ED4BF; }"
+    },
+    {
+      "name": "Tab Strip",
+      "kind": "nav",
+      "refersTo": "tab-active",
+      "description": "Square 44pt tabs; the focused pane's active tab joins the editor ground and carries a 2pt teal underline.",
+      "html": "<div class=\"ds-tabs\" role=\"tablist\"><div class=\"ds-tab ds-is-active\" role=\"tab\" aria-selected=\"true\">Writing is telepathy<span class=\"ds-tab-x\" aria-hidden=\"true\">×</span></div><div class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">• Evergreen notes<span class=\"ds-tab-x\" aria-hidden=\"true\">×</span></div></div>",
+      "css": ".ds-tabs { display: flex; height: 44px; background: #161616; border-bottom: 1px solid #2B2B2B; font-family: -apple-system, system-ui, sans-serif; } .ds-tab { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 100px; max-width: 200px; flex: 1; padding: 0 10px; font-size: 13px; color: #999999; border-right: 1px solid #2B2B2B; } .ds-tab:hover { color: #DCDDDE; } .ds-tab.ds-is-active { background: #1E1E1E; color: #DCDDDE; } .ds-tab.ds-is-active::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: #14B8A6; } .ds-tab-x { font-size: 10px; font-weight: 700; color: #666666; }"
+    },
+    {
+      "name": "File Tree Rows",
+      "kind": "custom",
+      "refersTo": "file-row-selected",
+      "description": "Unboxed rows; keyboard focus gets the teal tint, the active note a 2pt leading teal bar.",
+      "html": "<ul class=\"ds-tree\"><li class=\"ds-row\">Philosophy</li><li class=\"ds-row ds-is-active ds-is-focused\">Writing is telepathy</li><li class=\"ds-row ds-is-selected\">On Writing</li></ul>",
+      "css": ".ds-tree { list-style: none; margin: 0; padding: 8px 0; width: 260px; background: #161616; font-family: -apple-system, system-ui, sans-serif; font-size: 13px; color: #DCDDDE; } .ds-row { position: relative; padding: 3px 8px 3px 20px; } .ds-row:hover { background: rgba(255,255,255,0.08); } .ds-row.ds-is-selected { background: rgba(255,255,255,0.08); } .ds-row.ds-is-focused { background: rgba(20,184,166,0.30); } .ds-row.ds-is-active::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: #14B8A6; }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The system borderedProminent button tinted Lagoon Teal.",
+      "html": "<button class=\"ds-btn-primary\">Save</button>",
+      "css": ".ds-btn-primary { font-family: -apple-system, system-ui, sans-serif; font-size: 13px; color: #FFFFFF; background: #14B8A6; border: 0; border-radius: 6px; padding: 3px 12px; box-shadow: inset 0 0.5px 0 rgba(255,255,255,0.25); } .ds-btn-primary:hover { background: #0D9487; } .ds-btn-primary:active { filter: brightness(0.9); } .ds-btn-primary:focus-visible { outline: 3px solid rgba(20,184,166,0.5); outline-offset: 1px; }"
+    },
+    {
+      "name": "Command Palette",
+      "kind": "custom",
+      "refersTo": "command-palette",
+      "description": "560pt material panel, 12pt radius, hairline stroke, no drop shadow.",
+      "html": "<div class=\"ds-palette\"><input class=\"ds-palette-field\" placeholder=\"Type a command…\" aria-label=\"Command\"><div class=\"ds-palette-row\"><span>New note</span><span class=\"ds-hint\">⌘T</span></div><div class=\"ds-palette-row\"><span>Split right</span><span class=\"ds-hint\">⌘\\</span></div></div>",
+      "css": ".ds-palette { width: 560px; max-width: 100%; border-radius: 12px; border: 1px solid #2B2B2B; background: rgba(30,30,30,0.72); backdrop-filter: blur(30px); overflow: hidden; font-family: -apple-system, system-ui, sans-serif; font-size: 13px; color: #DCDDDE; } .ds-palette-field { display: block; width: calc(100% - 28px); margin: 14px; padding: 4px 8px; border: 1px solid #2B2B2B; border-radius: 6px; background: rgba(0,0,0,0.25); color: #DCDDDE; font: inherit; } .ds-palette-field:focus-visible { outline: 3px solid rgba(20,184,166,0.5); } .ds-palette-row { display: flex; justify-content: space-between; padding: 8px 14px; border-top: 1px solid transparent; } .ds-palette-row:first-of-type { border-top-color: #2B2B2B; } .ds-palette-row:hover { background: rgba(255,255,255,0.08); } .ds-hint { font-size: 10px; color: #999999; }"
+    },
+    {
+      "name": "Tag and Badge",
+      "kind": "chip",
+      "refersTo": "chip-latest",
+      "description": "Inline note tag (teal text on 22% teal) and the capsule 'Latest' history badge.",
+      "html": "<p class=\"ds-note-line\"><span class=\"ds-tag\">#evergreen</span> <span class=\"ds-badge\">Latest</span></p>",
+      "css": ".ds-note-line { font-family: -apple-system, system-ui, sans-serif; font-size: 16px; color: #DCDDDE; } .ds-tag { color: #2ED4BF; background: rgba(20,184,166,0.22); } .ds-badge { font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 999px; background: rgba(20,184,166,0.20); color: #0D9487; }"
+    },
+    {
+      "name": "Status Bar",
+      "kind": "custom",
+      "refersTo": "status-bar",
+      "description": "24pt bottom bar on Chrome Ground with a top hairline: vault state left, counts and mode right.",
+      "html": "<footer class=\"ds-status\"><span>Synced · main</span><span>0 backlinks · 68 words · Reading</span></footer>",
+      "css": ".ds-status { display: flex; justify-content: space-between; align-items: center; height: 24px; padding: 0 12px; background: #161616; border-top: 1px solid #2B2B2B; font-family: -apple-system, system-ui, sans-serif; font-size: 11px; color: #999999; }"
+    },
+    {
+      "name": "Note Surface",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Signature: 34pt bold title over 16pt body in a centred column of up to 780pt; teal wiki links and quote bar.",
+      "html": "<article class=\"ds-note\"><h1>Writing is telepathy</h1><p>From <a href=\"#\">On Writing</a> and <a href=\"#\">Evergreen notes</a>.</p><blockquote>The best writing is rewriting.</blockquote></article>",
+      "css": ".ds-note { max-width: 780px; margin: 0 auto; padding: 24px 56px 96px; background: #1E1E1E; color: #DCDDDE; font-family: -apple-system, system-ui, sans-serif; font-size: 16px; line-height: 1.45; } .ds-note h1 { font-size: 34px; font-weight: 700; margin: 0 0 16px; } .ds-note a { color: #2ED4BF; text-decoration: underline; } .ds-note a:hover { color: #14B8A6; } .ds-note a:focus-visible { outline: 2px solid #14B8A6; border-radius: 2px; } .ds-note blockquote { margin: 16px 0; padding-left: 16px; border-left: 2px solid #14B8A6; color: #999999; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Ink on Glass",
+    "overview": "The workspace is a sheet of neutral glass: near-black (or near-white) grounds in three quiet tonal steps, hairline dividers, and system type. Lagoon Teal is the ink. It marks what is linked, selected, focused or active: wiki links and tags, the active ribbon icon, the focused tab's underline, the keyboard row in the file tree, the text caret, and the active node in the graph. Teal ink on glass is the whole identity. Everything else stays out of the way so the note can lead.\n\nThe layout is the familiar vault workspace: a ribbon, a file tree, tabbed and splittable editor panes, and a right sidebar for graph, backlinks, outline and tags. It is drawn as a native Mac app, not a copy of Obsidian. The chrome is dense and precise: 44pt title bar, 24pt status bar, 13pt UI text. The writing surface is generous: 16pt body in a centred column of up to 780pt, 56pt side insets, and 96pt of run-out below the last line.\n\nControls are quiet until touched. They sit flush with the chrome, without borders or boxes, and show themselves only through a rounded tint on hover, selection or focus. They follow macOS conventions: system controls, menus, sheets and keyboard shortcuts. The app must never read as a web page in a window.",
+    "keyCharacteristics": [
+      "One ink: Lagoon Teal is the only brand colour. Other hues are functional (drop target, callouts, graph, syntax).",
+      "Flat, tonal depth: three grounds and 1pt dividers. Material and shadow only on floating, transient surfaces.",
+      "SF Pro throughout, with SF Mono for code. No brand typeface.",
+      "Dense chrome, spacious prose.",
+      "Light and Dark are equal citizens, built from paired tokens."
+    ],
+    "rules": [
+      {
+        "name": "The One Ink Rule",
+        "body": "Lagoon Teal is the only colour that means \"this is yours, active, or linked\". Functional hues signal a specific job (drop here, warning, linked node) and never decorate.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tint, Don't Fill Rule",
+        "body": "Teal shows up as a translucent tint behind a control (18–30%) or a 2pt bar. It is never a solid teal slab behind chrome. The exception is the prominent button, which uses the system's own tinted style.",
+        "section": "colors"
+      },
+      {
+        "name": "The System Voice Rule",
+        "body": "Use SF Pro and SF Mono through the system font APIs. No bundled or brand typefaces. Hierarchy is size and weight, never a second family.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-at-Rest Rule",
+        "body": "Resting surfaces never cast shadows. Shadow and material belong to floating, transient surfaces (palettes, toasts, drag previews) and to state (the split glow).",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do take every colour, size and inset from `VGTheme`. Add new tokens there, with a dark and a light value, rather than writing `Color(red:…)` or `NSColor(red:…)` literals in a view.",
+      "Do use Lagoon Teal as a tint (18–30%) or a 2pt bar to mark active, selected, focused or linked. Use Lagoon Teal Bright when teal is the text or glyph colour.",
+      "Do use system controls (`.borderedProminent`, segmented pickers, toggles, sheets, confirmation dialogs, native search fields) and SF Symbols, sized to the 13pt UI and 15pt icon scale.",
+      "Do keep depth tonal: ribbon, then chrome, then editor ground, with 1pt dividers.",
+      "Do keep prose in the centred column of up to 780pt, at 16pt with +3pt leading.",
+      "Do design every surface in both Light and Dark."
+    ],
+    "donts": [
+      "Don't make the app look like a web app in a window: no custom web-style buttons, CSS-like cards, hover-only affordances without keyboard equivalents, or reinvented system controls.",
+      "Don't clone Obsidian's look. Keep the familiar vault layout, but not its purple identity or its exact chrome. The ink is Lagoon Teal.",
+      "Don't put shadows on resting surfaces (Flat-at-Rest Rule). Shadow and material are for palettes, toasts, drag previews and the split glow.",
+      "Don't use Drop Target Blue or the callout hues for anything other than their job.",
+      "Don't introduce a second type family. Hierarchy is SF Pro size and weight."
+    ]
+  }
+}
